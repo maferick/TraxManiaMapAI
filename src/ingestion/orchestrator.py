@@ -1,0 +1,335 @@
+"""Map-ingestion orchestrator.
+
+Wires :class:`TmxClient`, DB access, and the artifact store into a
+single resumable pass. Resumability comes from two properties that
+compose:
+
+- the HTTP cache (see ``cache.py``) makes re-listing TMX free
+- the UPSERT on ``maps`` is idempotent on the natural key
+  ``(source_system, source_map_id, ingestion_snapshot)``
+
+A stage_run row is opened at start and updated at end. Snapshots are
+created if they don't exist; a second invocation against the same
+snapshot_id resumes rather than overwriting.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Mapping
+
+from pymysql.connections import Connection
+
+from src.storage.mariadb import cursor
+
+from .artifacts import ArtifactStore
+from .http import HttpError
+from .tmx import TmxClient, TmxMapSummary
+
+_LOG = logging.getLogger(__name__)
+
+_MAP_SOURCE_SYSTEM = "tmx"
+
+
+@dataclass
+class IngestionStats:
+    started_at: datetime
+    snapshot_id: str
+    source_system: str
+    maps_seen: int = 0
+    maps_inserted: int = 0
+    maps_updated: int = 0
+    artifacts_downloaded: int = 0
+    artifacts_failed: int = 0
+    summary_failures: int = 0
+    completed_at: datetime | None = None
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def duration_ms(self) -> int | None:
+        if self.completed_at is None:
+            return None
+        return int((self.completed_at - self.started_at).total_seconds() * 1000)
+
+    def to_summary_json(self) -> dict[str, Any]:
+        return {
+            "maps_seen": self.maps_seen,
+            "maps_inserted": self.maps_inserted,
+            "maps_updated": self.maps_updated,
+            "artifacts_downloaded": self.artifacts_downloaded,
+            "artifacts_failed": self.artifacts_failed,
+            "summary_failures": self.summary_failures,
+            "error_count": len(self.errors),
+        }
+
+
+def _utcnow() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def ensure_snapshot(
+    conn: Connection,
+    *,
+    snapshot_id: str,
+    source_system: str,
+    user_agent: str,
+    rate_limit_rps: float,
+    resolved_config_hash: str,
+    code_version: str,
+    notes: str | None = None,
+) -> None:
+    """Insert the snapshot row if it doesn't exist. Idempotent."""
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO ingestion_snapshots (
+                snapshot_id, source_system, started_at, user_agent,
+                rate_limit_rps, resolved_config_hash, code_version, notes
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE snapshot_id = snapshot_id
+            """,
+            (
+                snapshot_id,
+                source_system,
+                _utcnow(),
+                user_agent,
+                Decimal(str(rate_limit_rps)),
+                resolved_config_hash,
+                code_version,
+                notes,
+            ),
+        )
+    conn.commit()
+
+
+def open_stage_run(
+    conn: Connection,
+    *,
+    stage: str,
+    stage_version: str,
+    resolved_config_hash: str,
+    code_version: str,
+    input_ref: str,
+) -> int:
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO stage_runs (
+                stage, stage_version, started_at, resolved_config_hash,
+                code_version, input_ref, status
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'running')
+            """,
+            (stage, stage_version, _utcnow(), resolved_config_hash, code_version, input_ref),
+        )
+        stage_run_id = cur.lastrowid
+    conn.commit()
+    return int(stage_run_id)
+
+
+def close_stage_run(
+    conn: Connection,
+    stage_run_id: int,
+    *,
+    status: str,
+    output_summary: Mapping[str, Any] | None,
+    error_taxonomy_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    completed_at = _utcnow()
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            UPDATE stage_runs
+               SET completed_at = %s,
+                   duration_ms = TIMESTAMPDIFF(MICROSECOND, started_at, %s) DIV 1000,
+                   output_summary = %s,
+                   status = %s,
+                   error_taxonomy_code = %s,
+                   error_message = %s
+             WHERE id = %s
+            """,
+            (
+                completed_at,
+                completed_at,
+                json.dumps(dict(output_summary)) if output_summary is not None else None,
+                status,
+                error_taxonomy_code,
+                error_message,
+                stage_run_id,
+            ),
+        )
+    conn.commit()
+
+
+def _upsert_map(
+    conn: Connection,
+    *,
+    summary: TmxMapSummary,
+    snapshot_id: str,
+    parser_version: str,
+    created_by_version: str,
+) -> tuple[int, bool]:
+    """UPSERT a maps row. Returns (map_id, inserted_new)."""
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO maps (
+                source_system, source_map_id, ingestion_snapshot,
+                title, author, environment, style_tags_raw,
+                length_estimate_ms, award_count, average_rating, popularity_metric,
+                has_items, is_block_mode,
+                parser_version, parse_status,
+                created_by_version
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'unparsed', %s)
+            ON DUPLICATE KEY UPDATE
+                title              = VALUES(title),
+                author             = VALUES(author),
+                environment        = VALUES(environment),
+                style_tags_raw     = VALUES(style_tags_raw),
+                length_estimate_ms = VALUES(length_estimate_ms),
+                award_count        = VALUES(award_count),
+                average_rating     = VALUES(average_rating),
+                popularity_metric  = VALUES(popularity_metric),
+                has_items          = VALUES(has_items),
+                is_block_mode      = VALUES(is_block_mode)
+            """,
+            (
+                _MAP_SOURCE_SYSTEM,
+                summary.tmx_id,
+                snapshot_id,
+                summary.title,
+                summary.author,
+                summary.environment,
+                json.dumps(summary.style_tags_raw),
+                summary.length_estimate_ms,
+                summary.award_count,
+                (
+                    Decimal(str(summary.average_rating))
+                    if summary.average_rating is not None
+                    else None
+                ),
+                summary.popularity_metric,
+                int(summary.has_items),
+                int(summary.is_block_mode),
+                parser_version,
+                created_by_version,
+            ),
+        )
+        affected = cur.rowcount
+        cur.execute(
+            "SELECT id FROM maps WHERE source_system=%s AND source_map_id=%s "
+            "AND ingestion_snapshot=%s",
+            (_MAP_SOURCE_SYSTEM, summary.tmx_id, snapshot_id),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    if row is None:
+        raise RuntimeError(
+            f"UPSERT succeeded but SELECT returned nothing for {summary.tmx_id}"
+        )
+    # rowcount: 1 = inserted new, 2 = updated existing (MariaDB convention)
+    inserted_new = affected == 1
+    return int(row[0]), inserted_new
+
+
+def _record_artifact(
+    conn: Connection,
+    *,
+    map_id: int,
+    content_hash: str,
+    artifact_path: str,
+) -> None:
+    with cursor(conn) as cur:
+        cur.execute(
+            "UPDATE maps SET raw_artifact_hash=%s, raw_artifact_path=%s WHERE id=%s",
+            (content_hash, artifact_path, map_id),
+        )
+    conn.commit()
+
+
+class MapIngestor:
+    def __init__(
+        self,
+        *,
+        tmx: TmxClient,
+        conn: Connection,
+        artifact_store: ArtifactStore,
+        snapshot_id: str,
+        parser_version: str,
+        created_by_version: str,
+        max_maps: int | None = None,
+        download_artifacts: bool = True,
+    ) -> None:
+        self._tmx = tmx
+        self._conn = conn
+        self._store = artifact_store
+        self._snapshot_id = snapshot_id
+        self._parser_version = parser_version
+        self._created_by_version = created_by_version
+        self._max_maps = max_maps
+        self._download_artifacts = download_artifacts
+
+    def run(self) -> IngestionStats:
+        stats = IngestionStats(
+            started_at=_utcnow(),
+            snapshot_id=self._snapshot_id,
+            source_system=_MAP_SOURCE_SYSTEM,
+        )
+        try:
+            for summary in self._tmx.iter_map_summaries():
+                if self._max_maps is not None and stats.maps_seen >= self._max_maps:
+                    break
+                stats.maps_seen += 1
+                try:
+                    map_id, inserted = _upsert_map(
+                        self._conn,
+                        summary=summary,
+                        snapshot_id=self._snapshot_id,
+                        parser_version=self._parser_version,
+                        created_by_version=self._created_by_version,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    stats.summary_failures += 1
+                    stats.errors.append(f"upsert {summary.tmx_id}: {exc}")
+                    _LOG.error("UPSERT failed for %s: %s", summary.tmx_id, exc)
+                    continue
+                if inserted:
+                    stats.maps_inserted += 1
+                else:
+                    stats.maps_updated += 1
+
+                if self._download_artifacts:
+                    self._fetch_and_store_artifact(summary.tmx_id, map_id, stats)
+        finally:
+            stats.completed_at = _utcnow()
+        return stats
+
+    def _fetch_and_store_artifact(
+        self,
+        tmx_id: str,
+        map_id: int,
+        stats: IngestionStats,
+    ) -> None:
+        try:
+            response = self._tmx.download_map_artifact(tmx_id)
+        except HttpError as exc:
+            stats.artifacts_failed += 1
+            stats.errors.append(f"download {tmx_id}: {exc}")
+            _LOG.warning("artifact download failed for %s: %s", tmx_id, exc)
+            return
+        if response.status_code != 200:
+            stats.artifacts_failed += 1
+            stats.errors.append(
+                f"download {tmx_id}: HTTP {response.status_code}"
+            )
+            return
+        digest, path = self._store.write(response.content)
+        _record_artifact(
+            self._conn, map_id=map_id, content_hash=digest, artifact_path=str(path)
+        )
+        stats.artifacts_downloaded += 1

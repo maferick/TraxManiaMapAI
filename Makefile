@@ -6,11 +6,11 @@
         test lint format
 
 help:
-	@echo "Targets (most are stubs in PR 1):"
+	@echo "Targets:"
 	@echo "  dev-up                 - start MariaDB + Neo4j via docker compose"
 	@echo "  dev-down               - stop local services"
-	@echo "  migrate                - apply MariaDB + Neo4j migrations (PR 3)"
-	@echo "  ingest-sample          - run a sample ingestion (PR 3)"
+	@echo "  migrate                - apply MariaDB migrations"
+	@echo "  ingest-sample          - run a sample TMX ingestion (limit 50)"
 	@echo "  replay-clean-sample    - run replay cleaning on fixtures (PR 4)"
 	@echo "  extract-route-sample   - run route inference on fixtures (PR 5)"
 	@echo "  eval-benchmark-sample  - run evaluators on benchmark set (PR 7)"
@@ -26,16 +26,16 @@ dev-down:
 	docker compose -f docker/docker-compose.yml down
 
 migrate:
-	@echo "migrate: stub (PR 3)"
+	python -m src.cli migrate
 
 ingest-sample:
-	@echo "ingest-sample: stub (PR 3)"
+	python -m src.cli ingest-maps --limit 50
 
 replay-clean-sample:
-	@echo "replay-clean-sample: stub (PR 4)"
+	python -m src.cli replay-clean --limit 100 && python -m src.cli assign-cohorts
 
 extract-route-sample:
-	@echo "extract-route-sample: stub (PR 5)"
+	python -m src.cli extract-route
 
 eval-benchmark-sample:
 	@echo "eval-benchmark-sample: stub (PR 7)"
@@ -44,7 +44,7 @@ constraints-sample:
 	@echo "constraints-sample: stub (PR 6)"
 
 test:
-	@echo "test: stub — pytest wired up alongside first real code"
+	pytest
 
 lint:
 	@echo "lint: stub — ruff + mypy wired up alongside first real code"

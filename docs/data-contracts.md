@@ -1,9 +1,9 @@
 # Data Contracts
 
-**Status:** stub. Concrete schema lands in PR 3 (`migrations/mariadb/`).
-
 This file describes the canonical entities and the provenance contract.
-Field lists are indicative; exact types/indexes are decided in PR 3.
+The shipped schema lives in `migrations/mariadb/` (PR 3). Field lists
+here track the shipped columns; adding a column is a new migration plus
+a doc update.
 
 ## Provenance contract (applies to every derived entity)
 
@@ -53,8 +53,10 @@ Every pipeline stage run records a `stage_run` row with:
 - player metadata (where available)
 - finish time, rank metadata
 - `ingestion_snapshot`
-- `clean_status` (`clean` | `usable_with_warnings` | `rejected`)
-- `cohort_membership` (set: intent, performance, robustness)
+- `clean_status` (`unprocessed` | `clean` | `usable_with_warnings` | `rejected`)
+- `clean_version` (semver of the cleaning stage; pinned per row)
+- `cohort_membership` (JSON array with any of: `intent`, `performance`, `robustness`)
+- `clean_diagnostics` (JSON: per-rule evidence from PR 4's rule stack)
 - `raw_artifact_path`, `raw_artifact_hash`
 
 ### ReplayFeatures (derived)
@@ -70,11 +72,16 @@ representation.
 ### RouteArtifact
 
 - `map_id`, `route_version`
-- centerline artifact (path reference)
-- branch definitions
-- segment boundaries
-- extraction provenance (clustering method, parameters, replay cohort used)
-- extraction confidence + diagnostics
+- `centerline_path` — filesystem location under `storage.artifacts.root/routes/<hash>/<hash>.json`
+- `centerline_hash` — SHA-256 of the canonical JSON body
+- `branches` — JSON list of `BranchCandidate` entries
+- `segment_boundaries` — JSON list of `SegmentBoundary` entries
+- `clustering_method` + `clustering_params` — pluggable clusterer provenance
+- `replay_cohort` — which cohort's replays fed the extraction (typically `intent`)
+- `extraction_confidence` — DECIMAL(5,4), from the extractor's confidence heuristic
+- `diagnostics` — JSON blob of per-run stats (seed replay id, sample count, cluster count, …)
+- `created_by_version` — extractor stage version
+- `source_artifact_ids` — mapping of upstream replay ids → their content hashes
 
 ### EvaluationArtifact
 

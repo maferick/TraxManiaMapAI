@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://traxmaniamapai.local/schemas/benchmark-manifest/v1",
+  "title": "Benchmark Manifest",
+  "description": "Frozen, versioned description of a benchmark set. Raw map/replay data lives outside git; this manifest pins what the set refers to by content hash. See docs/benchmark-policy.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "benchmark_id",
+    "version",
+    "category",
+    "ingestion_snapshot",
+    "released_at",
+    "author",
+    "entries",
+    "rationale"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Version of the manifest schema itself. Current release: 1.",
+      "type": "integer",
+      "const": 1
+    },
+    "benchmark_id": {
+      "description": "Stable id for the benchmark set, independent of version. Must match the filename stem prefix (i.e. <benchmark_id>-v<version>.yaml).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*[a-z0-9]$",
+      "minLength": 2,
+      "maxLength": 64
+    },
+    "version": {
+      "description": "Monotonic integer version. Starts at 1. Changes require a new file; editing an existing version in place is forbidden.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "category": {
+      "description": "One of the Phase 1 seed categories. See docs/benchmark-policy.md.",
+      "type": "string",
+      "enum": [
+        "strong_tech",
+        "mediocre_tech",
+        "off_style",
+        "alternate_line",
+        "shortcut_skip",
+        "rare_valid_transition",
+        "structurally_broken",
+        "replay_noisy"
+      ]
+    },
+    "ingestion_snapshot": {
+      "description": "The ingestion snapshot id that this manifest resolves its entries against.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}(-[a-z0-9_-]+)?$",
+      "minLength": 7,
+      "maxLength": 64
+    },
+    "released_at": {
+      "description": "ISO 8601 date (YYYY-MM-DD) on which this version was frozen.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "author": {
+      "description": "Email or stable handle of the person who released this version.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128
+    },
+    "rationale": {
+      "description": "Why this benchmark exists and what it measures. Must be substantive — the review step rejects empty or generic rationale.",
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 4000
+    },
+    "supersedes": {
+      "description": "If this version replaces a previous version, name it here as <benchmark_id>-v<N>.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*[a-z0-9]-v[1-9][0-9]*$"
+    },
+    "notes": {
+      "description": "Free-form release notes. Not parsed.",
+      "type": "string",
+      "maxLength": 8000
+    },
+    "tags": {
+      "description": "Optional labels. Must not encode validity or score — those are per-entry labels.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]*$",
+        "minLength": 1,
+        "maxLength": 48
+      },
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "entries": {
+      "description": "Non-empty list of benchmark entries. Each entry pins a map by canonical id and content hash.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/Entry"
+      }
+    }
+  },
+  "$defs": {
+    "Entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["map_id", "content_hash", "role", "label"],
+      "properties": {
+        "map_id": {
+          "description": "Canonical map id from the ingestion snapshot named at the top level.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "content_hash": {
+          "description": "SHA-256 of the referenced raw artifact, lowercase hex. Verified at load time.",
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "role": {
+          "description": "How the entry is used during evaluation.",
+          "type": "string",
+          "enum": ["primary", "reference", "negative"]
+        },
+        "label": {
+          "description": "Hand-curated labels. TMX self-reported tags are not permitted as ground truth. Schema is category-specific and is validated downstream — only structural presence is enforced here.",
+          "type": "object",
+          "minProperties": 1
+        },
+        "comment": {
+          "description": "Optional per-entry note. Kept in-manifest, not in a sidecar file.",
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

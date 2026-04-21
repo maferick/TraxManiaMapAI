@@ -10,13 +10,13 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full operating mandate and
 
 ## Status
 
-| PR  | Scope                               | State      |
-|-----|-------------------------------------|------------|
-| 1   | Repo bootstrap (this PR)            | in progress |
-| 2   | Evaluation governance               | not started |
-| 3   | Canonical schema + ingestion        | not started |
-| 4   | Replay cleaning                     | not started |
-| 5   | Route inference scaffold            | not started |
+| PR  | Scope                               | State       |
+|-----|-------------------------------------|-------------|
+| 1   | Repo bootstrap                      | done        |
+| 2   | Evaluation governance               | done        |
+| 3   | Canonical schema + ingestion        | done        |
+| 4   | Replay cleaning                     | done        |
+| 5   | Route inference scaffold            | in progress |
 | 6   | Constraint graph                    | not started |
 | 7   | Evaluator dry-run                   | not started |
 
@@ -89,9 +89,18 @@ surrogate is treated as an operational subsystem, not a static model — see
 
 ## Known limitations
 
-- No parser integration yet — GBX.NET boundary is planned but not built.
-- No live TMX ingestion — rate limiting, caching, and snapshot tagging are
-  specified but not implemented.
+- No GBX wrapper binary yet — the subprocess boundary
+  (`src/parsers/`) and wire protocol are in place, but an actual
+  GBX.NET wrapper is needed to produce real map-structured output and
+  replay telemetry. The replay-cleaning pipeline (PR 4) consumes
+  telemetry JSON sidecars that do not exist yet; unit + integration
+  tests run against synthetic telemetry built from
+  `tests/unit/_telemetry_builders.py`.
+- TMX endpoint paths are scaffolded with placeholder URLs. Swap in
+  real paths via `config/settings.yaml` before a real ingestion.
+- All cleaning + cohort thresholds are initial calibration targets.
+  They get re-tuned against real distributions once PR 3 ingestion
+  has run at scale (see `docs/evaluation-plan.md` Milestone A).
 - No evaluator logic — only the governance scaffolding exists.
 - No Neo4j adjacency graph — schema design only.
 

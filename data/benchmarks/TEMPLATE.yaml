@@ -1,0 +1,71 @@
+# Benchmark manifest template.
+#
+# Copy this file to data/benchmarks/<benchmark_id>/<benchmark_id>-v1.yaml
+# and fill in the values. Validate with:
+#
+#   python -m src.benchmarks validate <path>
+#
+# The canonical schema is data/benchmarks/benchmark-manifest.schema.json.
+# See docs/benchmark-policy.md for the release process.
+#
+# DO NOT commit this file itself with real values — it is a template.
+# Concrete manifests go in their own benchmark_id/ subdirectory.
+
+schema_version: 1
+
+# Stable identity of the set, independent of version.
+benchmark_id: example-benchmark
+
+# Monotonic integer. v1 for the first release, v2 for the next, etc.
+# Editing an existing version in place is forbidden.
+version: 1
+
+# One of: strong_tech, mediocre_tech, off_style, alternate_line,
+# shortcut_skip, rare_valid_transition, structurally_broken, replay_noisy.
+category: strong_tech
+
+# The ingestion snapshot whose canonical map ids these entries reference.
+# Format: YYYY-MM[-suffix]. Example: 2026-04-tmx.
+ingestion_snapshot: 2026-04-tmx
+
+# ISO 8601 date on which this version was frozen. Set on merge.
+released_at: 2026-04-21
+
+# Email or stable handle of the releasing author.
+author: you@example.com
+
+# Why this benchmark exists and what it measures. Minimum 20 characters.
+# The review step rejects generic rationale.
+rationale: >
+  Placeholder rationale. Replace this with a concrete description of what
+  this set measures and why its current membership is the right one.
+
+# Optional: name the version this one supersedes, if any.
+# supersedes: example-benchmark-v0
+
+# Optional free-form release notes.
+# notes: |
+#   Initial release. Three entries are placeholders from fixtures until
+#   real ingestion lands.
+
+# Optional labels. Must not encode validity or score.
+# tags:
+#   - phase1
+#   - seed
+
+# Non-empty list of entries. Each entry pins a map by canonical id and
+# content hash.
+entries:
+  - map_id: example_map_001
+    # Quote the hash — YAML would otherwise interpret an all-numeric string as
+    # an integer. Real hashes (lowercase hex) need no quoting, but keep the
+    # quotes in templates so copy-paste-edited placeholders don't fail schema.
+    content_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    role: primary            # primary | reference | negative
+    label:
+      # Hand-curated labels only. TMX self-reported tags are not
+      # permitted as ground truth. The label object's concrete shape
+      # is category-specific and is validated downstream.
+      hand_curated: true
+    comment: >
+      Optional per-entry note explaining why this map is in the set.
