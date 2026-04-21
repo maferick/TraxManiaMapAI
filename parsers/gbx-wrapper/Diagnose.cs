@@ -1,11 +1,13 @@
-// Diagnostic mode: inspect the block structure of a real .Map.Gbx to
-// figure out where real coordinates live. Invoked as
-//   <wrapper> diagnose-map
-// with the artifact path on stdin, same protocol as `map`/`replay`.
+// Diagnostic mode: inspect the block / anchored-object structure of a
+// real .Map.Gbx. Invoked as `<wrapper> diagnose-map` with the artifact
+// path on stdin, same protocol as `map`/`replay`.
 //
-// Output: JSON with {blocks_total, baked_blocks_total, is_free_count,
-// sentinel_coord_count, samples_*} so the Python side can reason about
-// what the wrapper is actually seeing.
+// Output: JSON with block counts, free/sentinel breakdown, anchored-
+// object samples, and a reflection dump of all CGameCtnChallenge
+// properties whose name contains "Mood" or "Decoration" (scenery
+// ground-truthing).
+
+using System.Reflection;
 
 using GBX.NET;
 using GBX.NET.Engines.Game;
@@ -27,7 +29,18 @@ internal static class Diagnose
             ["blocks_total"] = map.Blocks?.Count ?? 0,
             ["baked_blocks_total"] = map.BakedBlocks?.Count ?? 0,
             ["anchored_objects_total"] = map.AnchoredObjects?.Count ?? 0,
+            ["mood_candidates"] = ReflectMatching(map, new[] { "Mood", "Decoration", "Day", "Weather" }),
         };
+
+        if (map.AnchoredObjects is { Count: > 0 })
+        {
+            var sample = new List<Dictionary<string, object?>>();
+            foreach (var obj in map.AnchoredObjects.Take(3))
+            {
+                sample.Add(DumpProperties(obj));
+            }
+            result["anchored_object_sample"] = sample;
+        }
 
         if (map.Blocks is not null)
         {
@@ -39,6 +52,36 @@ internal static class Diagnose
         }
 
         return result;
+    }
+
+    private static Dictionary<string, object?> ReflectMatching(object target, string[] nameSubstrings)
+    {
+        var hits = new Dictionary<string, object?>();
+        foreach (var prop in target.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (!nameSubstrings.Any(s => prop.Name.Contains(s, StringComparison.OrdinalIgnoreCase))) continue;
+            object? value;
+            try { value = prop.GetValue(target); }
+            catch (Exception ex) { value = $"<throws: {ex.GetType().Name}>"; }
+            hits[prop.Name] = value?.ToString();
+        }
+        return hits;
+    }
+
+    private static Dictionary<string, object?> DumpProperties(object target)
+    {
+        var dict = new Dictionary<string, object?>
+        {
+            ["_type"] = target.GetType().FullName,
+        };
+        foreach (var prop in target.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            object? value;
+            try { value = prop.GetValue(target); }
+            catch (Exception ex) { value = $"<throws: {ex.GetType().Name}>"; continue; }
+            dict[prop.Name] = value?.ToString();
+        }
+        return dict;
     }
 
     private static void InspectCollection(

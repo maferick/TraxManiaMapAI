@@ -58,7 +58,8 @@ internal static class MapParser
             }
         }
 
-        bool hasItems = map.AnchoredObjects is { Count: > 0 };
+        var scenery = ExtractScenery(map);
+        bool hasItems = (int)(scenery["item_count"] ?? 0) > 0;
 
         return new Dictionary<string, object?>
         {
@@ -70,7 +71,67 @@ internal static class MapParser
             ["is_block_mode"] = blocks.Count > 0,
             ["baked_block_count"] = map.BakedBlocks?.Count ?? 0,
             ["blocks"] = blocks,
+            ["scenery"] = scenery,
         };
+    }
+
+    // Author id shipped with every standard Nadeo item. Anything else is
+    // a custom user-imported item.
+    private const string StandardItemAuthor = "Nadeo";
+
+    // Mood suffix encoded in Decoration.Id; TM2020 ships these four.
+    private static readonly string[] MoodSuffixes = { "Sunrise", "Sunset", "Night", "Day" };
+
+    private static Dictionary<string, object?> ExtractScenery(CGameCtnChallenge map)
+    {
+        string? decorationId = map.Decoration?.Id;
+        string? mood = DetectMood(decorationId);
+
+        int itemCount = 0;
+        int signpostCount = 0;
+        int standardCount = 0;
+        int customCount = 0;
+        if (map.AnchoredObjects is { } items)
+        {
+            itemCount = items.Count;
+            foreach (var obj in items)
+            {
+                bool isSignpost = obj.WaypointSpecialProperty is not null;
+                if (isSignpost) signpostCount++;
+                var model = obj.ItemModel;
+                // Author may be null on degenerate items; treat as custom.
+                bool isStandard = string.Equals(model.Author, StandardItemAuthor,
+                    StringComparison.Ordinal);
+                if (isStandard) standardCount++;
+                else customCount++;
+            }
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["mood"] = mood,
+            ["decoration_id"] = decorationId,
+            ["day_time_seconds"] = map.DayTime is { } dt ? (int)dt.TotalSeconds : null,
+            ["dynamic_daylight"] = map.DynamicDaylight,
+            ["item_count"] = itemCount,
+            ["signpost_count"] = signpostCount,
+            ["standard_item_count"] = standardCount,
+            ["custom_item_count"] = customCount,
+            ["has_custom_items"] = customCount > 0,
+        };
+    }
+
+    private static string? DetectMood(string? decorationId)
+    {
+        if (string.IsNullOrEmpty(decorationId)) return null;
+        foreach (var suffix in MoodSuffixes)
+        {
+            if (decorationId.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                return suffix;
+            }
+        }
+        return null;
     }
 
     private static Dictionary<string, object?> BlockToDict(CGameCtnBlock b)

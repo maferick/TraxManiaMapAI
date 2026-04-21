@@ -93,6 +93,11 @@ class _UnparsedMap:
     source_map_id: str
     raw_artifact_path: str
     raw_artifact_hash: str | None
+    current_parse_status: str
+
+    @property
+    def needs_full_parse(self) -> bool:
+        return self.current_parse_status != "success"
 
 
 def _utcnow() -> datetime:
@@ -106,16 +111,24 @@ def _fetch_unparsed(
     limit: int | None,
     retry_transient: bool,
 ) -> list[_UnparsedMap]:
-    statuses: list[str] = ["unparsed"]
+    # A row is picked up if ANY of the following is true:
+    #   parse_status = 'unparsed'                                 (fresh)
+    #   parse_status = 'failed_transient' AND retry_transient     (retry)
+    #   parse_status = 'success' AND decoration_parse_status = 'unparsed'
+    #                                                             (retro-fill)
+    # The third case covers maps that were parsed before migration 011
+    # added scenery columns.
+    clauses: list[str] = [
+        "parse_status = 'unparsed'",
+        "(parse_status = 'success' AND decoration_parse_status = 'unparsed')",
+    ]
     if retry_transient:
-        statuses.append("failed_transient")
-    placeholders = ",".join(["%s"] * len(statuses))
+        clauses.append("parse_status = 'failed_transient'")
     sql = (
-        "SELECT id, source_map_id, raw_artifact_path, raw_artifact_hash "
-        f"FROM maps WHERE parse_status IN ({placeholders}) "
-        "AND raw_artifact_path IS NOT NULL"
+        "SELECT id, source_map_id, raw_artifact_path, raw_artifact_hash, parse_status "
+        f"FROM maps WHERE raw_artifact_path IS NOT NULL AND ({ ' OR '.join(clauses) })"
     )
-    params: list[Any] = list(statuses)
+    params: list[Any] = []
     if snapshot_id is not None:
         sql += " AND ingestion_snapshot = %s"
         params.append(snapshot_id)
@@ -132,6 +145,7 @@ def _fetch_unparsed(
             source_map_id=str(r[1]),
             raw_artifact_path=str(r[2]),
             raw_artifact_hash=(str(r[3]) if r[3] is not None else None),
+            current_parse_status=str(r[4]),
         )
         for r in rows
     ]
@@ -230,7 +244,37 @@ UPDATE maps SET
     author = COALESCE(%s, author),
     environment = COALESCE(%s, environment),
     has_items = COALESCE(%s, has_items),
-    is_block_mode = COALESCE(%s, is_block_mode)
+    is_block_mode = COALESCE(%s, is_block_mode),
+    mood = %s,
+    decoration_id = %s,
+    day_time_seconds = %s,
+    dynamic_daylight = %s,
+    scenery_item_count = %s,
+    signpost_count = %s,
+    scenery_standard_item_count = %s,
+    scenery_custom_item_count = %s,
+    has_custom_items = %s,
+    decoration_parse_status = 'success'
+WHERE id = %s
+"""
+
+
+# Scenery-only refresh. Used when parse_status is already 'success' but
+# decoration_parse_status is 'unparsed' — i.e. retro-fill on maps
+# ingested before migration 011. Doesn't touch parse_status or
+# block_placements.
+_UPDATE_MAP_SCENERY_SQL = """
+UPDATE maps SET
+    mood = %s,
+    decoration_id = %s,
+    day_time_seconds = %s,
+    dynamic_daylight = %s,
+    scenery_item_count = %s,
+    signpost_count = %s,
+    scenery_standard_item_count = %s,
+    scenery_custom_item_count = %s,
+    has_custom_items = %s,
+    decoration_parse_status = 'success'
 WHERE id = %s
 """
 
@@ -240,7 +284,11 @@ UPDATE maps SET
     parse_status = %s,
     parse_error_code = %s,
     parse_error_detail = %s,
-    parser_version = %s
+    parser_version = %s,
+    decoration_parse_status = CASE
+        WHEN decoration_parse_status = 'success' THEN decoration_parse_status
+        ELSE 'failed'
+    END
 WHERE id = %s
 """
 
@@ -330,7 +378,26 @@ class MapParsePipeline:
             )
             return
 
-        self._write_success(row, result, stats)
+        if row.needs_full_parse:
+            self._write_success(row, result, stats)
+        else:
+            self._write_scenery_only(row, result, stats)
+
+    def _scenery_params(
+        self, scenery: Mapping[str, Any]
+    ) -> tuple[Any, ...]:
+        """Return the 9-tuple of scenery values shared by both UPDATE SQLs."""
+        return (
+            scenery.get("mood"),
+            scenery.get("decoration_id"),
+            _as_int(scenery.get("day_time_seconds")),
+            _maybe_bool(scenery.get("dynamic_daylight")),
+            _as_int(scenery.get("item_count")),
+            _as_int(scenery.get("signpost_count")),
+            _as_int(scenery.get("standard_item_count")),
+            _as_int(scenery.get("custom_item_count")),
+            _maybe_bool(scenery.get("has_custom_items")),
+        )
 
     def _write_success(
         self,
@@ -340,6 +407,7 @@ class MapParsePipeline:
     ) -> None:
         output = result.output or {}
         blocks = output.get("blocks") or []
+        scenery = output.get("scenery") or {}
         source_ids = {
             "map": str(row.id),
             "raw_artifact_hash": row.raw_artifact_hash or "",
@@ -370,6 +438,7 @@ class MapParsePipeline:
                         output.get("environment"),
                         _maybe_bool(output.get("has_items")),
                         _maybe_bool(output.get("is_block_mode")),
+                        *self._scenery_params(scenery),
                         row.id,
                     ),
                 )
@@ -393,6 +462,33 @@ class MapParsePipeline:
         stats.total_blocks_written += grid + free
         stats.grid_blocks_written += grid
         stats.free_blocks_written += free
+
+    def _write_scenery_only(
+        self,
+        row: _UnparsedMap,
+        result: ParseResult,
+        stats: ParseStats,
+    ) -> None:
+        """Retro-fill scenery on maps that were fully parsed before
+        migration 011 added scenery columns. Skips block_placements
+        entirely — those rows are already present.
+        """
+        output = result.output or {}
+        scenery = output.get("scenery") or {}
+        try:
+            with cursor(self._conn) as cur:
+                cur.execute(
+                    _UPDATE_MAP_SCENERY_SQL,
+                    (*self._scenery_params(scenery), row.id),
+                )
+            self._conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            self._conn.rollback()
+            stats.maps_failed_transient += 1
+            stats.errors.append(f"map={row.id} scenery update failed: {exc}")
+            _LOG.exception("scenery update failed on map %d", row.id)
+            return
+        stats.maps_parsed += 1
 
     def _write_failure(
         self,

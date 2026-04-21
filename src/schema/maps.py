@@ -33,6 +33,21 @@ class Map:
     has_items: bool = False
     is_block_mode: bool = True
 
+    # Scenery metadata (migration 011). Populated by the map-parse
+    # stage; see src/parsers/pipeline.py::_scenery_params. Kept as
+    # aggregate counts on the map row — per-item rows are out of
+    # scope until a use case demands them.
+    mood: str | None = None
+    decoration_id: str | None = None
+    day_time_seconds: int | None = None
+    dynamic_daylight: bool | None = None
+    scenery_item_count: int | None = None
+    signpost_count: int | None = None
+    scenery_standard_item_count: int | None = None
+    scenery_custom_item_count: int | None = None
+    has_custom_items: bool | None = None
+    decoration_parse_status: str = "unparsed"
+
     parse_status: ParseStatus = ParseStatus.UNPARSED
     parse_error_code: ParseErrorCode | None = None
     parse_error_detail: str | None = None
