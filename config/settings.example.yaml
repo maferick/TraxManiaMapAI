@@ -1,0 +1,79 @@
+# Copy to config/settings.yaml and fill in local values. Do not commit settings.yaml.
+# All thresholds in this file are indicative placeholders; real values are
+# decided in PR 2 (evaluation governance) and PR 3 (schema + ingestion).
+
+app:
+  env: local
+  log_level: INFO
+
+storage:
+  mariadb:
+    host: localhost
+    port: 3306
+    user: trackmania
+    password: CHANGE_ME
+    database: trackmania_ai
+  neo4j:
+    uri: bolt://localhost:7687
+    user: neo4j
+    password: CHANGE_ME
+  artifacts:
+    # Large binary artifacts (raw maps, raw replays, derived blobs) live on
+    # the filesystem, not in MariaDB rows. DB stores path + content hash.
+    root: ./data/artifacts
+
+ingestion:
+  tmx:
+    base_url: https://tmxexample.invalid/api  # placeholder; set in PR 3
+    user_agent: "trackmania-ai-ingest/0.1 (contact: CHANGE_ME)"
+    # Rate limit — be polite. TMX is community-run.
+    requests_per_second: 1.0
+    max_concurrent: 2
+    cache_dir: ./data/cache/tmx
+    retry:
+      max_attempts: 4
+      backoff_seconds: [2, 4, 8, 16]
+  snapshot:
+    # Each ingestion run tags its artifacts with this snapshot id so
+    # benchmarks and evaluators can pin a reproducible view of the world.
+    id: ""  # e.g. "2026-04-tmx"
+    created_at: ""
+
+parsers:
+  gbx:
+    # GBX.NET is isolated behind a subprocess boundary. The Python layer
+    # never links the .NET runtime directly.
+    mode: subprocess          # subprocess | http
+    executable: ""            # path to GBX.NET wrapper binary
+    http_url: ""              # used when mode=http
+    timeout_seconds: 30
+
+replay_cleaning:
+  # Thresholds — placeholders, finalized in PR 4.
+  max_teleport_distance: 0.0
+  max_speed_mps: 0.0
+  min_valid_duration_seconds: 0.0
+  zero_motion_window_seconds: 0.0
+
+route_inference:
+  # Clustering is pluggable. Do not hardcode DBSCAN anywhere.
+  clusterer: dbscan           # dbscan | hdbscan | per_segment
+  dbscan:
+    eps: 0.0
+    min_samples: 0
+  hdbscan:
+    min_cluster_size: 0
+  cohort: intent              # intent | performance | robustness
+
+evaluation:
+  evaluator_version: "v0.0.0"
+  benchmark_set_version: ""
+  # Surrogate is refreshed against the recent generated-track distribution,
+  # not only historical community maps. See docs/surrogate-policy.md.
+  surrogate:
+    version: ""
+    drift_threshold: 0.0
+
+provenance:
+  # The hash of the resolved config dict is recorded with every stage_run.
+  config_hash_algorithm: sha256

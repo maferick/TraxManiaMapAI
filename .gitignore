@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Secrets / local config
+config/settings.yaml
+.env
+.env.*
+!.env.example
+
+# Local data / artifacts — never commit these
+data/raw/
+data/cache/
+data/artifacts/
+data/replays/
+data/maps/
+reports/
+logs/
+*.log
+
+# Benchmark *manifests* live in git; raw benchmark data does not
+data/benchmarks/raw/
+
+# Databases / volumes
+docker/volumes/
+*.sqlite
+*.db
+
+# Parser boundary
+parsers/_build/
+parsers/bin/
+parsers/obj/

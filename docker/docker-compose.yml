@@ -1,0 +1,32 @@
+# Local dev services. Stub only — not tuned for production.
+# Start with: docker compose -f docker/docker-compose.yml up -d
+# Volumes are gitignored under docker/volumes/.
+
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: trackmania_ai_mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: root_CHANGE_ME
+      MARIADB_DATABASE: trackmania_ai
+      MARIADB_USER: trackmania
+      MARIADB_PASSWORD: CHANGE_ME
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./volumes/mariadb:/var/lib/mysql
+      - ../migrations/mariadb:/docker-entrypoint-initdb.d:ro
+
+  neo4j:
+    image: neo4j:5
+    container_name: trackmania_ai_neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/CHANGE_ME
+    ports:
+      - "7474:7474"   # HTTP
+      - "7687:7687"   # Bolt
+    volumes:
+      - ./volumes/neo4j/data:/data
+      - ./volumes/neo4j/logs:/logs
