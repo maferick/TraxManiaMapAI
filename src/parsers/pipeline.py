@@ -516,3 +516,264 @@ def _maybe_bool(value: Any) -> int | None:
     if value is None:
         return None
     return 1 if bool(value) else 0
+
+
+# =============================================================================
+# Replay parsing
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class _UnparsedReplay:
+    id: int
+    source_replay_id: str
+    raw_artifact_path: str
+    raw_artifact_hash: str | None
+
+
+@dataclass
+class ReplayParseStats:
+    started_at: datetime
+    replays_seen: int = 0
+    replays_parsed: int = 0
+    replays_failed_transient: int = 0
+    replays_failed_permanent: int = 0
+    sidecars_written: int = 0
+    errors: list[str] = field(default_factory=list)
+    completed_at: datetime | None = None
+
+    def to_summary_json(self) -> dict[str, Any]:
+        return {
+            "replays_seen": self.replays_seen,
+            "replays_parsed": self.replays_parsed,
+            "replays_failed_transient": self.replays_failed_transient,
+            "replays_failed_permanent": self.replays_failed_permanent,
+            "sidecars_written": self.sidecars_written,
+            "error_count": len(self.errors),
+        }
+
+
+def _fetch_unparsed_replays(
+    conn: Connection,
+    *,
+    snapshot_id: str | None,
+    limit: int | None,
+    retry_transient: bool,
+) -> list[_UnparsedReplay]:
+    statuses = ["unparsed"]
+    if retry_transient:
+        statuses.append("failed_transient")
+    placeholders = ",".join(["%s"] * len(statuses))
+    sql = (
+        "SELECT id, source_replay_id, raw_artifact_path, raw_artifact_hash "
+        f"FROM replays WHERE parse_status IN ({placeholders}) "
+        "AND raw_artifact_path IS NOT NULL"
+    )
+    params: list[Any] = list(statuses)
+    if snapshot_id is not None:
+        sql += " AND ingestion_snapshot = %s"
+        params.append(snapshot_id)
+    sql += " ORDER BY id"
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(int(limit))
+    with cursor(conn) as cur:
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+    return [
+        _UnparsedReplay(
+            id=int(r[0]),
+            source_replay_id=str(r[1]),
+            raw_artifact_path=str(r[2]),
+            raw_artifact_hash=(str(r[3]) if r[3] is not None else None),
+        )
+        for r in rows
+    ]
+
+
+_UPDATE_REPLAY_SUCCESS_SQL = """
+UPDATE replays SET
+    parse_status = 'success',
+    parse_error_code = NULL,
+    parse_error_detail = NULL,
+    finish_time_ms = COALESCE(finish_time_ms, %s),
+    player_login = COALESCE(player_login, %s)
+WHERE id = %s
+"""
+
+
+_UPDATE_REPLAY_FAILURE_SQL = """
+UPDATE replays SET
+    parse_status = %s,
+    parse_error_code = %s,
+    parse_error_detail = %s
+WHERE id = %s
+"""
+
+
+class ReplayParsePipeline:
+    """Parse unparsed replays via the wrapper, write telemetry sidecars.
+
+    For each replay:
+      1. Invoke the wrapper on raw_artifact_path.
+      2. On success, write ``<raw_artifact_path>.telemetry.json`` with
+         the wrapper's output payload (the
+         :class:`src.replay.pipeline.FileTelemetryLoader` expects
+         exactly this sidecar).
+      3. Update ``replays.parse_status`` + opportunistically backfill
+         ``finish_time_ms`` / ``player_login`` if they're NULL.
+
+    Like the map-parse pipeline, one transaction per replay. Sidecar
+    writing is atomic (temp file + rename).
+    """
+
+    def __init__(
+        self,
+        *,
+        conn: Connection,
+        parser: ParserClient,
+    ) -> None:
+        self._conn = conn
+        self._parser = parser
+
+    def run(
+        self,
+        *,
+        snapshot_id: str | None = None,
+        max_replays: int | None = None,
+        retry_transient: bool = False,
+    ) -> ReplayParseStats:
+        stats = ReplayParseStats(started_at=_utcnow())
+        try:
+            replays = _fetch_unparsed_replays(
+                self._conn,
+                snapshot_id=snapshot_id,
+                limit=max_replays,
+                retry_transient=retry_transient,
+            )
+            for row in replays:
+                stats.replays_seen += 1
+                self._process_one(row, stats)
+        finally:
+            stats.completed_at = _utcnow()
+        return stats
+
+    def _process_one(
+        self, row: _UnparsedReplay, stats: ReplayParseStats
+    ) -> None:
+        path = Path(row.raw_artifact_path)
+        if not path.is_file():
+            stats.replays_failed_transient += 1
+            stats.errors.append(
+                f"replay={row.id}: raw_artifact_path missing on disk: {path}"
+            )
+            self._write_failure(
+                row.id,
+                status=ParseStatus.FAILED_TRANSIENT,
+                error_code=ParseErrorCode.IO_ERROR,
+                error_detail=f"artifact missing: {path}",
+            )
+            return
+        try:
+            result = self._parser.parse_replay(path)
+        except Exception as exc:  # noqa: BLE001
+            stats.replays_failed_transient += 1
+            stats.errors.append(f"replay={row.id} wrapper crash: {exc}")
+            _LOG.exception("wrapper crashed on replay %d", row.id)
+            self._write_failure(
+                row.id,
+                status=ParseStatus.FAILED_TRANSIENT,
+                error_code=ParseErrorCode.WRAPPER_CRASH,
+                error_detail=f"{type(exc).__name__}: {exc}"[:2000],
+            )
+            return
+
+        if result.status is not ParseStatus.SUCCESS or result.output is None:
+            bucket = (
+                "replays_failed_permanent"
+                if result.status is ParseStatus.FAILED_PERMANENT
+                else "replays_failed_transient"
+            )
+            setattr(stats, bucket, getattr(stats, bucket) + 1)
+            stats.errors.append(
+                f"replay={row.id} parse failed: {result.error_code.value}"
+            )
+            self._write_failure(
+                row.id,
+                status=result.status,
+                error_code=result.error_code,
+                error_detail=result.error_detail,
+            )
+            return
+
+        self._write_success(row, result.output, stats)
+
+    def _write_success(
+        self,
+        row: _UnparsedReplay,
+        output: Mapping[str, Any],
+        stats: ReplayParseStats,
+    ) -> None:
+        sidecar_path = Path(row.raw_artifact_path + ".telemetry.json")
+        try:
+            import os
+            tmp = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
+            sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(output, fh, separators=(",", ":"))
+                fh.flush()
+                os.fsync(fh.fileno())
+            tmp.replace(sidecar_path)
+            stats.sidecars_written += 1
+        except Exception as exc:  # noqa: BLE001
+            stats.replays_failed_transient += 1
+            stats.errors.append(
+                f"replay={row.id} sidecar write failed: {exc}"
+            )
+            self._write_failure(
+                row.id,
+                status=ParseStatus.FAILED_TRANSIENT,
+                error_code=ParseErrorCode.IO_ERROR,
+                error_detail=f"sidecar write: {exc}"[:2000],
+            )
+            return
+
+        finish_time_ms = output.get("finish_time_ms")
+        player_login = output.get("player_login")
+        try:
+            with cursor(self._conn) as cur:
+                cur.execute(
+                    _UPDATE_REPLAY_SUCCESS_SQL,
+                    (
+                        _as_int(finish_time_ms),
+                        player_login,
+                        row.id,
+                    ),
+                )
+            self._conn.commit()
+            stats.replays_parsed += 1
+        except Exception as exc:  # noqa: BLE001
+            self._conn.rollback()
+            stats.replays_failed_transient += 1
+            stats.errors.append(f"replay={row.id} db update failed: {exc}")
+            _LOG.exception("replay status update failed on %d", row.id)
+
+    def _write_failure(
+        self,
+        replay_id: int,
+        *,
+        status: ParseStatus,
+        error_code: ParseErrorCode,
+        error_detail: str | None,
+    ) -> None:
+        with cursor(self._conn) as cur:
+            cur.execute(
+                _UPDATE_REPLAY_FAILURE_SQL,
+                (
+                    status.value,
+                    error_code.value,
+                    (error_detail or "")[:2000] or None,
+                    replay_id,
+                ),
+            )
+        self._conn.commit()

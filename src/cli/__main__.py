@@ -27,7 +27,7 @@ from src.replay import (
 )
 from src.benchmarks.manifest import load as load_benchmark
 from src.constraints import ConstraintGraphPipeline
-from src.parsers import MapParsePipeline, SubprocessParser
+from src.parsers import MapParsePipeline, ReplayParsePipeline, SubprocessParser
 from src.evaluation import (
     AdjacencyGraphEvaluator,
     Evaluator,
@@ -81,6 +81,69 @@ def _cmd_neo4j_migrate(args: argparse.Namespace) -> int:
 
 _PARSE_STAGE = "parse_maps"
 _PARSE_STAGE_VERSION = "0.1.0"
+_PARSE_REPLAYS_STAGE = "parse_replays"
+
+
+def _cmd_parse_replays(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    gbx_cfg = (config.get("parsers") or {}).get("gbx") or {}
+    executable = Path(
+        args.parser_executable
+        or gbx_cfg.get("executable")
+        or "./parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper"
+    )
+    timeout = float(gbx_cfg.get("timeout_seconds", 30.0))
+    parser_version = args.parser_version
+    sha = code_version()
+    config_hash = resolve_config_hash(config)
+    conn = open_connection(config)
+    parser = SubprocessParser(
+        executable=executable,
+        parser_version=parser_version,
+        timeout_seconds=timeout,
+    )
+    try:
+        input_ref = (
+            f"snapshot={args.snapshot or 'ALL'};retry_transient={args.retry_transient}"
+        )
+        stage_run_id = open_stage_run(
+            conn,
+            stage=_PARSE_REPLAYS_STAGE,
+            stage_version=_PARSE_STAGE_VERSION,
+            resolved_config_hash=config_hash,
+            code_version=sha,
+            input_ref=input_ref,
+        )
+        pipeline = ReplayParsePipeline(conn=conn, parser=parser)
+        try:
+            stats = pipeline.run(
+                snapshot_id=args.snapshot,
+                max_replays=args.limit,
+                retry_transient=args.retry_transient,
+            )
+        except Exception as exc:  # noqa: BLE001
+            close_stage_run(
+                conn, stage_run_id, status="failed", output_summary=None,
+                error_taxonomy_code="unhandled", error_message=str(exc)[:2000],
+            )
+            _LOG.exception("parse-replays crashed")
+            return 1
+        status = "partial" if stats.errors else "success"
+        close_stage_run(
+            conn, stage_run_id, status=status, output_summary=stats.to_summary_json()
+        )
+        _LOG.info(
+            "parse-replays %s: seen=%d parsed=%d transient=%d permanent=%d sidecars=%d",
+            status,
+            stats.replays_seen,
+            stats.replays_parsed,
+            stats.replays_failed_transient,
+            stats.replays_failed_permanent,
+            stats.sidecars_written,
+        )
+        return 0 if status == "success" else 1
+    finally:
+        conn.close()
 
 
 def _cmd_parse_maps(args: argparse.Namespace) -> int:
@@ -885,6 +948,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="re-parse maps whose previous attempt was failed_transient",
     )
     parse_maps_cmd.set_defaults(func=_cmd_parse_maps)
+
+    parse_replays_cmd = sub.add_parser(
+        "parse-replays",
+        help="Parse unparsed replays via the GBX wrapper; writes telemetry.json sidecars",
+    )
+    parse_replays_cmd.add_argument("--snapshot", type=str, default=None)
+    parse_replays_cmd.add_argument("--limit", type=int, default=None)
+    parse_replays_cmd.add_argument("--parser-version", type=str, default="0.1.0")
+    parse_replays_cmd.add_argument("--parser-executable", type=str, default=None)
+    parse_replays_cmd.add_argument("--retry-transient", action="store_true")
+    parse_replays_cmd.set_defaults(func=_cmd_parse_replays)
 
     replay_clean_cmd = sub.add_parser(
         "replay-clean", help="Classify unprocessed replays via the rule stack"

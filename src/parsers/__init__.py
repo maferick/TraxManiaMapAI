@@ -4,6 +4,8 @@ from .errors import ParseErrorCode, ParseStatus, is_transient, status_for_error
 from .pipeline import (
     MapParsePipeline,
     ParseStats,
+    ReplayParsePipeline,
+    ReplayParseStats,
     direction_to_rotation,
     extract_block_family,
 )
@@ -16,6 +18,8 @@ __all__ = [
     "ParseStats",
     "ParseStatus",
     "ParserClient",
+    "ReplayParsePipeline",
+    "ReplayParseStats",
     "SubprocessParser",
     "direction_to_rotation",
     "extract_block_family",

@@ -145,4 +145,80 @@ internal static class Diagnose
         into[$"{prefix}_sample_free"] = freeSamples;
         into[$"{prefix}_sample_sentinel"] = sentinelSamples;
     }
+
+    public static Dictionary<string, object?> InspectReplay(string path)
+    {
+        var replay = Gbx.ParseNode<CGameCtnReplayRecord>(path)
+                     ?? throw new InvalidDataException("not a CGameCtnReplayRecord");
+
+        var result = new Dictionary<string, object?>
+        {
+            ["_type"] = replay.GetType().FullName,
+            ["ghosts_count"] = replay.Ghosts?.Count ?? 0,
+            ["replay_reflection"] = ReflectMatching(
+                replay, new[] { "Race", "Time", "Map", "Ghost", "Player" }),
+        };
+
+        if (replay.Ghosts is { Count: > 0 })
+        {
+            var ghost = replay.Ghosts[0];
+            var g = new Dictionary<string, object?>
+            {
+                ["_type"] = ghost.GetType().FullName,
+                ["GhostLogin"] = ghost.GhostLogin,
+                ["GhostNickname"] = ghost.GhostNickname,
+                ["RaceTime"] = ghost.RaceTime?.ToString(),
+            };
+            // Probe raw + compressed data + all properties that might
+            // carry samples. Log whatever we find.
+            try
+            {
+                g["RawData_is_null"] = ghost.RawData is null;
+                g["CompressedData_is_null"] = ghost.CompressedData is null;
+                if (ghost.RawData is not null)
+                {
+                    g["RawData_length"] = ghost.RawData.Data?.Length ?? 0;
+                }
+                if (ghost.CompressedData is not null)
+                {
+                    g["CompressedData_length"] = ghost.CompressedData.Data?.Length ?? 0;
+                }
+                var sampleData = ghost.SampleData;
+                g["sample_data_is_null"] = sampleData is null;
+                if (sampleData is not null)
+                {
+                    var samples = sampleData.Samples;
+                    g["sample_data_type"] = sampleData.GetType().FullName;
+                    g["samples_count"] = samples?.Count ?? 0;
+                    if (samples is { Count: > 0 })
+                    {
+                        g["first_sample_reflection"] = DumpProperties(samples[0]);
+                    }
+                    // Dump ALL properties of the Data object so we can see
+                    // what's actually populated
+                    g["sample_data_reflection"] = DumpProperties(sampleData);
+                }
+            }
+            catch (Exception ex)
+            {
+                g["sample_data_error"] = $"{ex.GetType().Name}: {ex.Message}";
+            }
+            result["ghost"] = g;
+            if (ghost.RecordData is not null)
+            {
+                result["record_data_reflection"] = DumpProperties(ghost.RecordData);
+            }
+            result["checkpoints_count"] = ghost.Checkpoints?.Length ?? 0;
+            if (ghost.Checkpoints is { Length: > 0 })
+            {
+                result["checkpoints_sample"] = new[]
+                {
+                    DumpProperties(ghost.Checkpoints[0]),
+                    DumpProperties(ghost.Checkpoints[^1]),
+                };
+            }
+        }
+
+        return result;
+    }
 }

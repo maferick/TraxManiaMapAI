@@ -1,30 +1,26 @@
 // Replay-side parser. Produces the JSON shape required by
-// src/replay/telemetry.py::from_dict (ReplayTelemetry schema v1).
+// src/replay/telemetry.py::from_dict (ReplayTelemetry schema v1),
+// extended with checkpoint + record-data metadata we CAN get without
+// decoding TM2020's internal entity-record format.
 //
-// Shape:
-//   {
-//     "schema_version":            1,
-//     "source_replay_id":          string,
-//     "sample_rate_hz":            int,
-//     "player_login":              string?,
-//     "finish_time_ms":            int?,
-//     "samples": [
-//       { "time_ms": int, "x": f, "y": f, "z": f,
-//         "vx": f, "vy": f, "vz": f },
-//       ...
-//     ],
-//     "checkpoint_sample_indices": int[],
-//     "restart_sample_indices":    int[]
-//   }
+// Honest limitation: GBX.NET 2.4.x exposes TM2020 ghost position /
+// velocity telemetry only as raw `byte[]` deltas inside
+// CPlugEntRecordData.EntList[i].Samples, with no high-level decoder.
+// Extracting (x, y, z, vx, vy, vz) per frame would require
+// reverse-engineering the internal entity-record format, which is a
+// separate project (a GBX.NET upstream contribution at minimum).
 //
-// GBX.NET exposes ghost-sample access through CGameGhost.SampleData.
-// The exact field names vary across major versions; this scaffold
-// uses reflection-free access where stable and falls back to an
-// empty samples array when a wrapper-version / GBX.NET-version skew
-// is encountered. The telemetry sidecar is always emitted alongside
-// any successful parse — downstream cleaning interprets an empty
-// samples array as "no telemetry", which the incomplete rule
-// rejects appropriately.
+// Until that's built, we emit:
+//   samples: []                 — no per-tick telemetry
+//   checkpoint_times_ms: [...]  — exact checkpoint + finish times
+//   record_data: {...}          — Start/End + entity list counts
+//   inputs_count                — total input events (proxy for driving activity)
+//
+// Downstream: replay-cleaning rules that operate on metadata alone
+// (restart, spectator, invalid_timing) still work. Rules that need
+// samples (teleport, outlier_speed, zero_motion) will classify these
+// as FAILED_TRANSIENT via incomplete, which is correct — we don't
+// have enough data to judge them.
 
 using GBX.NET;
 using GBX.NET.Engines.Game;
@@ -44,16 +40,43 @@ internal static class ReplayParser
         var samples = new List<Dictionary<string, object?>>();
         string? playerLogin = null;
         int? finishTimeMs = null;
+        var checkpointTimesMs = new List<int>();
+        Dictionary<string, object?>? recordMeta = null;
+        int? inputsCount = null;
 
         var firstGhost = replay.Ghosts?.Count > 0 ? replay.Ghosts[0] : null;
         if (firstGhost is not null)
         {
             playerLogin = firstGhost.GhostLogin ?? firstGhost.GhostNickname;
-            // GBX.NET exposes RaceTime on ghosts as TimeInt32?. Its
-            // TotalMilliseconds accessor yields a double we coerce to int.
             if (firstGhost.RaceTime is { } rt)
             {
                 finishTimeMs = (int)rt.TotalMilliseconds;
+            }
+            if (firstGhost.Checkpoints is { Length: > 0 } cps)
+            {
+                foreach (var cp in cps)
+                {
+                    if (cp.Time is { } ct)
+                    {
+                        checkpointTimesMs.Add((int)ct.TotalMilliseconds);
+                    }
+                }
+            }
+            if (firstGhost.Inputs is { IsDefaultOrEmpty: false } inputs)
+            {
+                inputsCount = inputs.Length;
+            }
+            if (firstGhost.RecordData is { } rd)
+            {
+                recordMeta = new Dictionary<string, object?>
+                {
+                    ["start_ms"] = (int)rd.Start.TotalMilliseconds,
+                    ["end_ms"] = (int)rd.End.TotalMilliseconds,
+                    ["ent_record_desc_count"] = rd.EntRecordDescs?.Length ?? 0,
+                    ["ent_list_count"] = rd.EntList?.Count ?? 0,
+                    ["notice_list_count"] = rd.BulkNoticeList?.Count ?? 0,
+                    ["custom_modules_count"] = rd.CustomModulesDeltaLists?.Count ?? 0,
+                };
             }
             AppendGhostSamples(firstGhost, samples);
         }
@@ -68,12 +91,12 @@ internal static class ReplayParser
             ["samples"] = samples,
             ["checkpoint_sample_indices"] = Array.Empty<int>(),
             ["restart_sample_indices"] = Array.Empty<int>(),
+            ["checkpoint_times_ms"] = checkpointTimesMs,
+            ["record_data"] = recordMeta,
+            ["inputs_count"] = inputsCount,
         };
     }
 
-    // GBX.NET's CGameGhost.SampleData.Samples shape is documented in the
-    // upstream README. Each sample exposes Time, Position, Velocity.
-    // Guard against null SampleData for header-only ghosts.
     private static void AppendGhostSamples(
         CGameCtnGhost ghost, List<Dictionary<string, object?>> into)
     {
@@ -82,13 +105,11 @@ internal static class ReplayParser
         {
             return;
         }
-
         foreach (var s in sampleData.Samples)
         {
-            int timeMs = (int)s.Time.TotalMilliseconds;
             into.Add(new Dictionary<string, object?>
             {
-                ["time_ms"] = timeMs,
+                ["time_ms"] = (int)s.Time.TotalMilliseconds,
                 ["x"] = (double)s.Position.X,
                 ["y"] = (double)s.Position.Y,
                 ["z"] = (double)s.Position.Z,

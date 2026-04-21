@@ -62,9 +62,14 @@ class TelemetryLoader(Protocol):
 class FileTelemetryLoader:
     """Reads ``<raw_artifact_path>.telemetry.json`` emitted by the wrapper.
 
-    The wrapper binary is external and does not exist yet; this loader
-    is the contract for once it does. Tests substitute an in-memory
-    loader that bypasses the filesystem.
+    Sidecars with ``samples: []`` are treated as a clean load failure
+    (``TelemetryLoadError``) rather than a format error. The current
+    TM2020 GBX wrapper can't decode position telemetry (entity-record
+    stream requires format-specific decoding GBX.NET doesn't expose),
+    so empty-samples sidecars are the expected signal that telemetry
+    isn't extractable. The pipeline routes these to the clean
+    ``telemetry_unavailable`` rejection path with no samples of
+    position-dependent rules raising.
     """
 
     def load(self, replay: ReplayRow) -> ReplayTelemetry:
@@ -77,6 +82,12 @@ class FileTelemetryLoader:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise TelemetryLoadError(f"{path} is not valid JSON: {exc}") from exc
+        samples = payload.get("samples")
+        if not samples:
+            raise TelemetryLoadError(
+                f"sidecar {path.name} has no position samples "
+                "(TM2020 entity-record decoding not supported by this wrapper build)"
+            )
         return from_dict(payload)
 
 
