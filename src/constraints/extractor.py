@@ -53,6 +53,12 @@ def extract_adjacencies(
     """
     by_cell: dict[tuple[int, int, int], BlockKey] = {}
     for p in placements:
+        # Free blocks have no grid cell — they're positioned by world
+        # coordinate and don't participate in axis-neighbor adjacency.
+        # They can still contribute to a future directed-transition
+        # graph, but that's a different edge type.
+        if p.is_free or p.x is None or p.y is None or p.z is None:
+            continue
         cell = (p.x, p.y, p.z)
         # Scaffold policy: first block wins for a given cell. Revisit
         # if real TM2020 data shows multi-block cells are common.

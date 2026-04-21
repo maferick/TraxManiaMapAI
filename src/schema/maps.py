@@ -46,6 +46,13 @@ class Map:
 
 @dataclass(frozen=True)
 class BlockPlacement:
+    """One block on a map. Grid or free — see ``is_free``.
+
+    Invariant (migration 010):
+      is_free=False → x/y/z set, abs_*/yaw/pitch/roll None
+      is_free=True  → x/y/z None, abs_x/abs_y/abs_z set, yaw/pitch/roll set
+    """
+
     id: int | None
     map_id: int
     parser_version: str
@@ -55,9 +62,17 @@ class BlockPlacement:
     block_family: str
     block_type: str
     placement_index: int
-    x: int
-    y: int
-    z: int
+
+    x: int | None = None
+    y: int | None = None
+    z: int | None = None
+    is_free: bool = False
+    abs_x: Decimal | None = None
+    abs_y: Decimal | None = None
+    abs_z: Decimal | None = None
+    yaw: float | None = None
+    pitch: float | None = None
+    roll: float | None = None
 
     variant: str | None = None
     rotation: int = 0
