@@ -1,6 +1,12 @@
 # Copy to config/settings.yaml and fill in local values. Do not commit settings.yaml.
-# All thresholds in this file are indicative placeholders; real values are
-# decided in PR 2 (evaluation governance) and PR 3 (schema + ingestion).
+#
+# Secrets (DB credentials, TMX contact email) are NOT in this file — they are
+# provided by the `.env` file at repo root and substituted into the ${VAR}
+# tokens below. See .env.example for the variable set.
+#
+# Substitution syntax:
+#   ${VAR}           — required; the loader raises if VAR isn't set
+#   ${VAR:-default}  — optional; `default` used when VAR is unset
 
 app:
   env: local
@@ -8,15 +14,18 @@ app:
 
 storage:
   mariadb:
-    host: localhost
-    port: 3306
-    user: trackmania
-    password: CHANGE_ME
-    database: trackmania_ai
+    host: ${MARIADB_HOST:-127.0.0.1}
+    port: ${MARIADB_PORT:-3306}
+    user: ${MARIADB_USER}
+    password: ${MARIADB_PASSWORD}
+    database: ${MARIADB_DATABASE:-trackmania_ai}
+    # If non-empty, uses a Unix socket instead of TCP (see .env.example
+    # Option B). Leave unset for TCP.
+    unix_socket: ${MARIADB_UNIX_SOCKET:-}
   neo4j:
-    uri: bolt://localhost:7687
-    user: neo4j
-    password: CHANGE_ME
+    uri: ${NEO4J_URI:-bolt://127.0.0.1:7687}
+    user: ${NEO4J_USER:-neo4j}
+    password: ${NEO4J_PASSWORD}
   artifacts:
     # Large binary artifacts (raw maps, raw replays, derived blobs) live on
     # the filesystem, not in MariaDB rows. DB stores path + content hash.
@@ -24,8 +33,8 @@ storage:
 
 ingestion:
   tmx:
-    base_url: https://tmxexample.invalid/api  # placeholder; set in PR 3
-    user_agent: "trackmania-ai-ingest/0.1 (contact: CHANGE_ME)"
+    base_url: https://tmxexample.invalid/api  # placeholder; set to the real TMX URL
+    user_agent: "${INGEST_USER_AGENT:-trackmania-ai-ingest/0.1 (contact: CHANGE_ME)}"
     # Rate limit — be polite. TMX is community-run.
     requests_per_second: 1.0
     max_concurrent: 2

@@ -5,13 +5,11 @@ Uses the settings file pointed to by TRAX_CONFIG (default
 """
 from __future__ import annotations
 
-import os
-
 import pymysql
 import pytest
 
 from src.storage.mariadb import open_connection
-from src.utils.config import load_config
+from src.utils.config import ConfigError, load_config
 
 _TEST_SNAPSHOT = "integration-test"
 
@@ -22,6 +20,11 @@ def config() -> dict:
         return load_config()
     except FileNotFoundError:
         pytest.skip("no config/settings.yaml; skipping integration tests")
+    except ConfigError as exc:
+        # Typically raised when a required ${VAR} isn't set (no .env,
+        # no exported credentials). That's a "no DB configured" state,
+        # not a test failure.
+        pytest.skip(f"config not resolvable: {exc}")
 
 
 @pytest.fixture

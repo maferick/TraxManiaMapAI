@@ -44,19 +44,30 @@ class MigrationFile:
 
 
 def open_connection(config: dict[str, Any]) -> Connection:
-    """Open a PyMySQL connection using the resolved config dict."""
+    """Open a PyMySQL connection using the resolved config dict.
+
+    Supports either TCP (``host`` + ``port``) or Unix socket
+    (``unix_socket``). If a non-empty ``unix_socket`` is provided, it
+    wins — this is PyMySQL's own convention and matches how Debian/
+    Ubuntu MariaDB packages default to socket auth for local users.
+    """
     cfg = config.get("storage", {}).get("mariadb")
     if not isinstance(cfg, dict):
         raise MigrationError("config.storage.mariadb is missing or not a mapping")
-    return pymysql.connect(
-        host=cfg["host"],
-        port=int(cfg.get("port", 3306)),
-        user=cfg["user"],
-        password=cfg.get("password", ""),
-        database=cfg["database"],
-        charset="utf8mb4",
-        autocommit=False,
-    )
+    kwargs: dict[str, Any] = {
+        "user": cfg["user"],
+        "password": cfg.get("password", ""),
+        "database": cfg["database"],
+        "charset": "utf8mb4",
+        "autocommit": False,
+    }
+    socket_path = cfg.get("unix_socket")
+    if socket_path:
+        kwargs["unix_socket"] = str(socket_path)
+    else:
+        kwargs["host"] = cfg["host"]
+        kwargs["port"] = int(cfg.get("port", 3306))
+    return pymysql.connect(**kwargs)
 
 
 @contextmanager

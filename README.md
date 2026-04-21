@@ -63,8 +63,26 @@ make test
 
 ## Config
 
-Copy `config/settings.example.yaml` to `config/settings.yaml` and fill in
-local values. Do not commit `settings.yaml`.
+Two files drive configuration. Both are committed as `*.example`
+templates and expected to be copied locally:
+
+- `.env.example` → `.env` — credentials (DB passwords, TMX contact
+  email). Loaded at startup by `src/utils/config.py::load_env_file`
+  and merged into the process environment without overriding
+  already-exported variables.
+- `config/settings.example.yaml` → `config/settings.yaml` —
+  non-secret configuration. Secrets are referenced via `${VAR}` or
+  `${VAR:-default}` tokens that the loader substitutes from the
+  environment.
+
+```bash
+cp .env.example .env
+cp config/settings.example.yaml config/settings.yaml
+# edit .env with your MariaDB / Neo4j credentials
+```
+
+Neither `.env` nor `config/settings.yaml` is committed (see
+`.gitignore`).
 
 ## Data layout
 
