@@ -60,7 +60,7 @@ class TestEvaluationResult:
     def test_rejects_naive_datetime(self) -> None:
         with pytest.raises(ValueError, match="timezone"):
             EvaluationResult(
-                map_id="m1",
+                map_id=1,
                 evaluator_name="e",
                 evaluator_version="1.0.0",
                 benchmark_set_version=None,
@@ -72,7 +72,7 @@ class TestEvaluationResult:
     def test_rejects_bad_evaluator_version(self) -> None:
         with pytest.raises(ValueError):
             EvaluationResult(
-                map_id="m1",
+                map_id=1,
                 evaluator_name="e",
                 evaluator_version="not-semver",
                 benchmark_set_version=None,
@@ -83,7 +83,7 @@ class TestEvaluationResult:
 
     def test_accepts_minimal_valid(self) -> None:
         r = EvaluationResult(
-            map_id="m1",
+            map_id=1,
             evaluator_name="e",
             evaluator_version="1.0.0",
             benchmark_set_version="tech-strong-v1",

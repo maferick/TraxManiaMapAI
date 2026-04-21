@@ -38,7 +38,7 @@ extract-route-sample:
 	python -m src.cli extract-route
 
 eval-benchmark-sample:
-	@echo "eval-benchmark-sample: stub (PR 7)"
+	python -m src.cli eval-benchmark
 
 constraints-sample:
 	python -m src.cli neo4j-migrate && python -m src.cli build-graph

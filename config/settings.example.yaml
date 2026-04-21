@@ -122,13 +122,23 @@ constraints:
   broken_fixture_map_ids: []
 
 evaluation:
-  evaluator_version: "v0.0.0"
-  benchmark_set_version: ""
   # Surrogate is refreshed against the recent generated-track distribution,
   # not only historical community maps. See docs/surrogate-policy.md.
   surrogate:
     version: ""
     drift_threshold: 0.0
+  dryrun:
+    # PR 7: evaluator dry-run. Produces reports/evaluator-dryrun-v1.md.
+    stage_version: "0.1.0"
+    evaluators:
+      - structural         # orphan-fraction over block_placements
+      - adjacency_graph    # queries Neo4j for validity_label per adjacency
+      - route_coverage     # surfaces extraction_confidence from route_artifacts
+    parser_version: "0.0.0"
+    benchmark_manifests: []           # paths under data/benchmarks/ to load
+    community_sample_size: 0          # 0 = benchmarks only
+    community_snapshot_id: null       # null = no snapshot restriction
+    report_path: reports/evaluator-dryrun-v1.md
 
 provenance:
   # The hash of the resolved config dict is recorded with every stage_run.

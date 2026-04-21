@@ -11,10 +11,28 @@ arrive in PRs 5–7 and are graded against the frozen benchmark sets in
 | `base.py`        | `Evaluator` ABC and the `EvaluationResult` dataclass.       |
 | `versioning.py`  | Semver parse/compare and the `VersionCompatibility` enum.   |
 | `registry.py`    | Opt-in evaluator registration.                              |
+| `evaluators/`    | Concrete evaluators (PR 7): `structural`, `adjacency_graph`, `route_coverage`. |
+| `dryrun/`        | PR 7 dry-run runner + stats + markdown renderer.            |
 
-No real evaluator logic exists yet. That is intentional — evaluators
-land alongside the subsystems they grade (route inference in PR 5,
-constraint graph in PR 6, full dry-run in PR 7).
+## Dry-run (PR 7)
+
+`python -m src.cli eval-benchmark` runs the evaluator stack over
+benchmark manifests + an optional community sample and renders
+`reports/evaluator-dryrun-v1.md`. The report pins evaluator and
+benchmark versions, reports score distributions, benchmark rankings,
+strong-vs-mediocre separation AUC, and disagreements. Scores are
+persisted into `evaluation_artifacts` — the stored-vs-rendered split
+lets later runs diff against history.
+
+### What the shipped evaluators cover
+
+- `structural_score` from both `StructuralEvaluator` (orphan proxy)
+  and `AdjacencyGraphEvaluator` (Neo4j-labeled adjacency fraction)
+- `drivability_score` from `RouteCoverageEvaluator` (extraction
+  confidence on the latest route artifact)
+
+Style, flow, and novelty stay `None` in PR 7 — those need trained
+models outside Phase 1 scope.
 
 ## Conventions
 

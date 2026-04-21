@@ -168,6 +168,45 @@ Versioned evaluators, frozen benchmark manifests, and a dry-run path that
 scores existing community maps. The evaluator is a first-class operational
 subsystem, not a static model artifact.
 
+Shipped in PR 7 (dry-run v1):
+
+- **Three concrete evaluators** under `src/evaluation/evaluators/`:
+  - `StructuralEvaluator` — pure, reads `block_placements`. Reports
+    `structural_score = 1 - orphan_fraction` over unique cells. The
+    orphan proxy is scaffold-grade; deeper validators need the GBX
+    wrapper's connection metadata.
+  - `AdjacencyGraphEvaluator` — re-extracts a map's adjacencies and
+    queries Neo4j for each pair's `validity_label`. Honors the PR 6
+    "no frequency-as-validity" invariant — only explicit `suspicious`
+    labels pull the score down.
+  - `RouteCoverageEvaluator` — surfaces the latest route artifact's
+    `extraction_confidence` as `drivability_score`.
+- **Dry-run runner** (`src/evaluation/dryrun/runner.py`): resolves
+  benchmark memberships from manifest entries (source_map_id →
+  `maps.id` via the pinned snapshot), optionally samples community
+  maps, runs every evaluator per map, and persists `EvaluationResult`
+  rows into `evaluation_artifacts` (upsert keyed by
+  `(map_id, evaluator_name, evaluator_version, benchmark_set_version)`).
+- **Stats** (`src/evaluation/dryrun/stats.py`): pure numpy histograms,
+  quartiles, normalized Mann-Whitney AUC for positives-vs-negatives
+  separation, pairwise disagreement lookups.
+- **Markdown renderer** (`src/evaluation/dryrun/report.py`): produces
+  `reports/evaluator-dryrun-v1.md` with setup/versions, per-dimension
+  score distributions (inline ASCII histograms), benchmark-set
+  rankings, strong-vs-mediocre separation AUC, evaluator-vs-benchmark
+  disagreements, and cross-evaluator disagreements.
+- **CLI**: `python -m src.cli eval-benchmark [--benchmark-manifest PATH]+
+  [--evaluator N]+ [--community-sample-size N] [--snapshot S]
+  [--report P]`. Emits one `stage_run` row with the run's
+  aggregated summary.
+
+Dry-run v1 is a **substrate demonstration**, not a trained evaluator
+stack. Style, flow, and novelty scores stay `None`; those depend on
+models that PR 8+ (out of Phase 1 scope) will ship. The dry-run
+proves the substrate — schemas, cohorts, route artifacts, constraint
+graph — is end-to-end viable and can drive a report that the
+kill-switch in `docs/evaluation-plan.md` could evaluate against.
+
 ### Storage (`src/storage/`)
 
 Adapters for MariaDB and Neo4j. All large binary artifacts live on the

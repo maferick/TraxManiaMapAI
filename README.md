@@ -17,8 +17,8 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full operating mandate and
 | 3   | Canonical schema + ingestion        | done        |
 | 4   | Replay cleaning                     | done        |
 | 5   | Route inference scaffold            | done        |
-| 6   | Constraint graph                    | in progress |
-| 7   | Evaluator dry-run                   | not started |
+| 6   | Constraint graph                    | done        |
+| 7   | Evaluator dry-run                   | done (v1)   |
 
 ## Non-goals for Phase 1
 
@@ -104,7 +104,12 @@ surrogate is treated as an operational subsystem, not a static model — see
 - Constraint graph (PR 6) seeds `(:ADJACENT_TO)` from spatial
   adjacency only; directed `(:TRANSITION)` edges land when replay-
   to-block projection is wired.
-- No evaluator logic — only the governance scaffolding exists.
+- Three scaffold evaluators ship in PR 7 (`structural`,
+  `adjacency_graph`, `route_coverage`); the dry-run CLI renders
+  `reports/evaluator-dryrun-v1.md` from benchmark manifests + a
+  community sample. Style, flow, and novelty dimensions remain
+  `None` — they need trained models which are out of scope for
+  Phase 1 (see `docs/evaluation-plan.md`).
 
 ## Contributing
 

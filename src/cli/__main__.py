@@ -24,7 +24,15 @@ from src.replay import (
     ReplayCleanPipeline,
     default_rules,
 )
+from src.benchmarks.manifest import load as load_benchmark
 from src.constraints import ConstraintGraphPipeline
+from src.evaluation import (
+    AdjacencyGraphEvaluator,
+    Evaluator,
+    RouteCoverageEvaluator,
+    StructuralEvaluator,
+)
+from src.evaluation.dryrun import DryRunRunner, render_markdown
 from src.route import RouteExtractor, RoutePipeline
 from src.route import create as create_clusterer
 from src.schema.replays import ReplayCohort
@@ -318,6 +326,117 @@ def _cmd_replay_clean(args: argparse.Namespace) -> int:
 
 
 _ROUTE_STAGE = "extract_route"
+_EVAL_STAGE = "eval_benchmark"
+
+
+def _build_evaluator_stack(
+    conn, driver, *, names: list[str], parser_version: str
+) -> list[Evaluator]:
+    stack: list[Evaluator] = []
+    for name in names:
+        if name == "structural":
+            stack.append(StructuralEvaluator(conn, parser_version=parser_version))
+        elif name == "adjacency_graph":
+            stack.append(
+                AdjacencyGraphEvaluator(conn, driver, parser_version=parser_version)
+            )
+        elif name == "route_coverage":
+            stack.append(RouteCoverageEvaluator(conn))
+        else:
+            raise ValueError(f"unknown evaluator name: {name!r}")
+    return stack
+
+
+def _cmd_eval_benchmark(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    dryrun_cfg = (config.get("evaluation") or {}).get("dryrun") or {}
+
+    stage_version = str(dryrun_cfg.get("stage_version", "0.1.0"))
+    evaluator_names = args.evaluators or list(
+        dryrun_cfg.get("evaluators", ["structural", "adjacency_graph", "route_coverage"])
+    )
+    parser_version = str(dryrun_cfg.get("parser_version", "0.0.0"))
+    community_sample_size = (
+        args.community_sample_size
+        if args.community_sample_size is not None
+        else int(dryrun_cfg.get("community_sample_size", 0))
+    )
+    community_snapshot = args.snapshot or dryrun_cfg.get("community_snapshot_id") or None
+    manifest_paths = args.benchmark_manifests or list(
+        dryrun_cfg.get("benchmark_manifests", [])
+    )
+    report_path = Path(
+        args.report or dryrun_cfg.get("report_path", "reports/evaluator-dryrun-v1.md")
+    )
+
+    manifests = [load_benchmark(Path(p)) for p in manifest_paths]
+
+    sha = code_version()
+    config_hash = resolve_config_hash(config)
+    conn = open_connection(config)
+    driver = open_driver(config) if "adjacency_graph" in evaluator_names else None
+
+    try:
+        stack = _build_evaluator_stack(
+            conn, driver, names=evaluator_names, parser_version=parser_version
+        )
+        input_ref = (
+            f"manifests={len(manifests)};"
+            f"community={community_sample_size};"
+            f"snapshot={community_snapshot or 'ALL'}"
+        )
+        stage_run_id = open_stage_run(
+            conn,
+            stage=_EVAL_STAGE,
+            stage_version=stage_version,
+            resolved_config_hash=config_hash,
+            code_version=sha,
+            input_ref=input_ref,
+        )
+        runner = DryRunRunner(
+            conn=conn,
+            evaluators=stack,
+            benchmark_manifests=manifests,
+            community_sample_size=community_sample_size,
+            community_snapshot_id=community_snapshot,
+            stage_version=stage_version,
+        )
+        try:
+            report = runner.run()
+        except Exception as exc:  # noqa: BLE001
+            close_stage_run(
+                conn,
+                stage_run_id,
+                status="failed",
+                output_summary=None,
+                error_taxonomy_code="unhandled",
+                error_message=str(exc)[:2000],
+            )
+            _LOG.exception("eval-benchmark crashed")
+            return 1
+
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(render_markdown(report), encoding="utf-8")
+
+        status = "partial" if report.errors else "success"
+        close_stage_run(
+            conn,
+            stage_run_id,
+            status=status,
+            output_summary=report.to_summary_json(),
+        )
+        _LOG.info(
+            "eval-benchmark %s: maps=%d results=%d report=%s",
+            status,
+            len(report.maps),
+            sum(len(v) for v in report.results.values()),
+            report_path,
+        )
+        return 0 if status == "success" else 1
+    finally:
+        if driver is not None:
+            driver.close()
+        conn.close()
 
 
 def _cmd_extract_route(args: argparse.Namespace) -> int:
@@ -523,6 +642,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     build_graph_cmd.add_argument("--parser-version", type=str, default=None)
     build_graph_cmd.set_defaults(func=_cmd_build_graph)
+
+    eval_benchmark_cmd = sub.add_parser(
+        "eval-benchmark",
+        help="Run the evaluator dry-run and render reports/evaluator-dryrun-v1.md",
+    )
+    eval_benchmark_cmd.add_argument(
+        "--benchmark-manifest",
+        dest="benchmark_manifests",
+        type=str,
+        action="append",
+        default=None,
+        help="path to a benchmark manifest (repeatable; overrides config)",
+    )
+    eval_benchmark_cmd.add_argument(
+        "--evaluator",
+        dest="evaluators",
+        type=str,
+        action="append",
+        default=None,
+        help="restrict to specific evaluators (repeatable)",
+    )
+    eval_benchmark_cmd.add_argument("--community-sample-size", type=int, default=None)
+    eval_benchmark_cmd.add_argument("--snapshot", type=str, default=None)
+    eval_benchmark_cmd.add_argument("--report", type=str, default=None)
+    eval_benchmark_cmd.set_defaults(func=_cmd_eval_benchmark)
 
     extract_route_cmd = sub.add_parser(
         "extract-route", help="Infer route artifacts from cohort-assigned replays"

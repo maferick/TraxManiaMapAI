@@ -17,7 +17,7 @@ from .versioning import EvaluatorVersion
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    map_id: str
+    map_id: int
     evaluator_name: str
     evaluator_version: str
     benchmark_set_version: str | None
@@ -57,13 +57,14 @@ class Evaluator(ABC):
     @abstractmethod
     def evaluate(
         self,
-        map_id: str,
+        map_id: int,
         *,
         benchmark_set_version: str | None = None,
     ) -> EvaluationResult:
         """Score a single map.
 
-        Concrete subclasses decide how map data is fetched. In PR 2 the
-        signature is deliberately minimal — the storage adapter it will
-        eventually depend on does not exist yet.
+        Concrete subclasses decide how map data is fetched (via
+        dependencies injected at construction time — PR 7 concrete
+        evaluators all require a DB connection, and some require a
+        Neo4j driver).
         """
