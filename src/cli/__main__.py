@@ -10,6 +10,7 @@ from src.ingestion import (
     ArtifactStore,
     HttpClient,
     MapIngestor,
+    ReplayIngestor,
     ResponseCache,
     TmxClient,
     TokenBucket,
@@ -336,13 +337,150 @@ def _cmd_ingest_maps(args: argparse.Namespace) -> int:
         conn.close()
 
 
+_INGEST_REPLAYS_STAGE = "ingest_replays"
+_INGEST_REPLAYS_STAGE_VERSION = "0.1.0"
+
+
+def _resolve_target_maps(conn, args) -> list[tuple[int, str]]:
+    """Return [(db_map_id, source_map_id)] based on the CLI flags.
+
+    Resolution precedence: explicit --map-id list, else the snapshot's
+    parsed-successfully maps limited by --max-maps (or all if unset).
+    """
+    if args.map_ids:
+        from src.storage.mariadb import cursor
+        placeholders = ",".join(["%s"] * len(args.map_ids))
+        with cursor(conn) as cur:
+            cur.execute(
+                f"SELECT id, source_map_id FROM maps WHERE id IN ({placeholders})",
+                tuple(args.map_ids),
+            )
+            return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
+    from src.storage.mariadb import cursor
+    sql = "SELECT id, source_map_id FROM maps WHERE parse_status = 'success'"
+    params: list = []
+    if args.snapshot:
+        sql += " AND ingestion_snapshot = %s"
+        params.append(args.snapshot)
+    if args.top_awards is not None:
+        sql += " ORDER BY award_count DESC"
+    else:
+        sql += " ORDER BY id"
+    if args.max_maps is not None or args.top_awards is not None:
+        limit = args.max_maps if args.max_maps is not None else args.top_awards
+        sql += " LIMIT %s"
+        params.append(int(limit))
+    with cursor(conn) as cur:
+        cur.execute(sql, tuple(params))
+        return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
+
+
 def _cmd_ingest_replays(args: argparse.Namespace) -> int:
-    _LOG.error(
-        "ingest-replays is scaffolded but not wired to TMX endpoints yet. "
-        "The replay adapter shape mirrors TmxClient; implementation lands once "
-        "the replay endpoints are pinned."
+    config = load_config(args.config)
+    tmx_cfg = config.get("ingestion", {}).get("tmx", {})
+    artifacts_cfg = config.get("storage", {}).get("artifacts", {})
+
+    snapshot_id = args.snapshot or config.get("ingestion", {}).get("snapshot", {}).get("id")
+    if not snapshot_id:
+        _LOG.error("--snapshot required (or set ingestion.snapshot.id in config)")
+        return 2
+
+    rate = float(tmx_cfg.get("requests_per_second", 1.0))
+    user_agent = tmx_cfg.get("user_agent")
+    base_url = tmx_cfg.get("base_url")
+    cache_dir = Path(tmx_cfg.get("cache_dir", "./data/cache/tmx"))
+    artifacts_root = Path(artifacts_cfg.get("root", "./data/artifacts"))
+    retry_cfg = tmx_cfg.get("retry", {}) or {}
+    backoff = tuple(float(s) for s in retry_cfg.get("backoff_seconds", (2, 4, 8, 16)))
+    timeout = float(tmx_cfg.get("timeout_seconds", 30.0))
+
+    config_hash = resolve_config_hash(config)
+    sha = code_version()
+
+    http = HttpClient(
+        base_url=base_url,
+        user_agent=user_agent,
+        rate_limiter=TokenBucket(rate_per_second=rate),
+        cache=ResponseCache(cache_dir),
+        backoff_seconds=backoff,
+        timeout_seconds=timeout,
     )
-    return 2
+    tmx_client = TmxClient(http)
+    store = ArtifactStore(artifacts_root)
+    conn = open_connection(config)
+    try:
+        map_refs = _resolve_target_maps(conn, args)
+        if not map_refs:
+            _LOG.error("no target maps matched the given filters")
+            return 1
+        _LOG.info("ingest-replays: targeting %d maps", len(map_refs))
+
+        ensure_snapshot(
+            conn,
+            snapshot_id=snapshot_id,
+            source_system="tmx",
+            user_agent=user_agent,
+            rate_limit_rps=rate,
+            resolved_config_hash=config_hash,
+            code_version=sha,
+        )
+        stage_run_id = open_stage_run(
+            conn,
+            stage=_INGEST_REPLAYS_STAGE,
+            stage_version=_INGEST_REPLAYS_STAGE_VERSION,
+            resolved_config_hash=config_hash,
+            code_version=sha,
+            input_ref=(
+                f"snapshot={snapshot_id};maps={len(map_refs)};"
+                f"per_map={args.per_map}"
+            ),
+        )
+        ingestor = ReplayIngestor(
+            tmx=tmx_client,
+            conn=conn,
+            artifact_store=store,
+            snapshot_id=snapshot_id,
+            created_by_version=_INGEST_REPLAYS_STAGE_VERSION,
+            per_map=args.per_map,
+            download_artifacts=not args.no_download_artifacts,
+        )
+        try:
+            stats = ingestor.run(map_refs)
+        except Exception as exc:  # noqa: BLE001
+            close_stage_run(
+                conn,
+                stage_run_id,
+                status="failed",
+                output_summary=None,
+                error_taxonomy_code="unhandled",
+                error_message=str(exc)[:2000],
+            )
+            _LOG.exception("ingest-replays crashed")
+            return 1
+        status = "partial" if stats.errors or stats.artifacts_failed else "success"
+        close_stage_run(
+            conn,
+            stage_run_id,
+            status=status,
+            output_summary=stats.to_summary_json(),
+        )
+        _LOG.info(
+            "ingest-replays %s: maps_seen=%d no_replays=%d "
+            "replays_seen=%d inserted=%d updated=%d "
+            "artifacts=%d artifact_failures=%d errors=%d",
+            status,
+            stats.maps_seen,
+            stats.maps_with_no_replays,
+            stats.replays_seen,
+            stats.replays_inserted,
+            stats.replays_updated,
+            stats.artifacts_downloaded,
+            stats.artifacts_failed,
+            len(stats.errors),
+        )
+        return 0 if status == "success" else 1
+    finally:
+        conn.close()
 
 
 _CLEAN_STAGE = "replay_clean"
@@ -698,7 +836,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ingest_maps_cmd.set_defaults(func=_cmd_ingest_maps)
 
-    ingest_replays_cmd = sub.add_parser("ingest-replays", help="(stub) replay ingestion")
+    ingest_replays_cmd = sub.add_parser(
+        "ingest-replays",
+        help="Fetch leaderboard replays for maps in a snapshot and download their .Replay.Gbx files",
+    )
+    ingest_replays_cmd.add_argument(
+        "--snapshot", type=str, default=None,
+        help="ingestion snapshot id (used to filter source maps AND tag the new replays)",
+    )
+    ingest_replays_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+        help="restrict to specific maps.id values (repeatable); overrides snapshot filter",
+    )
+    ingest_replays_cmd.add_argument(
+        "--max-maps", type=int, default=None,
+        help="cap the number of maps processed (useful for smoke tests)",
+    )
+    ingest_replays_cmd.add_argument(
+        "--top-awards", type=int, default=None,
+        help="pick top-N maps by award_count (overrides --max-maps; implies ordering)",
+    )
+    ingest_replays_cmd.add_argument(
+        "--per-map", type=int, default=None, metavar="K",
+        help="limit replays per map (TMX's list endpoint caps at 25 anyway)",
+    )
+    ingest_replays_cmd.add_argument(
+        "--no-download-artifacts", action="store_true",
+        help="skip .Replay.Gbx downloads; just record metadata",
+    )
     ingest_replays_cmd.set_defaults(func=_cmd_ingest_replays)
 
     parse_maps_cmd = sub.add_parser(

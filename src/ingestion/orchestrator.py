@@ -27,7 +27,7 @@ from src.storage.mariadb import cursor
 
 from .artifacts import ArtifactStore
 from .http import HttpError
-from .tmx import TmxClient, TmxMapSummary
+from .tmx import TmxClient, TmxMapSummary, TmxReplaySummary
 
 _LOG = logging.getLogger(__name__)
 
@@ -338,5 +338,234 @@ class MapIngestor:
         digest, path = self._store.write(response.content)
         _record_artifact(
             self._conn, map_id=map_id, content_hash=digest, artifact_path=str(path)
+        )
+        stats.artifacts_downloaded += 1
+
+
+# =============================================================================
+# Replay ingestion
+# =============================================================================
+
+
+_REPLAY_SOURCE_SYSTEM = "tmx"
+
+
+@dataclass
+class ReplayIngestionStats:
+    started_at: datetime
+    maps_seen: int = 0
+    maps_skipped_no_map_row: int = 0
+    maps_with_no_replays: int = 0
+    replays_seen: int = 0
+    replays_inserted: int = 0
+    replays_updated: int = 0
+    artifacts_downloaded: int = 0
+    artifacts_failed: int = 0
+    errors: list[str] = field(default_factory=list)
+    completed_at: datetime | None = None
+
+    def to_summary_json(self) -> dict[str, Any]:
+        return {
+            "maps_seen": self.maps_seen,
+            "maps_skipped_no_map_row": self.maps_skipped_no_map_row,
+            "maps_with_no_replays": self.maps_with_no_replays,
+            "replays_seen": self.replays_seen,
+            "replays_inserted": self.replays_inserted,
+            "replays_updated": self.replays_updated,
+            "artifacts_downloaded": self.artifacts_downloaded,
+            "artifacts_failed": self.artifacts_failed,
+            "error_count": len(self.errors),
+        }
+
+
+def _upsert_replay(
+    conn: Connection,
+    *,
+    summary: TmxReplaySummary,
+    map_id: int,
+    snapshot_id: str,
+    created_by_version: str,
+) -> tuple[int, bool]:
+    """UPSERT a replays row. Returns (replay_db_id, inserted_new)."""
+    rank_metadata = {
+        "position": summary.position,
+        "beaten": summary.beaten,
+        "stunt_score": summary.stunt_score,
+        "respawns": summary.respawns,
+        "player_model": summary.player_model,
+        "exe_build": summary.exe_build,
+        "replay_uploaded_at": summary.replay_uploaded_at,
+    }
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO replays (
+                source_system, source_replay_id, map_id, ingestion_snapshot,
+                player_display_name, finish_time_ms, rank_metadata,
+                created_by_version
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                map_id              = VALUES(map_id),
+                player_display_name = VALUES(player_display_name),
+                finish_time_ms      = VALUES(finish_time_ms),
+                rank_metadata       = VALUES(rank_metadata)
+            """,
+            (
+                _REPLAY_SOURCE_SYSTEM,
+                summary.replay_id,
+                map_id,
+                snapshot_id,
+                summary.player_display_name,
+                summary.finish_time_ms,
+                json.dumps(rank_metadata),
+                created_by_version,
+            ),
+        )
+        affected = cur.rowcount
+        cur.execute(
+            "SELECT id FROM replays WHERE source_system=%s AND source_replay_id=%s "
+            "AND ingestion_snapshot=%s",
+            (_REPLAY_SOURCE_SYSTEM, summary.replay_id, snapshot_id),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    if row is None:
+        raise RuntimeError(
+            f"UPSERT succeeded but SELECT returned nothing for replay {summary.replay_id}"
+        )
+    inserted_new = affected == 1
+    return int(row[0]), inserted_new
+
+
+def _record_replay_artifact(
+    conn: Connection,
+    *,
+    replay_id: int,
+    content_hash: str,
+    artifact_path: str,
+) -> None:
+    with cursor(conn) as cur:
+        cur.execute(
+            "UPDATE replays SET raw_artifact_hash=%s, raw_artifact_path=%s WHERE id=%s",
+            (content_hash, artifact_path, replay_id),
+        )
+    conn.commit()
+
+
+class ReplayIngestor:
+    """Fetch replays per map and persist them into the ``replays`` table.
+
+    Input is a list of ``(db_map_id, source_map_id)`` pairs — the
+    caller decides which maps get replays (e.g. top-awards subset of
+    a snapshot). The ingestor calls the list endpoint once per map
+    (at the rate limiter's pace), UPSERTs replay rows, and downloads
+    each artifact to the content-addressed store.
+    """
+
+    def __init__(
+        self,
+        *,
+        tmx: TmxClient,
+        conn: Connection,
+        artifact_store: ArtifactStore,
+        snapshot_id: str,
+        created_by_version: str,
+        per_map: int | None = None,
+        download_artifacts: bool = True,
+    ) -> None:
+        self._tmx = tmx
+        self._conn = conn
+        self._store = artifact_store
+        self._snapshot_id = snapshot_id
+        self._created_by_version = created_by_version
+        self._per_map = per_map
+        self._download_artifacts = download_artifacts
+
+    def run(
+        self, map_refs: list[tuple[int, str]]
+    ) -> ReplayIngestionStats:
+        stats = ReplayIngestionStats(started_at=_utcnow())
+        try:
+            for db_map_id, source_map_id in map_refs:
+                stats.maps_seen += 1
+                self._process_map(db_map_id, source_map_id, stats)
+        finally:
+            stats.completed_at = _utcnow()
+        return stats
+
+    def _process_map(
+        self,
+        db_map_id: int,
+        source_map_id: str,
+        stats: ReplayIngestionStats,
+    ) -> None:
+        try:
+            iterator = self._tmx.iter_replays_for_map(
+                source_map_id, amount=self._per_map
+            )
+            summaries = list(iterator)
+        except HttpError as exc:
+            stats.errors.append(f"list map={source_map_id}: {exc}")
+            _LOG.warning("replay list failed for %s: %s", source_map_id, exc)
+            return
+        if not summaries:
+            stats.maps_with_no_replays += 1
+            return
+        if self._per_map is not None:
+            summaries = summaries[: self._per_map]
+        for summary in summaries:
+            stats.replays_seen += 1
+            try:
+                replay_db_id, inserted = _upsert_replay(
+                    self._conn,
+                    summary=summary,
+                    map_id=db_map_id,
+                    snapshot_id=self._snapshot_id,
+                    created_by_version=self._created_by_version,
+                )
+            except Exception as exc:  # noqa: BLE001
+                stats.errors.append(
+                    f"upsert replay={summary.replay_id}: {exc}"
+                )
+                _LOG.error(
+                    "UPSERT replay failed for %s: %s", summary.replay_id, exc
+                )
+                continue
+            if inserted:
+                stats.replays_inserted += 1
+            else:
+                stats.replays_updated += 1
+            if self._download_artifacts:
+                self._fetch_and_store_artifact(
+                    summary.replay_id, replay_db_id, stats
+                )
+
+    def _fetch_and_store_artifact(
+        self,
+        replay_source_id: str,
+        replay_db_id: int,
+        stats: ReplayIngestionStats,
+    ) -> None:
+        try:
+            response = self._tmx.download_replay_artifact(replay_source_id)
+        except HttpError as exc:
+            stats.artifacts_failed += 1
+            stats.errors.append(
+                f"download replay={replay_source_id}: {exc}"
+            )
+            return
+        if response.status_code != 200:
+            stats.artifacts_failed += 1
+            stats.errors.append(
+                f"download replay={replay_source_id}: HTTP {response.status_code}"
+            )
+            return
+        digest, path = self._store.write(response.content)
+        _record_replay_artifact(
+            self._conn,
+            replay_id=replay_db_id,
+            content_hash=digest,
+            artifact_path=str(path),
         )
         stats.artifacts_downloaded += 1

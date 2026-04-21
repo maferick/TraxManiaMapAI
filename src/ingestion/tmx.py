@@ -40,6 +40,14 @@ _DEFAULT_ENDPOINTS: dict[str, str] = {
     "map_detail": "/api/maps/{id}",
     "map_download": "/mapgbx/{id}",
     "meta_tags": "/api/meta/tags",
+    "meta_vehicles": "/api/meta/vehicles",
+    # Replay endpoints. Marked "deprecated" in the API docs (a v2
+    # search-replays method is planned) but are the only public way
+    # to enumerate + download replays today. The list endpoint
+    # 303-redirects to /legacyreplays/{mapId}; requests follows it.
+    "list_replays": "/api/replays/get_replays/{map_id}",
+    "replay_detail": "/api/replays/get_replay_info/{replay_id}",
+    "replay_download": "/recordgbx/{replay_id}",
 }
 
 # Minimal summary field set. Adding a field here costs bytes per request
@@ -74,6 +82,23 @@ class TmxMapSummary:
     popularity_metric: int | None
     has_items: bool
     is_block_mode: bool
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TmxReplaySummary:
+    """One leaderboard entry from ``/api/replays/get_replays/{mapId}``."""
+    replay_id: str                 # from ReplayID
+    map_source_id: str             # from TrackID (the TMX map id as string)
+    player_display_name: str | None
+    finish_time_ms: int | None
+    position: int | None
+    beaten: int | None
+    stunt_score: int | None
+    respawns: int | None
+    player_model: str | None
+    replay_uploaded_at: str | None  # ReplayAt (ISO-8601 string)
+    exe_build: str | None
     raw: dict[str, Any]
 
 
@@ -119,6 +144,27 @@ def _extract_tags(raw: Mapping[str, Any]) -> list[str]:
         elif t is not None:
             out.append(str(t))
     return out
+
+
+def _normalize_replay(raw: Mapping[str, Any]) -> TmxReplaySummary | None:
+    replay_id = _as_str(raw.get("ReplayID"))
+    track_id = _as_str(raw.get("TrackID"))
+    if not replay_id or not track_id:
+        return None
+    return TmxReplaySummary(
+        replay_id=replay_id,
+        map_source_id=track_id,
+        player_display_name=_as_str(raw.get("Username")),
+        finish_time_ms=_as_int(raw.get("ReplayTime")),
+        position=_as_int(raw.get("Position")),
+        beaten=_as_int(raw.get("Beaten")),
+        stunt_score=_as_int(raw.get("StuntScore")),
+        respawns=_as_int(raw.get("Respawns")),
+        player_model=_as_str(raw.get("PlayerModel")),
+        replay_uploaded_at=_as_str(raw.get("ReplayAt")),
+        exe_build=_as_str(raw.get("ExeBuild")),
+        raw=dict(raw),
+    )
 
 
 def _normalize_summary(raw: Mapping[str, Any]) -> TmxMapSummary | None:
@@ -288,3 +334,70 @@ class TmxClient:
                 f"meta_tags payload is not a JSON array (got {type(payload).__name__})"
             )
         return [dict(t) for t in payload if isinstance(t, Mapping)]
+
+    def fetch_vehicles(self) -> list[str]:
+        """Fetch the distinct-vehicle list (``/api/meta/vehicles``).
+
+        Returns a plain ``list[str]`` of vehicle model names. Order is
+        "official vehicles first, then custom in descending occurrence
+        count" per the API docs — so the early entries are the
+        environment-specific defaults (``CanyonCar``, ``StadiumCar``,
+        ``ValleyCar``, ...).
+        """
+        response = self._http.get(self._endpoints["meta_vehicles"])
+        if response.status_code != 200:
+            raise HttpError(
+                f"meta_vehicles returned status {response.status_code}",
+                status_code=response.status_code,
+            )
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise HttpError(
+                f"meta_vehicles payload is not a JSON array (got {type(payload).__name__})"
+            )
+        return [str(v) for v in payload if v is not None]
+
+    # ------------------------------------------------------------------
+    # Replay endpoints
+
+    def iter_replays_for_map(
+        self, map_source_id: str, *, amount: int | None = None
+    ) -> Iterator[TmxReplaySummary]:
+        """Yield up to 25 replays uploaded for a given map.
+
+        The deprecated endpoint caps at 25 regardless of ``amount``; we
+        still pass it through for when the v2 method lands. The 303
+        redirect to ``/legacyreplays/{mapId}`` is handled transparently
+        by ``requests``.
+        """
+        path = self._endpoints["list_replays"].format(map_id=map_source_id)
+        params: dict[str, object] = {}
+        if amount is not None:
+            params["amount"] = int(amount)
+        payload = self._get_json(path, params)
+        results = payload.get("Results")
+        if not isinstance(results, list):
+            return
+        for raw in results:
+            if not isinstance(raw, Mapping):
+                continue
+            summary = _normalize_replay(raw)
+            if summary is None:
+                continue
+            yield summary
+
+    def fetch_replay_detail(self, replay_id: str) -> dict[str, Any]:
+        path = self._endpoints["replay_detail"].format(replay_id=replay_id)
+        payload = self._get_json(path, {})
+        results = payload.get("Results")
+        if isinstance(results, list) and results:
+            first = results[0]
+            if isinstance(first, Mapping):
+                return dict(first)
+        return payload
+
+    def download_replay_artifact(self, replay_id: str) -> HttpResponse:
+        return self._http.get(
+            self._endpoints["replay_download"].format(replay_id=replay_id),
+            use_cache=False,
+        )

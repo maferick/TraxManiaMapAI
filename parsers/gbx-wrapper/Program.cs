@@ -33,8 +33,12 @@ public static class Program
             return 2;
         }
 
-        // LZO codec is required for decompressing the body of a .Gbx file.
+        // LZO decompresses Gbx bodies (maps, replays).
         Gbx.LZO = new Lzo();
+        // ZLib decompresses ghost sample streams embedded in replays.
+        // Maps don't strictly need it, but registering it upfront keeps
+        // the wrapper protocol shape stable regardless of artifact kind.
+        Gbx.ZLib = new GBX.NET.ZLib.ZLib();
 
         string? path;
         try
