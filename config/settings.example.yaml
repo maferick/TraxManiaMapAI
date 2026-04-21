@@ -33,7 +33,10 @@ storage:
 
 ingestion:
   tmx:
-    base_url: https://tmxexample.invalid/api  # placeholder; set to the real TMX URL
+    # TMX2020 / ManiaExchange v2. Endpoint paths (/api/maps, /mapgbx/{id},
+    # /api/meta/tags, ...) live in src/ingestion/tmx.py::_DEFAULT_ENDPOINTS
+    # and can be overridden via `endpoints: { list_maps: ... }` below.
+    base_url: https://trackmania.exchange
     user_agent: "${INGEST_USER_AGENT:-trackmania-ai-ingest/0.1 (contact: CHANGE_ME)}"
     # Rate limit — be polite. TMX is community-run.
     requests_per_second: 1.0

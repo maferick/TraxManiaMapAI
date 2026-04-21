@@ -213,6 +213,7 @@ def _cmd_ingest_maps(args: argparse.Namespace) -> int:
             created_by_version=_INGEST_STAGE_VERSION,
             max_maps=args.limit,
             download_artifacts=not args.no_download_artifacts,
+            random_count=args.random,
         )
         try:
             stats = ingestor.run()
@@ -605,6 +606,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_maps_cmd.add_argument("--limit", type=int, default=None)
     ingest_maps_cmd.add_argument("--parser-version", type=str, default="0.0.0")
     ingest_maps_cmd.add_argument("--no-download-artifacts", action="store_true")
+    ingest_maps_cmd.add_argument(
+        "--random",
+        type=int,
+        default=None,
+        metavar="N",
+        help="skip paginated listing; fetch N random maps (one API call per map)",
+    )
     ingest_maps_cmd.set_defaults(func=_cmd_ingest_maps)
 
     ingest_replays_cmd = sub.add_parser("ingest-replays", help="(stub) replay ingestion")

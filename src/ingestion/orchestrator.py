@@ -264,6 +264,7 @@ class MapIngestor:
         created_by_version: str,
         max_maps: int | None = None,
         download_artifacts: bool = True,
+        random_count: int | None = None,
     ) -> None:
         self._tmx = tmx
         self._conn = conn
@@ -273,6 +274,12 @@ class MapIngestor:
         self._created_by_version = created_by_version
         self._max_maps = max_maps
         self._download_artifacts = download_artifacts
+        self._random_count = random_count
+
+    def _summaries(self):
+        if self._random_count is not None:
+            return self._tmx.iter_random_summaries(count=self._random_count)
+        return self._tmx.iter_map_summaries()
 
     def run(self) -> IngestionStats:
         stats = IngestionStats(
@@ -281,7 +288,7 @@ class MapIngestor:
             source_system=_MAP_SOURCE_SYSTEM,
         )
         try:
-            for summary in self._tmx.iter_map_summaries():
+            for summary in self._summaries():
                 if self._max_maps is not None and stats.maps_seen >= self._max_maps:
                     break
                 stats.maps_seen += 1

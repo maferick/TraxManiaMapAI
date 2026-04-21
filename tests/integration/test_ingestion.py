@@ -17,47 +17,54 @@ from src.ingestion import (
 )
 
 
+_MINIMAL_FIELDS = ("MapId", "Name")
+
+
+def _map_entry(map_id: int, **extra) -> dict:
+    return {"MapId": map_id, **extra}
+
+
 @responses.activate
 def test_end_to_end_map_ingestion(db_conn, tmp_path: Path, test_snapshot: str) -> None:
     responses.add(
         responses.GET,
-        "https://tmx.test/maps",
-        match=[responses.matchers.query_param_matcher({"limit": "50"})],
+        "https://tmx.test/api/maps",
+        match=[
+            responses.matchers.query_param_matcher(
+                {"fields": "MapId,Name", "count": "50"}
+            )
+        ],
         json={
-            "items": [
-                {
-                    "id": "100",
-                    "title": "Strong tech",
-                    "author": "alice",
-                    "environment": "Stadium",
-                    "tags": ["tech"],
-                    "length_ms": 52000,
-                    "award_count": 123,
-                    "rating": 92.5,
-                    "popularity": 5000,
-                    "has_items": False,
-                    "is_block_mode": True,
-                },
-                {
-                    "id": "101",
-                    "title": "Mediocre tech",
-                    "author": "bob",
-                    "tags": ["tech"],
-                },
+            "Results": [
+                _map_entry(
+                    100,
+                    Name="Strong tech",
+                    Authors=[{"User": {"UserId": 1, "Name": "alice"}, "Role": "Mapper"}],
+                    Tags=[{"TagId": 5, "Name": "Tech", "Color": ""}],
+                    Length=52000,
+                    AwardCount=123,
+                    TitlePack="TMStadium",
+                ),
+                _map_entry(
+                    101,
+                    Name="Mediocre tech",
+                    Authors=[{"User": {"UserId": 2, "Name": "bob"}, "Role": "Mapper"}],
+                    Tags=[{"TagId": 5, "Name": "Tech", "Color": ""}],
+                ),
             ],
-            "cursor": None,
+            "More": False,
         },
         status=200,
     )
     responses.add(
         responses.GET,
-        "https://tmx.test/maps/100/download",
+        "https://tmx.test/mapgbx/100",
         body=b"fake-gbx-bytes-100",
         status=200,
     )
     responses.add(
         responses.GET,
-        "https://tmx.test/maps/101/download",
+        "https://tmx.test/mapgbx/101",
         body=b"fake-gbx-bytes-101",
         status=200,
     )
@@ -79,7 +86,7 @@ def test_end_to_end_map_ingestion(db_conn, tmp_path: Path, test_snapshot: str) -
         cache=ResponseCache(tmp_path / "cache"),
         sleep=lambda _: None,
     )
-    client = TmxClient(http, page_size=50)
+    client = TmxClient(http, summary_fields=_MINIMAL_FIELDS, page_size=50)
     store = ArtifactStore(tmp_path / "artifacts")
 
     stage_run_id = open_stage_run(
@@ -137,16 +144,16 @@ def test_end_to_end_map_ingestion(db_conn, tmp_path: Path, test_snapshot: str) -
 def test_second_run_is_idempotent(db_conn, tmp_path: Path, test_snapshot: str) -> None:
     responses.add(
         responses.GET,
-        "https://tmx.test/maps",
+        "https://tmx.test/api/maps",
         json={
-            "items": [{"id": "200", "title": "Resumable", "tags": []}],
-            "cursor": None,
+            "Results": [_map_entry(200, Name="Resumable", Tags=[])],
+            "More": False,
         },
         status=200,
     )
     responses.add(
         responses.GET,
-        "https://tmx.test/maps/200/download",
+        "https://tmx.test/mapgbx/200",
         body=b"gbx-200",
         status=200,
     )
@@ -170,7 +177,7 @@ def test_second_run_is_idempotent(db_conn, tmp_path: Path, test_snapshot: str) -
             sleep=lambda _: None,
         )
         ingestor = MapIngestor(
-            tmx=TmxClient(http, page_size=50),
+            tmx=TmxClient(http, summary_fields=_MINIMAL_FIELDS, page_size=50),
             conn=db_conn,
             artifact_store=ArtifactStore(tmp_path / "artifacts"),
             snapshot_id=test_snapshot,
