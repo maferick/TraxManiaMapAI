@@ -54,12 +54,21 @@ def _count_orphans(cells: set[tuple[int, int, int]]) -> int:
 def _fetch_placements(
     conn: Connection, *, map_id: int, parser_version: str
 ) -> list[BlockPlacement]:
+    """Return grid-placed blocks only.
+
+    Free blocks (migration 010) have NULL x/y/z. Both consumers of
+    this helper — :class:`StructuralEvaluator` (orphan-neighbor
+    check) and :class:`AdjacencyGraphEvaluator` (axis-neighbor
+    extraction) — only make sense for grid blocks, so filter at the
+    SQL layer to avoid having to None-check downstream.
+    """
     with cursor(conn) as cur:
         cur.execute(
             "SELECT id, parser_version, block_family, block_type, variant, "
             "placement_index, x, y, z, rotation, flags, surface, "
             "created_by_version, source_artifact_ids "
             "FROM block_placements WHERE map_id=%s AND parser_version=%s "
+            "AND is_free = 0 "
             "ORDER BY placement_index",
             (map_id, parser_version),
         )

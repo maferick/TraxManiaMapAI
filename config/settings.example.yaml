@@ -146,7 +146,9 @@ evaluation:
       - structural         # orphan-fraction over block_placements
       - adjacency_graph    # queries Neo4j for validity_label per adjacency
       - route_coverage     # surfaces extraction_confidence from route_artifacts
-    parser_version: "0.0.0"
+    # Must match the parser_version that `parse-maps` stamped on
+    # block_placements; bump both together.
+    parser_version: "0.1.0"
     benchmark_manifests: []           # paths under data/benchmarks/ to load
     community_sample_size: 0          # 0 = benchmarks only
     community_snapshot_id: null       # null = no snapshot restriction

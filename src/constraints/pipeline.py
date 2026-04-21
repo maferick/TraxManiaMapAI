@@ -97,9 +97,10 @@ def _fetch_placements(
             """
             SELECT id, parser_version, block_family, block_type, variant,
                    placement_index, x, y, z, rotation, flags, surface,
-                   created_by_version, source_artifact_ids
+                   created_by_version, source_artifact_ids, is_free
             FROM block_placements
             WHERE map_id = %s AND parser_version = %s
+              AND is_free = 0
             ORDER BY placement_index
             """,
             (map_id, parser_version),
@@ -107,6 +108,11 @@ def _fetch_placements(
         rows = cur.fetchall()
     out: list[BlockPlacement] = []
     for r in rows:
+        # The WHERE is_free=0 guard above filters to grid blocks only —
+        # those are what the axis-neighbor extractor consumes. x/y/z
+        # became nullable in migration 010 so free blocks could share
+        # the table; the extractor would skip them anyway, but we save
+        # the round trip + the None-coercion by filtering in SQL.
         out.append(
             BlockPlacement(
                 id=int(r[0]),
@@ -124,6 +130,7 @@ def _fetch_placements(
                 surface=(str(r[11]) if r[11] is not None else None),
                 created_by_version=str(r[12]),
                 source_artifact_ids={},
+                is_free=bool(r[14]),
             )
         )
     return out
