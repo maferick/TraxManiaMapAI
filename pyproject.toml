@@ -17,6 +17,7 @@ authors = [{ name = "TraxManiaMapAI" }]
 #   pymysql           — MariaDB driver for schema migrations + ingestion (PR 3).
 #   requests          — TMX HTTP client (PR 3).
 #   numpy             — vector math for replay projection + clustering (PR 5).
+#   neo4j             — Bolt driver for the constraint graph (PR 6).
 # scikit-learn is an OPTIONAL dep used by the DBSCAN adapter; install via
 # `pip install -e ".[learn]"` when needed. Evaluator PR 7 will add the
 # remaining numerical stack (scipy, pandas, etc.) if required.
@@ -26,6 +27,7 @@ dependencies = [
   "pymysql>=1.1,<2",
   "requests>=2.31,<3",
   "numpy>=1.26,<3",
+  "neo4j>=5.15,<6",
 ]
 
 [project.optional-dependencies]

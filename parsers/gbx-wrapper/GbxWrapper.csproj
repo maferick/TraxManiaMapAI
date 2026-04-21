@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>TraxMania.GbxWrapper</RootNamespace>
+    <AssemblyName>GbxWrapper</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Keep the surface small so the subprocess process is cheap to spawn. -->
+    <PublishTrimmed Condition="'$(Configuration)' == 'Release'">false</PublishTrimmed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pinned to the 2.x line. Upstream: https://github.com/BigBang1112/gbx-net -->
+    <PackageReference Include="GBX.NET" Version="2.4.*" />
+    <PackageReference Include="GBX.NET.LZO" Version="2.*" />
+    <!-- GBX.NET.ZLib stays on the 1.x line (no 2.x release yet); only
+         required if the wrapper needs to decompress ghost sample streams. -->
+    <PackageReference Include="GBX.NET.ZLib" Version="1.1.*" />
+  </ItemGroup>
+
+</Project>

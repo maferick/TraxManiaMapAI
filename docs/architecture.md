@@ -125,9 +125,42 @@ deliverable; the heuristics are replaceable without touching them.
 
 ### Constraint graph (`src/constraints/`, `migrations/neo4j/`)
 
-Stores observed block-to-block transitions in Neo4j. Edges carry evidence
+Stores observed block-to-block relations in Neo4j. Edges carry evidence
 fields (observed-in-valid-maps, replay-supported count, benchmark-quality
 occurrences), not just raw frequency.
+
+Shipped in PR 6:
+
+- **Graph schema** (`migrations/neo4j/`). `(:Block {key, family, type,
+  variant})` unique on the normalized composite key;
+  `(:Block)-[:ADJACENT_TO]->(:Block)` with evidence properties;
+  `(:ProcessedMap {map_id, snapshot_id, parser_version})` idempotency
+  ledger.
+- **Extractor** (`src/constraints/extractor.py`). Emits one
+  `AdjacencyObservation` per unordered axis-neighbor pair of blocks
+  within a single map. Pair order is lexicographic so undirected
+  adjacency collapses to a single edge.
+- **Evidence policy** (`src/constraints/evidence.py`).
+  `derive_validity_label` enforces the invariant: frequency is not
+  validity. `benchmark_strong_count >= 1` → `valid`; `broken_fixture_count
+  > 0` without any positive evidence → `suspicious`; everything else
+  (including high `observed_in_maps_count`) → `unknown`.
+- **Pipeline + CLI** (`src/constraints/pipeline.py`,
+  `src/cli/__main__.py::build-graph`). Per-map idempotency via
+  `MERGE (:ProcessedMap ...)` before any node/edge writes; single
+  transaction for `UNWIND`-style batch MERGE of nodes and edges;
+  validity label recomputed on every edge touch from the current
+  counts (no separate label storage to drift).
+- **Neo4j adapter** (`src/storage/neo4j_adapter.py`). Driver factory
+  + Cypher migration runner with content-hash edit detection, mirror
+  of the MariaDB runner. CLI: `python -m src.cli neo4j-migrate`.
+
+The **directed** `:TRANSITION` edge — one inferred per clean-cohort
+replay pass through a block pair — is deliberately out of scope in
+PR 6. It depends on a real GBX wrapper producing connection-face
+metadata and on replay-to-block projection. Neither exists yet;
+building an unsupported directed edge now would invent evidence we
+don't have.
 
 ### Evaluation (`src/evaluation/`, `src/benchmarks/`)
 

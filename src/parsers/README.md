@@ -29,9 +29,24 @@ When throughput justifies it (if Phase 1 ever runs ingestion in bulk
 against cached artifacts rather than live TMX), add an `HttpParser`
 that implements the same ABC.
 
+## Wrapper implementation
+
+The reference .NET wrapper ships in-tree at `parsers/gbx-wrapper/`. It
+wraps [GBX.NET](https://github.com/BigBang1112/gbx-net) (`GBX.NET` +
+`GBX.NET.LZO`) inside a thin C# 8 console app that implements the
+protocol below. Build it with:
+
+```bash
+dotnet build parsers/gbx-wrapper -c Release
+```
+
+Then point `parsers.gbx.executable` in `config/settings.yaml` at
+`parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper`.
+
 ## Wrapper protocol (v1)
 
-The wrapper binary lives outside this repo. Its contract:
+The wrapper binary lives outside this repo (except for the reference
+.NET one shipped in `parsers/gbx-wrapper/`). Its contract:
 
 - **Invocation**: `<executable> <kind>` where `<kind>` is `map` or `replay`.
 - **stdin**: one line — absolute path to the artifact file, `\n`-terminated.

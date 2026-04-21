@@ -41,7 +41,7 @@ eval-benchmark-sample:
 	@echo "eval-benchmark-sample: stub (PR 7)"
 
 constraints-sample:
-	@echo "constraints-sample: stub (PR 6)"
+	python -m src.cli neo4j-migrate && python -m src.cli build-graph
 
 test:
 	pytest

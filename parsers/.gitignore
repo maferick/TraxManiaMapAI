@@ -1,0 +1,7 @@
+# .NET build artifacts. The repo-root .gitignore already covers these
+# under parsers/; this file keeps the convention visible at the subdir.
+**/bin/
+**/obj/
+**/_build/
+*.user
+*.suo

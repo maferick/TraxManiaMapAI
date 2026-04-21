@@ -24,10 +24,16 @@ from src.replay import (
     ReplayCleanPipeline,
     default_rules,
 )
+from src.constraints import ConstraintGraphPipeline
 from src.route import RouteExtractor, RoutePipeline
 from src.route import create as create_clusterer
 from src.schema.replays import ReplayCohort
 from src.storage.mariadb import MigrationError, migrate, open_connection
+from src.storage.neo4j_adapter import (
+    Neo4jMigrationError,
+    migrate as neo4j_migrate,
+    open_driver,
+)
 from src.utils.config import code_version, load_config, resolve_config_hash
 
 _LOG = logging.getLogger("src.cli")
@@ -46,6 +52,95 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     else:
         _LOG.info("schema already up to date")
     return 0
+
+
+def _cmd_neo4j_migrate(args: argparse.Namespace) -> int:
+    try:
+        applied = neo4j_migrate(config_path=args.config)
+    except Neo4jMigrationError as exc:
+        _LOG.error("neo4j migration failed: %s", exc)
+        return 1
+    if applied:
+        _LOG.info(
+            "applied %d neo4j migration(s): %s", len(applied), ", ".join(applied)
+        )
+    else:
+        _LOG.info("neo4j schema already up to date")
+    return 0
+
+
+_GRAPH_STAGE = "build_graph"
+
+
+def _cmd_build_graph(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    constraints_cfg = config.get("constraints", {}) or {}
+    stage_version = str(constraints_cfg.get("stage_version", "0.1.0"))
+
+    bench_ids = set(int(x) for x in constraints_cfg.get("benchmark_strong_map_ids", []) or [])
+    broken_ids = set(int(x) for x in constraints_cfg.get("broken_fixture_map_ids", []) or [])
+
+    sha = code_version()
+    config_hash = resolve_config_hash(config)
+    conn = open_connection(config)
+    driver = open_driver(config)
+
+    try:
+        input_ref = (
+            f"snapshot={args.snapshot or 'ALL'};"
+            f"maps={'ALL' if not args.map_ids else ','.join(str(m) for m in args.map_ids)}"
+        )
+        stage_run_id = open_stage_run(
+            conn,
+            stage=_GRAPH_STAGE,
+            stage_version=stage_version,
+            resolved_config_hash=config_hash,
+            code_version=sha,
+            input_ref=input_ref,
+        )
+        pipeline = ConstraintGraphPipeline(
+            mariadb=conn,
+            neo4j_driver=driver,
+            stage_version=stage_version,
+            benchmark_strong_map_ids=bench_ids,
+            broken_fixture_map_ids=broken_ids,
+        )
+        try:
+            stats = pipeline.run(
+                snapshot_id=args.snapshot,
+                map_ids=args.map_ids or None,
+                parser_version=args.parser_version,
+            )
+        except Exception as exc:  # noqa: BLE001
+            close_stage_run(
+                conn,
+                stage_run_id,
+                status="failed",
+                output_summary=None,
+                error_taxonomy_code="unhandled",
+                error_message=str(exc)[:2000],
+            )
+            _LOG.exception("build-graph crashed")
+            return 1
+        status = "partial" if stats.errors else "success"
+        close_stage_run(
+            conn, stage_run_id, status=status, output_summary=stats.to_summary_json()
+        )
+        _LOG.info(
+            "build-graph %s: seen=%d processed=%d skipped_already=%d "
+            "no_placements=%d nodes=%d edges=%d",
+            status,
+            stats.maps_seen,
+            stats.maps_processed,
+            stats.maps_skipped_already_processed,
+            stats.maps_skipped_no_placements,
+            stats.nodes_merged,
+            stats.edges_merged,
+        )
+        return 0 if status == "success" else 1
+    finally:
+        driver.close()
+        conn.close()
 
 
 def _cmd_ingest_maps(args: argparse.Namespace) -> int:
@@ -408,6 +503,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     assign_cohorts_cmd.add_argument("--snapshot", type=str, default=None)
     assign_cohorts_cmd.set_defaults(func=_cmd_assign_cohorts)
+
+    neo4j_migrate_cmd = sub.add_parser(
+        "neo4j-migrate", help="Apply pending Neo4j Cypher migrations"
+    )
+    neo4j_migrate_cmd.set_defaults(func=_cmd_neo4j_migrate)
+
+    build_graph_cmd = sub.add_parser(
+        "build-graph", help="Build the constraint graph from block placements"
+    )
+    build_graph_cmd.add_argument("--snapshot", type=str, default=None)
+    build_graph_cmd.add_argument(
+        "--map-id",
+        dest="map_ids",
+        type=int,
+        action="append",
+        default=None,
+        help="restrict to a specific map id (repeatable)",
+    )
+    build_graph_cmd.add_argument("--parser-version", type=str, default=None)
+    build_graph_cmd.set_defaults(func=_cmd_build_graph)
 
     extract_route_cmd = sub.add_parser(
         "extract-route", help="Infer route artifacts from cohort-assigned replays"

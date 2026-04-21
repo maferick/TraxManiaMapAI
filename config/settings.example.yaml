@@ -42,10 +42,13 @@ ingestion:
 parsers:
   gbx:
     # GBX.NET is isolated behind a subprocess boundary. The Python layer
-    # never links the .NET runtime directly.
-    mode: subprocess          # subprocess | http
-    executable: ""            # path to GBX.NET wrapper binary
-    http_url: ""              # used when mode=http
+    # never links the .NET runtime directly. The reference wrapper ships
+    # in-tree at parsers/gbx-wrapper/ — build with
+    #   dotnet build parsers/gbx-wrapper -c Release
+    # and point `executable` at the produced binary.
+    mode: subprocess          # subprocess | http (http mode not implemented yet)
+    executable: "./parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper"
+    http_url: ""              # reserved for the long-running mode
     timeout_seconds: 30
 
 replay_cleaning:
@@ -107,6 +110,16 @@ route_inference:
   branch_bin_size_m: 10.0
   branch_min_samples_per_cluster: 3
   min_replays_per_map: 3
+
+constraints:
+  # PR 6: constraint graph in Neo4j.
+  # Stage version recorded on :ProcessedMap nodes + stage_run rows.
+  stage_version: "0.1.0"
+  # Optional: map ids whose edges get benchmark-strong or broken-fixture
+  # evidence increments. Typically populated by a separate resolver step
+  # from benchmark manifests; PR 6 accepts pre-resolved lists here.
+  benchmark_strong_map_ids: []
+  broken_fixture_map_ids: []
 
 evaluation:
   evaluator_version: "v0.0.0"
