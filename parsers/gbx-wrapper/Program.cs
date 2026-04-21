@@ -26,9 +26,10 @@ public static class Program
 
     public static int Main(string[] args)
     {
-        if (args.Length != 1 || (args[0] != "map" && args[0] != "replay"))
+        if (args.Length != 1 ||
+            (args[0] != "map" && args[0] != "replay" && args[0] != "diagnose-map"))
         {
-            Console.Error.WriteLine("usage: gbx-wrapper <map|replay>");
+            Console.Error.WriteLine("usage: gbx-wrapper <map|replay|diagnose-map>");
             return 2;
         }
 
@@ -59,9 +60,13 @@ public static class Program
 
         try
         {
-            object payload = args[0] == "map"
-                ? MapParser.Parse(path)
-                : ReplayParser.Parse(path);
+            object payload = args[0] switch
+            {
+                "map" => MapParser.Parse(path),
+                "replay" => ReplayParser.Parse(path),
+                "diagnose-map" => Diagnose.Inspect(path),
+                _ => throw new InvalidOperationException("unreachable"),
+            };
             EmitSuccess(payload);
             return 0;
         }
