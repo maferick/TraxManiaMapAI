@@ -181,11 +181,12 @@ def _upsert_map(
                 source_system, source_map_id, ingestion_snapshot,
                 title, author, environment, style_tags_raw,
                 length_estimate_ms, award_count, average_rating, popularity_metric,
+                track_value, difficulty,
                 has_items, is_block_mode,
                 parser_version, parse_status,
                 created_by_version
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'unparsed', %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'unparsed', %s)
             ON DUPLICATE KEY UPDATE
                 title              = VALUES(title),
                 author             = VALUES(author),
@@ -195,6 +196,8 @@ def _upsert_map(
                 award_count        = VALUES(award_count),
                 average_rating     = VALUES(average_rating),
                 popularity_metric  = VALUES(popularity_metric),
+                track_value        = VALUES(track_value),
+                difficulty         = VALUES(difficulty),
                 has_items          = VALUES(has_items),
                 is_block_mode      = VALUES(is_block_mode)
             """,
@@ -214,6 +217,8 @@ def _upsert_map(
                     else None
                 ),
                 summary.popularity_metric,
+                summary.track_value,
+                summary.difficulty,
                 int(summary.has_items),
                 int(summary.is_block_mode),
                 parser_version,
