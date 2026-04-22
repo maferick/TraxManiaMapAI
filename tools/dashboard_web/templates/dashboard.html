@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>TraxMania · Decision Dashboard</title>
+  <meta http-equiv="refresh" content="{{ refresh_seconds }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Pipeline Decision Dashboard</h1>
+    <span class="collected-at">
+      collected {{ state.collected_at.isoformat(timespec='seconds') }}
+      · auto-refresh {{ refresh_seconds }}s
+    </span>
+  </header>
+
+  {% if state.error %}
+    <section class="panel error">
+      <h2>Collection error</h2>
+      <pre>{{ state.error }}</pre>
+    </section>
+  {% else %}
+
+  <main class="grid">
+    <!-- Health -->
+    <section class="panel panel-health">
+      <h2>System health</h2>
+      <table>
+        {% for h in state.healths %}
+        <tr class="status-{{ h.status | lower }}">
+          <td class="status-cell"><span class="badge">{{ h.status }}</span></td>
+          <td class="name-cell">{{ h.name }}</td>
+          <td class="detail-cell">{{ h.detail }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </section>
+
+    <!-- Coverage -->
+    <section class="panel panel-coverage">
+      <h2>Data coverage</h2>
+      <table>
+        <tr>
+          <td class="label">parsed</td>
+          <td class="num">{{ state.coverage.maps_parsed }} / {{ state.coverage.maps_total }}</td>
+          <td class="pct">{{ state.coverage.maps_parsed | percent(state.coverage.maps_total) }}</td>
+        </tr>
+        <tr>
+          <td class="label">with replays</td>
+          <td class="num">{{ state.coverage.maps_with_replays }} / {{ state.coverage.maps_total }}</td>
+          <td class="pct">{{ state.coverage.maps_with_replays | percent(state.coverage.maps_total) }}</td>
+        </tr>
+        <tr>
+          <td class="label">with clean</td>
+          <td class="num">{{ state.coverage.maps_with_clean_replays }} / {{ state.coverage.maps_total }}</td>
+          <td class="pct">{{ state.coverage.maps_with_clean_replays | percent(state.coverage.maps_total) }}</td>
+        </tr>
+        <tr>
+          <td class="label">with corridors</td>
+          <td class="num">{{ state.coverage.maps_with_corridors }} / {{ state.coverage.maps_total }}</td>
+          <td class="pct">{{ state.coverage.maps_with_corridors | percent(state.coverage.maps_total) }}</td>
+        </tr>
+      </table>
+      <h3>Label pool (time-envelope)</h3>
+      <table>
+        <tr>
+          <td class="label">corridor ∩ clean</td>
+          <td class="num">{{ state.coverage.corridor_maps_with_clean_replays }} / {{ state.coverage.maps_with_corridors }}</td>
+          <td class="pct">{{ state.coverage.corridor_maps_with_clean_replays | percent(state.coverage.maps_with_corridors) }}</td>
+        </tr>
+        <tr>
+          <td class="label">label-usable</td>
+          <td class="num">{{ state.coverage.maps_with_time_envelope_label }} / {{ state.coverage.maps_with_corridors }}</td>
+          <td class="pct">{{ state.coverage.maps_with_time_envelope_label | percent(state.coverage.maps_with_corridors) }}</td>
+        </tr>
+      </table>
+    </section>
+
+    <!-- Bottlenecks -->
+    <section class="panel panel-bottlenecks">
+      <h2>Bottlenecks</h2>
+      {% if state.bottlenecks %}
+        <ul class="bottleneck-list">
+        {% for b in state.bottlenecks %}
+          <li class="severity-{{ b.severity | lower }}">
+            <div class="bottleneck-title">
+              <span class="badge">{{ b.severity }}</span>
+              {{ b.title }}
+            </div>
+            <p class="bottleneck-detail">{{ b.detail }}</p>
+          </li>
+        {% endfor %}
+        </ul>
+      {% else %}
+        <p class="all-clear">no blocking issues detected</p>
+      {% endif %}
+    </section>
+
+    <!-- Freshness -->
+    <section class="panel panel-freshness">
+      <h2>Last run</h2>
+      <table>
+        {% for f in state.freshness %}
+        <tr>
+          <td class="stage-name">{{ f.stage }}</td>
+          <td class="age">{{ f.completed_at | humanize_age }}</td>
+          <td class="stage-status">
+            {% if f.status and f.status != 'success' %}
+              <span class="status-{{ f.status }}">{{ f.status }}</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </section>
+
+    <!-- Counters -->
+    <section class="panel panel-counters">
+      <h2>Counters</h2>
+      <table>
+        <tr><td class="label">replays total</td><td class="num">{{ state.counters.replays_total }}</td></tr>
+        <tr><td class="label">with breadcrumbs</td><td class="num">{{ state.counters.replays_with_breadcrumbs }}</td></tr>
+        <tr><td class="label">corridors</td><td class="num">{{ state.counters.corridors_total }} ({{ state.counters.corridors_top_rank }} top-rank)</td></tr>
+        <tr><td class="label">learned score</td><td class="num">{{ state.counters.corridors_with_learned_score }}</td></tr>
+      </table>
+    </section>
+  </main>
+
+  {% endif %}
+
+  <footer>
+    <a href="/api/state">JSON</a> ·
+    <a href="/healthz">healthz</a>
+  </footer>
+</body>
+</html>

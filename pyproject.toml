@@ -45,6 +45,13 @@ learn = [
 dashboard = [
   "textual>=0.63,<1",
 ]
+# Optional web dashboard (Flask). Install with: pip install -e ".[dashboard_web]".
+# Same decision-layer data (tools/dashboard/state.py) rendered as HTML so
+# the dashboard survives terminal close and is viewable from anywhere on
+# the local network. Read-only; pipeline stage-runs stay on the TUI + CLI.
+dashboard_web = [
+  "flask>=3.0,<4",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
