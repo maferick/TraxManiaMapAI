@@ -79,6 +79,10 @@ trigger_x, trigger_y, trigger_z)`. Written by a new pipeline stage.
 
 ### 2. Traversability subgraph
 
+> See `docs/workstreams/corridor-prereq-2-traversability.md` for the
+> full design of the traversability subgraph. The summary below is
+> preserved for context; the linked document is authoritative.
+
 Our current Neo4j adjacency graph is grid-neighbor-based: any two
 blocks sharing a face are `ADJACENT_TO`. But neighbors aren't always
 drivable between — a wall next to a platform is a neighbor, not a

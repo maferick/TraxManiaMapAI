@@ -1053,6 +1053,11 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_benchmark_cmd.add_argument("--report", type=str, default=None)
     eval_benchmark_cmd.set_defaults(func=_cmd_eval_benchmark)
 
+    # Audit commands live in their own module to keep this parser file
+    # focused on principal pipeline stages.
+    from src.cli.audit_commands import register_audit_commands
+    register_audit_commands(sub)
+
     label_traversability_cmd = sub.add_parser(
         "label-traversability",
         help="Label ADJACENT_TO edges with a traversability state "
