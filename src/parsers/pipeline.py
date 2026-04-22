@@ -14,6 +14,7 @@ discriminator (migration 010). ``is_free=False`` rows carry integer
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -539,6 +540,7 @@ class ReplayParseStats:
     replays_failed_transient: int = 0
     replays_failed_permanent: int = 0
     sidecars_written: int = 0
+    breadcrumbs_written: int = 0
     errors: list[str] = field(default_factory=list)
     completed_at: datetime | None = None
 
@@ -549,6 +551,7 @@ class ReplayParseStats:
             "replays_failed_transient": self.replays_failed_transient,
             "replays_failed_permanent": self.replays_failed_permanent,
             "sidecars_written": self.sidecars_written,
+            "breadcrumbs_written": self.breadcrumbs_written,
             "error_count": len(self.errors),
         }
 
@@ -597,7 +600,9 @@ UPDATE replays SET
     parse_error_code = NULL,
     parse_error_detail = NULL,
     finish_time_ms = COALESCE(finish_time_ms, %s),
-    player_login = COALESCE(player_login, %s)
+    player_login = COALESCE(player_login, %s),
+    breadcrumbs_path = %s,
+    breadcrumbs_hash = %s
 WHERE id = %s
 """
 
@@ -609,6 +614,28 @@ UPDATE replays SET
     parse_error_detail = %s
 WHERE id = %s
 """
+
+
+def _write_breadcrumbs_sidecar(
+    raw_artifact_path: str, breadcrumbs: Mapping[str, Any]
+) -> tuple[Path, str]:
+    """Write `.breadcrumbs.json` next to the raw replay artifact. Returns
+    (path, sha256_hex) so the caller can persist lineage. Atomic via
+    tmp + replace. Bytes are hashed *before* the replace to avoid a
+    race with concurrent parsers.
+    """
+    import os
+    dest = Path(raw_artifact_path + ".breadcrumbs.json")
+    payload = json.dumps(breadcrumbs, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tmp.open("wb") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp.replace(dest)
+    return dest, digest
 
 
 class ReplayParsePipeline:
@@ -714,17 +741,31 @@ class ReplayParsePipeline:
         output: Mapping[str, Any],
         stats: ReplayParseStats,
     ) -> None:
+        # Split breadcrumbs off before writing the telemetry sidecar so
+        # the telemetry schema (ReplayTelemetry: samples non-empty)
+        # isn't polluted with a field it doesn't model.
+        output_mutable = dict(output)
+        breadcrumbs = output_mutable.pop("breadcrumbs", None)
+
         sidecar_path = Path(row.raw_artifact_path + ".telemetry.json")
+        breadcrumbs_path: Path | None = None
+        breadcrumbs_hash: str | None = None
         try:
             import os
             tmp = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
             sidecar_path.parent.mkdir(parents=True, exist_ok=True)
             with tmp.open("w", encoding="utf-8") as fh:
-                json.dump(output, fh, separators=(",", ":"))
+                json.dump(output_mutable, fh, separators=(",", ":"))
                 fh.flush()
                 os.fsync(fh.fileno())
             tmp.replace(sidecar_path)
             stats.sidecars_written += 1
+
+            if isinstance(breadcrumbs, Mapping):
+                breadcrumbs_path, breadcrumbs_hash = _write_breadcrumbs_sidecar(
+                    row.raw_artifact_path, breadcrumbs
+                )
+                stats.breadcrumbs_written += 1
         except Exception as exc:  # noqa: BLE001
             stats.replays_failed_transient += 1
             stats.errors.append(
@@ -747,6 +788,8 @@ class ReplayParsePipeline:
                     (
                         _as_int(finish_time_ms),
                         player_login,
+                        str(breadcrumbs_path) if breadcrumbs_path else None,
+                        breadcrumbs_hash,
                         row.id,
                     ),
                 )
