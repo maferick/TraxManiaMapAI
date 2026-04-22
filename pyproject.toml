@@ -39,6 +39,12 @@ dev = [
 learn = [
   "scikit-learn>=1.3,<2",
 ]
+# Optional TUI for operators. Install with: pip install -e ".[dashboard]".
+# Not imported by any library code — dashboard is a standalone tool
+# under tools/dashboard/ so core pipelines stay CLI-first.
+dashboard = [
+  "textual>=0.63,<1",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
