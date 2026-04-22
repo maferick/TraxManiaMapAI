@@ -44,6 +44,12 @@ from src.corridor.traversability.evidence import (
     update_path_support_for_map,
     update_pattern_weights,
 )
+from src.corridor.traversability.route_corridors import (
+    DEFAULT_TOP_N,
+    RouteCorridorsStats,
+    build_route_corridors,
+    build_route_corridors_for_map,
+)
 from src.corridor.traversability.reachability import (
     VALIDATION_MAP_IDS,
     VALIDATION_MAP_IDS_V1,
@@ -63,6 +69,7 @@ __all__ = [
     "DECO_ADJACENT_CONTAMINATION_CAP",
     "DECO_CLUSTER_NEIGHBOR_THRESHOLD",
     "DEFAULT_DEPTH_CAP",
+    "DEFAULT_TOP_N",
     "DRIVABLE_FAMILIES",
     "EdgeLabel",
     "EnumerationReport",
@@ -78,6 +85,7 @@ __all__ = [
     "P95_PATH_COUNT_CAP",
     "PathSupportStats",
     "ReplayObservation",
+    "RouteCorridorsStats",
     "STATE_SEED_VALID",
     "STATE_UNKNOWN",
     "STATE_UNSUPPORTED",
@@ -87,6 +95,8 @@ __all__ = [
     "VALIDATION_MAP_IDS_V2",
     "ValidationReport",
     "build_map_evidence",
+    "build_route_corridors",
+    "build_route_corridors_for_map",
     "build_set_evidence",
     "classify_family",
     "enumerate_map",

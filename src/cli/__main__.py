@@ -296,6 +296,28 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
     return 0 if not stats.errors else 1
 
 
+def _cmd_build_route_corridors(args: argparse.Namespace) -> int:
+    from src.corridor.traversability import build_route_corridors
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        stats = build_route_corridors(
+            conn, map_ids=args.map_ids,
+            snapshot_id=args.snapshot, limit=args.limit,
+            top_n=args.top_n,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "build-route-corridors: maps_seen=%d with_intervals=%d "
+        "intervals=%d paths=%d top_n=%d errors=%d",
+        stats.maps_seen, stats.maps_with_intervals,
+        stats.intervals_written, stats.paths_written,
+        stats.top_n, len(stats.errors),
+    )
+    return 0 if not stats.errors else 1
+
+
 def _cmd_update_pattern_weights(args: argparse.Namespace) -> int:
     from src.corridor.traversability import update_pattern_weights
     config = load_config(args.config)
@@ -1363,6 +1385,23 @@ def _build_parser() -> argparse.ArgumentParser:
              "to every row. Cross-map single-shot operation.",
     )
     update_pattern_weights_cmd.set_defaults(func=_cmd_update_pattern_weights)
+
+    build_route_corridors_cmd = sub.add_parser(
+        "build-route-corridors",
+        help="Phase 3 D: persist enumerated corridor paths per (map, "
+             "interval). Idempotent per classification_version.",
+    )
+    build_route_corridors_cmd.add_argument("--snapshot", type=str, default=None)
+    build_route_corridors_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+    )
+    build_route_corridors_cmd.add_argument("--limit", type=int, default=None)
+    build_route_corridors_cmd.add_argument(
+        "--top-n", type=int, default=100,
+        help="keep the top N paths per interval (rank-ordered). 0 = keep all. "
+             "Default 100.",
+    )
+    build_route_corridors_cmd.set_defaults(func=_cmd_build_route_corridors)
 
     validate_traversability_cmd = sub.add_parser(
         "validate-traversability",
