@@ -296,6 +296,27 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
     return 0 if not stats.errors else 1
 
 
+def _cmd_update_negative_evidence(args: argparse.Namespace) -> int:
+    from src.corridor.traversability import update_negative_evidence
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        stats = update_negative_evidence(
+            conn, map_ids=args.map_ids,
+            snapshot_id=args.snapshot, limit=args.limit,
+            threshold=args.threshold,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "update-negative-evidence: maps_seen=%d updated=%d examined=%d "
+        "flagged=%d errors=%d",
+        stats.maps_seen, stats.maps_updated, stats.edges_examined,
+        stats.edges_flagged, len(stats.errors),
+    )
+    return 0 if not stats.errors else 1
+
+
 def _cmd_enumerate_corridors(args: argparse.Namespace) -> int:
     import json as _json
     from src.corridor.traversability import (
@@ -1301,6 +1322,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     update_path_support_cmd.add_argument("--limit", type=int, default=None)
     update_path_support_cmd.set_defaults(func=_cmd_update_path_support)
+
+    update_negative_evidence_cmd = sub.add_parser(
+        "update-negative-evidence",
+        help="Phase 3 Signal 4: flag evidence edges in deco clusters. "
+             "Sets negative_evidence_count to the count of NON_DRIVABLE "
+             "axis-neighbors across both endpoint cells (max 12).",
+    )
+    update_negative_evidence_cmd.add_argument("--snapshot", type=str, default=None)
+    update_negative_evidence_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+    )
+    update_negative_evidence_cmd.add_argument("--limit", type=int, default=None)
+    update_negative_evidence_cmd.add_argument(
+        "--threshold", type=int, default=6,
+        help="min combined NON_DRIVABLE neighbor count to flag (default 6 of 12)",
+    )
+    update_negative_evidence_cmd.set_defaults(func=_cmd_update_negative_evidence)
 
     validate_traversability_cmd = sub.add_parser(
         "validate-traversability",
