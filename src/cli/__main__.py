@@ -230,6 +230,28 @@ def _cmd_parse_maps(args: argparse.Namespace) -> int:
 _GRAPH_STAGE = "build_graph"
 
 
+def _cmd_label_traversability(args: argparse.Namespace) -> int:
+    from src.corridor.traversability import TraversabilityLabeler
+    config = load_config(args.config)
+    driver = open_driver(config)
+    try:
+        labeler = TraversabilityLabeler(driver, batch_size=int(args.batch_size))
+        stats = labeler.run()
+    finally:
+        driver.close()
+    _LOG.info(
+        "label-traversability: edges=%d seed_valid=%d unsupported=%d unknown=%d "
+        "unsupported_fraction=%.4f suppression_fraction=%.4f",
+        stats.edges_seen,
+        stats.seed_valid,
+        stats.unsupported,
+        stats.unknown,
+        stats.unsupported_fraction,
+        stats.suppression_fraction,
+    )
+    return 0
+
+
 def _cmd_build_graph(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     constraints_cfg = config.get("constraints", {}) or {}
@@ -1035,6 +1057,17 @@ def _build_parser() -> argparse.ArgumentParser:
     # focused on principal pipeline stages.
     from src.cli.audit_commands import register_audit_commands
     register_audit_commands(sub)
+
+    label_traversability_cmd = sub.add_parser(
+        "label-traversability",
+        help="Label ADJACENT_TO edges with a traversability state "
+             "(seed_valid / unsupported / unknown)",
+    )
+    label_traversability_cmd.add_argument(
+        "--batch-size", type=int, default=2000,
+        help="UNWIND batch size for the per-edge property update (default 2000)",
+    )
+    label_traversability_cmd.set_defaults(func=_cmd_label_traversability)
 
     extract_route_cmd = sub.add_parser(
         "extract-route", help="Infer route artifacts from cohort-assigned replays"
