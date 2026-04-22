@@ -95,13 +95,17 @@ class Dashboard(App):
 
     CSS = """
     Screen { layout: vertical; }
-    #top { height: 22; }
+    #top { height: 34; }
     #left-stack { width: 1fr; }
     #log { width: 2fr; border: round $secondary; padding: 1 2; }
     .panel { border: round $accent; padding: 0 1; margin: 0 1 0 0; }
     #health { height: 9; }
     #coverage { height: 12; }
+    #learning { height: 9; }
+    #diversity { height: 8; }
+    #next_actions { height: 9; }
     #bottom-row { height: 13; }
+    #a5-row { height: 9; }
     #bottlenecks { width: 2fr; }
     #freshness { width: 1fr; }
     #counters { width: 1fr; }
@@ -125,6 +129,11 @@ class Dashboard(App):
             with Vertical(id="left-stack"):
                 yield Static("(loading…)", id="health", classes="panel")
                 yield Static("(loading…)", id="coverage", classes="panel")
+                # A5 — learning + diversity + next-action row, decisions first.
+                with Horizontal(id="a5-row"):
+                    yield Static("(loading…)", id="learning", classes="panel")
+                    yield Static("(loading…)", id="diversity", classes="panel")
+                    yield Static("(loading…)", id="next_actions", classes="panel")
                 with Horizontal(id="bottom-row"):
                     yield Static("(loading…)", id="bottlenecks", classes="panel")
                     with Vertical(id="right-stack"):

@@ -1,11 +1,17 @@
 """Dashboard decision-layer state.
 
-Status panel → decision dashboard. Instead of raw counts, surface:
+Status panel → decision dashboard. Surfaces:
 
 - **Health** per subsystem (GREEN / YELLOW / RED)
 - **Data coverage** fractions (maps with replays / corridors / usable labels)
 - **Bottlenecks** — zero-valued counters that block downstream work
 - **Freshness** — last completed_at per pipeline stage
+- **Learning state** — model hash, scheme tag, pred distribution stats
+  (A5)
+- **Diversity watchdog** — heuristic vs learned Jaccard-based
+  diversity comparison (A5; per PR #25 watchdog thresholds)
+- **Next best action** — rule-engine suggestions prioritised by the
+  state of the other panels (A5)
 
 Everything here is one DB snapshot → one :class:`DashboardState`.
 Pure functions; no Textual dependency so the module can be tested
@@ -70,6 +76,56 @@ class StageFreshness:
 
 
 @dataclass(frozen=True)
+class LearningState:
+    """Current learned-model snapshot from ``route_corridors``.
+
+    Pulled from the persisted score column rather than a separate
+    metrics table: the data the dashboard cares about is *what
+    model is currently deployed*, not *what we trained last hour*.
+    A full re-train produces a new hash + scheme tag that this
+    picks up on the next refresh."""
+    scheme_tag: str | None               # e.g. "time_envelope_v2_weighted@0.1.0"
+    model_hash_short: str | None         # first 12 hex chars of sha256
+    scored_corridors: int
+    pred_min: float
+    pred_median: float
+    pred_max: float
+    pred_mean: float
+    pred_stdev: float
+    heuristic_stdev: float | None        # for the stdev-ratio comparison
+    stdev_ratio: float | None            # pred_stdev / heuristic_stdev
+    status: str                          # GREEN / YELLOW / RED / UNKNOWN
+
+
+@dataclass(frozen=True)
+class DiversityState:
+    """A3 watchdog snapshot. Compares heuristic vs learned top-K
+    diversity (Jaccard-on-cells) to catch ranker collapse.
+
+    Thresholds match the PR #25 baseline — diversity delta of
+    -0.10 median or worse is RED; -0.05 to -0.10 is YELLOW;
+    -0.05 or better (incl. positive) is GREEN."""
+    intervals_compared: int
+    heuristic_diversity_median: float | None
+    learned_diversity_median: float | None
+    delta_median: float | None
+    delta_mean: float | None
+    status: str                          # GREEN / YELLOW / RED / UNKNOWN
+    reason: str
+
+
+@dataclass(frozen=True)
+class NextAction:
+    """One suggested action, ordered by ``priority`` (lower = higher
+    priority). ``command`` is a copy-pasteable CLI invocation where
+    relevant; empty string for analysis-only suggestions."""
+    priority: int                        # 1 (highest) upward
+    title: str
+    reason: str
+    command: str = ""
+
+
+@dataclass(frozen=True)
 class DashboardState:
     """One snapshot. :func:`fetch_state` builds it; render helpers
     consume it."""
@@ -79,6 +135,9 @@ class DashboardState:
     bottlenecks: list[Bottleneck] = field(default_factory=list)
     freshness: list[StageFreshness] = field(default_factory=list)
     counters: dict[str, int] = field(default_factory=dict)
+    learning: LearningState | None = None
+    diversity: DiversityState | None = None
+    next_actions: list[NextAction] = field(default_factory=list)
     error: str | None = None           # set when collection failed; UI shows this verbatim
 
 
@@ -105,6 +164,21 @@ _CORRIDOR_MAPS_YELLOW = 10
 # learned score. Zero means "not scored yet."
 _LEARNING_SCORED_GREEN = 0.80
 _LEARNING_SCORED_YELLOW = 0.01
+
+# Learning distribution: stdev ratio = learned_stdev / heuristic_stdev.
+# Heuristic hand-tuned distribution is roughly 0.17 on scale-1k; the
+# learned model wants to be at least comparable in expressiveness.
+# Post-A4 we measured ratio ≈ 0.60 — that's the current GREEN anchor.
+_LEARNING_STDEV_RATIO_GREEN = 0.50
+_LEARNING_STDEV_RATIO_YELLOW = 0.20
+
+# Diversity watchdog: PR #25 baseline was delta_median -0.068 under
+# the pre-A4 ranker. Post-A4 we landed at -0.039, so the GREEN band
+# needs to be tolerant of small negatives while catching regressions.
+# delta = learned_diversity - heuristic_diversity; more negative ⇒
+# learned collapses more.
+_DIVERSITY_DELTA_GREEN = -0.05
+_DIVERSITY_DELTA_YELLOW = -0.10
 
 
 # ---------------------------------------------------------------------
@@ -345,6 +419,273 @@ def _compute_bottlenecks(c: dict[str, int]) -> list[Bottleneck]:
     return out
 
 
+def _fetch_learning_state(cur: Any) -> LearningState:
+    """Single-row summary of the currently-deployed learned model.
+
+    Reads directly from ``route_corridors``: whatever scheme/hash
+    scored the most rows is treated as "the deployed model." If the
+    DB has multiple scheme tags (e.g. mid-migration), we surface the
+    dominant one and note the count — dashboards shouldn't hide
+    inconsistent state."""
+    cur.execute(
+        """
+        SELECT
+            COUNT(*) AS n,
+            COALESCE(MIN(learned_corridor_score), 0),
+            COALESCE(MAX(learned_corridor_score), 0),
+            COALESCE(AVG(learned_corridor_score), 0),
+            COALESCE(STDDEV_SAMP(learned_corridor_score), 0),
+            COALESCE(STDDEV_SAMP(corridor_confidence), 0)
+        FROM route_corridors
+        WHERE learned_corridor_score IS NOT NULL
+        """
+    )
+    n, p_min, p_max, p_mean, p_stdev, h_stdev = cur.fetchone()
+    n = int(n or 0)
+    # Median via a separate query — MariaDB lacks a scalar MEDIAN().
+    if n > 0:
+        cur.execute(
+            """
+            SELECT learned_corridor_score
+            FROM route_corridors
+            WHERE learned_corridor_score IS NOT NULL
+            ORDER BY learned_corridor_score
+            LIMIT 1 OFFSET %s
+            """,
+            (n // 2,),
+        )
+        median_row = cur.fetchone()
+        p_median = float(median_row[0]) if median_row else 0.0
+    else:
+        p_median = 0.0
+    # Dominant (scheme, hash) pair by row count.
+    cur.execute(
+        """
+        SELECT learned_score_version, learned_score_model_hash, COUNT(*)
+        FROM route_corridors
+        WHERE learned_corridor_score IS NOT NULL
+        GROUP BY 1, 2
+        ORDER BY 3 DESC
+        LIMIT 1
+        """
+    )
+    provenance = cur.fetchone()
+    if provenance is None:
+        scheme_tag = None
+        hash_short = None
+    else:
+        scheme_tag = str(provenance[0]) if provenance[0] is not None else None
+        raw_hash = str(provenance[1]) if provenance[1] is not None else ""
+        hash_short = raw_hash[:12] if raw_hash else None
+
+    h_stdev_f = float(h_stdev) if h_stdev else 0.0
+    p_stdev_f = float(p_stdev) if p_stdev else 0.0
+    ratio: float | None
+    if h_stdev_f > 0 and n > 0:
+        ratio = p_stdev_f / h_stdev_f
+        if ratio >= _LEARNING_STDEV_RATIO_GREEN:
+            status = "GREEN"
+        elif ratio >= _LEARNING_STDEV_RATIO_YELLOW:
+            status = "YELLOW"
+        else:
+            status = "RED"
+    elif n == 0:
+        ratio = None
+        status = "UNKNOWN"
+    else:
+        ratio = None
+        status = "UNKNOWN"
+
+    return LearningState(
+        scheme_tag=scheme_tag,
+        model_hash_short=hash_short,
+        scored_corridors=n,
+        pred_min=float(p_min),
+        pred_median=p_median,
+        pred_max=float(p_max),
+        pred_mean=float(p_mean),
+        pred_stdev=p_stdev_f,
+        heuristic_stdev=(h_stdev_f if h_stdev_f > 0 else None),
+        stdev_ratio=ratio,
+        status=status,
+    )
+
+
+def _compute_diversity_state(conn: Connection) -> DiversityState:
+    """Compute the A3 watchdog metric on-the-fly.
+
+    Not cached: the metric is cheap enough for scale-1k (< 1s on
+    898 corridors) and caching introduces staleness + a cache-
+    invalidation problem we don't need yet. If the corpus grows
+    beyond ~10k corridors, add a TTL."""
+    # Soft-import so the dashboard module doesn't require the
+    # diversity module to exist if someone strips it out.
+    try:
+        from src.diversity.metrics import build_report, fetch_paths
+    except Exception as exc:  # noqa: BLE001
+        return DiversityState(
+            intervals_compared=0,
+            heuristic_diversity_median=None,
+            learned_diversity_median=None,
+            delta_median=None,
+            delta_mean=None,
+            status="UNKNOWN",
+            reason=f"diversity module unavailable: {exc}",
+        )
+    try:
+        paths = fetch_paths(conn)
+    except Exception as exc:  # noqa: BLE001
+        return DiversityState(
+            intervals_compared=0,
+            heuristic_diversity_median=None,
+            learned_diversity_median=None,
+            delta_median=None,
+            delta_mean=None,
+            status="UNKNOWN",
+            reason=f"diversity fetch failed: {exc}",
+        )
+    report = build_report(paths, k=3)
+    h = report.heuristic_summary
+    l = report.learned_summary
+    if h is None or l is None:
+        # Missing on either side → we can't compare. Common cause:
+        # score-corridors or score-corridors-learned hasn't run yet.
+        reason_parts = []
+        if h is None:
+            reason_parts.append("no heuristic scores")
+        if l is None:
+            reason_parts.append("no learned scores")
+        return DiversityState(
+            intervals_compared=0,
+            heuristic_diversity_median=(
+                h.diversity_median if h is not None else None
+            ),
+            learned_diversity_median=(
+                l.diversity_median if l is not None else None
+            ),
+            delta_median=None,
+            delta_mean=None,
+            status="UNKNOWN",
+            reason="; ".join(reason_parts) or "no data",
+        )
+    delta_median = l.diversity_median - h.diversity_median
+    delta_mean = l.diversity_mean - h.diversity_mean
+    if delta_median >= _DIVERSITY_DELTA_GREEN:
+        status = "GREEN"
+        reason = "learned and heuristic diversity within tolerance"
+    elif delta_median >= _DIVERSITY_DELTA_YELLOW:
+        status = "YELLOW"
+        reason = f"learned collapses {-delta_median:.3f} below heuristic (median)"
+    else:
+        status = "RED"
+        reason = (
+            f"learned collapses {-delta_median:.3f} below heuristic "
+            "— investigate"
+        )
+    return DiversityState(
+        intervals_compared=l.intervals_compared,
+        heuristic_diversity_median=h.diversity_median,
+        learned_diversity_median=l.diversity_median,
+        delta_median=delta_median,
+        delta_mean=delta_mean,
+        status=status,
+        reason=reason,
+    )
+
+
+def _compute_next_actions(
+    *,
+    healths: list[Health],
+    bottlenecks: list[Bottleneck],
+    learning: LearningState | None,
+    diversity: DiversityState | None,
+) -> list[NextAction]:
+    """Rule engine. Priority order (lower wins):
+
+    1  run assign-cohorts (if cohorts RED)
+    2  run score-corridors-learned (if learning scored coverage RED)
+    3  investigate diversity regression (if diversity RED)
+    4  refresh learned scoring (if learning stdev ratio RED, i.e.
+       the deployed model compresses severely — retrain candidate)
+    5  backfill replay coverage (if replay coverage thin YELLOW)
+    6  healthy — consider next phase / OpenPlanet telemetry
+
+    The list is ordered so the top entry is always the highest-
+    leverage next move."""
+    health_by_name = {h.name: h for h in healths}
+    actions: list[NextAction] = []
+
+    cohorts = health_by_name.get("cohorts")
+    if cohorts and cohorts.status == "RED":
+        actions.append(NextAction(
+            priority=1,
+            title="Assign cohorts to clean replays",
+            reason=cohorts.detail,
+            command="python -m src.cli assign-cohorts",
+        ))
+
+    learn_health = health_by_name.get("learning")
+    if learn_health and learn_health.status == "RED":
+        actions.append(NextAction(
+            priority=2,
+            title="Score corridors with the latest model",
+            reason=learn_health.detail,
+            command=(
+                "python -m src.cli score-corridors-learned "
+                "--model-report reports/corridor-ranking-model-v2-weighted.json"
+            ),
+        ))
+
+    if diversity is not None and diversity.status == "RED":
+        actions.append(NextAction(
+            priority=3,
+            title="Investigate ranker diversity collapse",
+            reason=diversity.reason,
+            command="python -m src.cli diagnose-corridor-diversity --output reports/corridor-diversity-watchdog.md",
+        ))
+
+    if learning is not None and learning.status == "RED":
+        actions.append(NextAction(
+            priority=4,
+            title="Refresh learned scoring (ratio below floor)",
+            reason=(
+                f"pred stdev {learning.pred_stdev:.4f} vs heuristic "
+                f"{learning.heuristic_stdev or 0:.4f} "
+                f"(ratio {(learning.stdev_ratio or 0):.2f}); "
+                "train a new model and re-score"
+            ),
+            command=(
+                "python -m src.cli diagnose-corridor-ranking "
+                "--output reports/corridor-ranking-diagnostics.md"
+            ),
+        ))
+
+    for b in bottlenecks:
+        if b.severity == "YELLOW" and "coverage" in b.title.lower():
+            actions.append(NextAction(
+                priority=5,
+                title="Consider targeted replay backfill",
+                reason=b.detail,
+                command=(
+                    "python -m src.cli report-replay-coverage "
+                    "--snapshot 2026-04-scale-1k "
+                    "--output reports/replay-coverage-expansion.md"
+                ),
+            ))
+            break   # one coverage suggestion is enough
+
+    if not actions:
+        actions.append(NextAction(
+            priority=6,
+            title="System is healthy",
+            reason="No blocking issues detected. Consider the next "
+                   "phase (OpenPlanet telemetry / generation scoping).",
+        ))
+
+    actions.sort(key=lambda a: a.priority)
+    return actions
+
+
 def _fetch_freshness(cur: Any) -> list[StageFreshness]:
     """Latest completed_at per stage. Uses the stage_runs table
     directly so any stage that records a run lights up here."""
@@ -381,16 +722,40 @@ def fetch_state(conn: Connection) -> DashboardState:
         with cursor(conn) as cur:
             counters = _fetch_counters(cur)
             freshness = _fetch_freshness(cur)
+            learning = _fetch_learning_state(cur)
     except Exception as exc:  # noqa: BLE001
         return DashboardState(
             collected_at=_utcnow(),
             error=f"collection failed: {exc}",
         )
+    # Diversity metric opens its own cursor (pulls all corridors).
+    # Wrapped so a metric-side failure doesn't wipe the dashboard.
+    try:
+        diversity = _compute_diversity_state(conn)
+    except Exception as exc:  # noqa: BLE001
+        diversity = DiversityState(
+            intervals_compared=0,
+            heuristic_diversity_median=None,
+            learned_diversity_median=None,
+            delta_median=None,
+            delta_mean=None,
+            status="UNKNOWN",
+            reason=f"diversity compute failed: {exc}",
+        )
+    healths = _compute_healths(counters)
+    bottlenecks = _compute_bottlenecks(counters)
+    next_actions = _compute_next_actions(
+        healths=healths, bottlenecks=bottlenecks,
+        learning=learning, diversity=diversity,
+    )
     return DashboardState(
         collected_at=_utcnow(),
-        healths=_compute_healths(counters),
+        healths=healths,
         coverage=_compute_coverage(counters),
-        bottlenecks=_compute_bottlenecks(counters),
+        bottlenecks=bottlenecks,
         freshness=freshness,
         counters=counters,
+        learning=learning,
+        diversity=diversity,
+        next_actions=next_actions,
     )

@@ -13,18 +13,25 @@ from tools.dashboard.render import (
     _humanize_age,
     render_bottlenecks,
     render_coverage,
+    render_diversity,
     render_freshness,
     render_health,
+    render_learning,
+    render_next_actions,
 )
 from tools.dashboard.state import (
     Bottleneck,
     Coverage,
+    DiversityState,
     Health,
+    LearningState,
+    NextAction,
     StageFreshness,
     _bucket,
     _compute_bottlenecks,
     _compute_coverage,
     _compute_healths,
+    _compute_next_actions,
 )
 
 
@@ -261,3 +268,184 @@ class TestRenderers:
         assert "ingest_maps" in text
         assert "2h ago" in text
         assert "partial" in text  # non-success status annotated
+
+
+# ---------------------------------------------------------------------
+# A5: Learning / Diversity / NextAction
+# ---------------------------------------------------------------------
+
+def _mk_learning(status: str = "GREEN", ratio: float | None = 0.6) -> LearningState:
+    return LearningState(
+        scheme_tag="time_envelope_v2_weighted@0.1.0",
+        model_hash_short="12cc0e58c19a",
+        scored_corridors=898,
+        pred_min=0.03, pred_median=0.55, pred_max=0.72,
+        pred_mean=0.55, pred_stdev=0.105,
+        heuristic_stdev=0.173,
+        stdev_ratio=ratio,
+        status=status,
+    )
+
+
+def _mk_diversity(
+    status: str = "GREEN",
+    *,
+    delta_median: float | None = -0.04,
+    reason: str = "learned and heuristic diversity within tolerance",
+) -> DiversityState:
+    return DiversityState(
+        intervals_compared=124,
+        heuristic_diversity_median=0.58,
+        learned_diversity_median=0.54,
+        delta_median=delta_median,
+        delta_mean=-0.004,
+        status=status,
+        reason=reason,
+    )
+
+
+class TestRenderLearning:
+    def test_none_shows_placeholder(self) -> None:
+        out = render_learning(None)
+        assert "no learned scores yet" in out.lower()
+
+    def test_empty_learning_shows_placeholder(self) -> None:
+        state = LearningState(
+            scheme_tag=None, model_hash_short=None,
+            scored_corridors=0,
+            pred_min=0, pred_median=0, pred_max=0, pred_mean=0, pred_stdev=0,
+            heuristic_stdev=None, stdev_ratio=None, status="UNKNOWN",
+        )
+        out = render_learning(state)
+        assert "no learned scores yet" in out.lower()
+
+    def test_full_learning_shows_metrics(self) -> None:
+        out = render_learning(_mk_learning(ratio=0.60))
+        assert "time_envelope_v2_weighted" in out
+        assert "12cc0e58c19a" in out
+        assert "0.60" in out        # ratio
+        assert "898" in out         # scored count
+        assert "0.1050" in out      # pred_stdev
+
+
+class TestRenderDiversity:
+    def test_none_shows_placeholder(self) -> None:
+        out = render_diversity(None)
+        assert "not collected" in out.lower()
+
+    def test_green_renders_deltas(self) -> None:
+        out = render_diversity(_mk_diversity(status="GREEN"))
+        assert "GREEN" in out
+        assert "124" in out         # intervals
+        assert "0.5800" in out
+        assert "0.5400" in out
+
+    def test_unknown_status_suppresses_numbers(self) -> None:
+        state = DiversityState(
+            intervals_compared=0,
+            heuristic_diversity_median=None,
+            learned_diversity_median=None,
+            delta_median=None, delta_mean=None,
+            status="UNKNOWN",
+            reason="no learned scores",
+        )
+        out = render_diversity(state)
+        assert "comparison unavailable" in out.lower() or "no learned scores" in out.lower()
+
+
+class TestRenderNextActions:
+    def test_empty_shows_placeholder(self) -> None:
+        out = render_next_actions([])
+        assert "nothing suggested" in out.lower()
+
+    def test_top_action_emphasised_with_command(self) -> None:
+        actions = [
+            NextAction(
+                priority=1,
+                title="Assign cohorts to clean replays",
+                reason="728 clean replays unlabeled",
+                command="python -m src.cli assign-cohorts",
+            ),
+            NextAction(
+                priority=4,
+                title="Refresh learned scoring",
+                reason="ratio below floor",
+            ),
+        ]
+        out = render_next_actions(actions)
+        assert "Assign cohorts" in out
+        assert "assign-cohorts" in out
+        # Lower-priority item listed collapsed.
+        assert "Refresh learned scoring" in out
+
+
+class TestNextActionRuleEngine:
+    """_compute_next_actions picks the right top action per state."""
+
+    def _base_args(
+        self,
+        *,
+        cohorts: str = "GREEN",
+        learning_cov: str = "GREEN",
+        diversity: str = "GREEN",
+        learning_ratio: str = "GREEN",
+        bottleneck_coverage_thin: bool = False,
+    ) -> dict:
+        healths = [
+            Health("cohorts", cohorts, "ok"),
+            Health("learning", learning_cov, "ok"),
+        ]
+        bottlenecks = []
+        if bottleneck_coverage_thin:
+            bottlenecks.append(Bottleneck(
+                "YELLOW",
+                "Replay coverage thin on corridor maps",
+                "60 of 100 lack a clean replay",
+            ))
+        return {
+            "healths": healths,
+            "bottlenecks": bottlenecks,
+            "learning": _mk_learning(status=learning_ratio),
+            "diversity": _mk_diversity(status=diversity),
+        }
+
+    def test_red_cohorts_wins(self) -> None:
+        actions = _compute_next_actions(
+            **self._base_args(cohorts="RED", learning_cov="RED", diversity="RED"),
+        )
+        assert actions[0].title.lower().startswith("assign cohorts")
+        assert "assign-cohorts" in actions[0].command
+
+    def test_red_learning_coverage_before_diversity(self) -> None:
+        actions = _compute_next_actions(
+            **self._base_args(learning_cov="RED", diversity="RED"),
+        )
+        assert "score corridors" in actions[0].title.lower()
+
+    def test_red_diversity_surfaces_when_only_signal(self) -> None:
+        actions = _compute_next_actions(
+            **self._base_args(diversity="RED"),
+        )
+        assert "diversity" in actions[0].title.lower()
+        assert "diagnose-corridor-diversity" in actions[0].command
+
+    def test_yellow_coverage_surfaces_when_no_red(self) -> None:
+        actions = _compute_next_actions(
+            **self._base_args(bottleneck_coverage_thin=True),
+        )
+        assert "replay backfill" in actions[0].title.lower()
+
+    def test_all_healthy_shows_healthy_message(self) -> None:
+        actions = _compute_next_actions(**self._base_args())
+        assert len(actions) == 1
+        assert "healthy" in actions[0].title.lower()
+        assert actions[0].command == ""
+
+    def test_actions_sorted_by_priority(self) -> None:
+        actions = _compute_next_actions(**self._base_args(
+            cohorts="RED", learning_cov="RED",
+            diversity="RED", learning_ratio="RED",
+            bottleneck_coverage_thin=True,
+        ))
+        priorities = [a.priority for a in actions]
+        assert priorities == sorted(priorities)
