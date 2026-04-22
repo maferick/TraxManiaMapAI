@@ -9,10 +9,15 @@ from __future__ import annotations
 
 import pytest
 
-from src.corridor.traversability.classification import CLASSIFICATION_VERSION
+from src.corridor.traversability.classification import (
+    CLASSIFICATION_VERSION,
+    FamilyBucket,
+)
 from src.corridor.traversability.evidence import (
+    DECO_CLUSTER_NEIGHBOR_THRESHOLD,
     _build_rows_for_map,
     _cell_to_placement_map,
+    _count_non_drivable_neighbors,
 )
 
 
@@ -186,3 +191,48 @@ class TestCellToPlacementMap:
             _row(101, 0, 0, 0, "Road"),
         ])
         assert m[(0, 0, 0)] == 101
+
+
+class TestCountNonDrivableNeighbors:
+    """§4 aggregates 6-axis neighbor counts per cell. A cell with no
+    non-drivable neighbors scores 0 (minimum); fully deco-surrounded
+    scores 6 (maximum)."""
+
+    def test_no_neighbors_returns_zero(self) -> None:
+        n = _count_non_drivable_neighbors((0, 0, 0), {})
+        assert n == 0
+
+    def test_all_six_deco_returns_six(self) -> None:
+        buckets = {
+            (1, 0, 0): FamilyBucket.NON_DRIVABLE,
+            (-1, 0, 0): FamilyBucket.NON_DRIVABLE,
+            (0, 1, 0): FamilyBucket.NON_DRIVABLE,
+            (0, -1, 0): FamilyBucket.NON_DRIVABLE,
+            (0, 0, 1): FamilyBucket.NON_DRIVABLE,
+            (0, 0, -1): FamilyBucket.NON_DRIVABLE,
+        }
+        assert _count_non_drivable_neighbors((0, 0, 0), buckets) == 6
+
+    def test_mixed_only_counts_non_drivable(self) -> None:
+        buckets = {
+            (1, 0, 0): FamilyBucket.NON_DRIVABLE,    # counts
+            (-1, 0, 0): FamilyBucket.DRIVABLE,        # drivable — doesn't count
+            (0, 1, 0): FamilyBucket.AMBIGUOUS,        # ambiguous — doesn't count
+            (0, -1, 0): FamilyBucket.NON_DRIVABLE,    # counts
+        }
+        assert _count_non_drivable_neighbors((0, 0, 0), buckets) == 2
+
+    def test_diagonal_neighbors_not_counted(self) -> None:
+        # Only axis-6 are considered; diagonals ignored even if deco.
+        buckets = {
+            (1, 1, 0): FamilyBucket.NON_DRIVABLE,   # diagonal
+            (1, 0, 1): FamilyBucket.NON_DRIVABLE,   # diagonal
+        }
+        assert _count_non_drivable_neighbors((0, 0, 0), buckets) == 0
+
+
+class TestDecoClusterThreshold:
+    def test_threshold_is_half_of_twelve(self) -> None:
+        # 12 total possible axis-neighbors across both endpoints;
+        # 6 = 50% of surrounding cells = "in a deco cluster."
+        assert DECO_CLUSTER_NEIGHBOR_THRESHOLD == 6

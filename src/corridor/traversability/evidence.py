@@ -234,6 +234,22 @@ WHERE map_id = %s
   AND classification_version = %s
 """
 
+_UPDATE_NEGATIVE_EVIDENCE_SQL = """
+UPDATE traversability_edge_evidence
+SET negative_evidence_count = %s
+WHERE map_id = %s
+  AND src_block_id = %s
+  AND dst_block_id = %s
+  AND classification_version = %s
+"""
+
+# Signal 4 threshold: an edge's endpoints have six axis-neighbors each
+# (12 total). Edges with ≥ this many NON_DRIVABLE surrounding cells
+# are flagged as "in a deco cluster" — technically drivable under
+# classification but in a neighborhood that racing corridors
+# shouldn't prefer. 6 of 12 = 50% of surrounding cells are deco.
+DECO_CLUSTER_NEIGHBOR_THRESHOLD: int = 6
+
 
 @dataclass
 class PathSupportStats:
@@ -351,6 +367,177 @@ def update_path_support_for_map(
         cur.executemany(_UPDATE_PATH_SUPPORT_SQL, params)
     conn.commit()
     return len(intervals), len(edge_counts), path_count_total
+
+
+@dataclass
+class NegativeEvidenceStats:
+    """Counters for a Signal-4 update run."""
+    started_at: datetime
+    classification_version: str
+    maps_seen: int = 0
+    maps_updated: int = 0
+    edges_examined: int = 0
+    edges_flagged: int = 0
+    errors: list[str] = field(default_factory=list)
+    completed_at: datetime | None = None
+
+    def to_summary_json(self) -> dict[str, Any]:
+        return {
+            "classification_version": self.classification_version,
+            "maps_seen": self.maps_seen,
+            "maps_updated": self.maps_updated,
+            "edges_examined": self.edges_examined,
+            "edges_flagged": self.edges_flagged,
+            "error_count": len(self.errors),
+        }
+
+
+def _count_non_drivable_neighbors(
+    cell: tuple[int, int, int],
+    cell_bucket: dict[tuple[int, int, int], FamilyBucket],
+) -> int:
+    """Return how many of the 6 axis-neighbors of ``cell`` are
+    NON_DRIVABLE. Cells that aren't placed at all (no block_placements
+    row there) count as 0 — absence isn't evidence of non-drivability.
+    """
+    x, y, z = cell
+    count = 0
+    for nx, ny, nz in (
+        (x + 1, y, z), (x - 1, y, z),
+        (x, y + 1, z), (x, y - 1, z),
+        (x, y, z + 1), (x, y, z - 1),
+    ):
+        bucket = cell_bucket.get((nx, ny, nz))
+        if bucket is FamilyBucket.NON_DRIVABLE:
+            count += 1
+    return count
+
+
+def update_negative_evidence_for_map(
+    conn: Connection,
+    map_id: int,
+    *,
+    classification_version: str = CLASSIFICATION_VERSION,
+    threshold: int = DECO_CLUSTER_NEIGHBOR_THRESHOLD,
+) -> tuple[int, int]:
+    """For each evidence row on this map, compute the combined
+    NON_DRIVABLE-neighbor count across both endpoint cells. When the
+    total meets ``threshold`` (default 6 of 12 = 50%), increment
+    ``negative_evidence_count``.
+
+    Non-drivable neighbors are measured from the full placements grid
+    — not limited to the evidence table — so the count captures deco
+    clustering even when the edges themselves are already labeled
+    unsupported. Returns (edges_examined, edges_flagged).
+    """
+    placements = _fetch_grid_placements(conn, map_id=map_id)
+    if not placements:
+        return 0, 0
+    cell_to_pid = _cell_to_placement_map(placements)
+    cell_bucket: dict[tuple[int, int, int], FamilyBucket] = {}
+    for pid, x, y, z, family in placements:
+        cell = (x, y, z)
+        bucket = classify_family(family)
+        existing = cell_bucket.get(cell)
+        if existing is None:
+            cell_bucket[cell] = bucket
+            continue
+        # Same promotion as cell_to_pid for consistency.
+        if (existing is FamilyBucket.NON_DRIVABLE
+                and bucket is not FamilyBucket.NON_DRIVABLE):
+            cell_bucket[cell] = bucket
+        elif (existing is FamilyBucket.AMBIGUOUS
+              and bucket is FamilyBucket.DRIVABLE):
+            cell_bucket[cell] = bucket
+
+    # Load existing edges from the evidence table. Only rows at this
+    # classification_version participate.
+    with cursor(conn) as cur:
+        cur.execute(
+            "SELECT src_block_id, dst_block_id FROM traversability_edge_evidence "
+            "WHERE map_id = %s AND classification_version = %s",
+            (map_id, classification_version),
+        )
+        edges = cur.fetchall()
+
+    # Build a reverse map: placement_id → cell. Needed because the
+    # evidence table stores placement IDs, not cells.
+    pid_to_cell: dict[int, tuple[int, int, int]] = {
+        pid: cell for cell, pid in cell_to_pid.items()
+    }
+    # Precompute neighbor counts per cell for speed — many edges share
+    # the same endpoint cells so caching avoids recomputation.
+    neighbor_cache: dict[tuple[int, int, int], int] = {}
+
+    def _count(cell: tuple[int, int, int]) -> int:
+        if cell in neighbor_cache:
+            return neighbor_cache[cell]
+        n = _count_non_drivable_neighbors(cell, cell_bucket)
+        neighbor_cache[cell] = n
+        return n
+
+    updates: list[tuple[int, int, int, int, str]] = []
+    flagged = 0
+    for src_pid, dst_pid in edges:
+        cell_a = pid_to_cell.get(int(src_pid))
+        cell_b = pid_to_cell.get(int(dst_pid))
+        if cell_a is None or cell_b is None:
+            continue
+        total = _count(cell_a) + _count(cell_b)
+        if total >= threshold:
+            updates.append((total, map_id, int(src_pid), int(dst_pid),
+                            classification_version))
+            flagged += 1
+
+    if updates:
+        with cursor(conn) as cur:
+            cur.executemany(_UPDATE_NEGATIVE_EVIDENCE_SQL, updates)
+        conn.commit()
+    return len(edges), flagged
+
+
+def update_negative_evidence(
+    conn: Connection,
+    map_ids: Iterable[int] | None = None,
+    *,
+    snapshot_id: str | None = None,
+    classification_version: str = CLASSIFICATION_VERSION,
+    limit: int | None = None,
+    threshold: int = DECO_CLUSTER_NEIGHBOR_THRESHOLD,
+) -> NegativeEvidenceStats:
+    """Set-level Signal-4 updater. Per-map failures are captured."""
+    stats = NegativeEvidenceStats(
+        started_at=_utcnow(),
+        classification_version=classification_version,
+    )
+    target_ids: list[int]
+    if map_ids is None:
+        target_ids = _fetch_candidate_map_ids(
+            conn, snapshot_id=snapshot_id, limit=limit,
+        )
+    else:
+        target_ids = [int(m) for m in map_ids]
+    try:
+        for mid in target_ids:
+            stats.maps_seen += 1
+            try:
+                examined, flagged = update_negative_evidence_for_map(
+                    conn, mid,
+                    classification_version=classification_version,
+                    threshold=threshold,
+                )
+            except Exception as exc:  # noqa: BLE001
+                conn.rollback()
+                stats.errors.append(f"map={mid}: {exc}")
+                _LOG.exception("negative_evidence update failed on map %d", mid)
+                continue
+            if flagged > 0:
+                stats.maps_updated += 1
+            stats.edges_examined += examined
+            stats.edges_flagged += flagged
+    finally:
+        stats.completed_at = _utcnow()
+    return stats
 
 
 def update_path_support(
