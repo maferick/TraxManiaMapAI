@@ -148,6 +148,7 @@ def regularization_sweep(
     neg_ids: set[int] | None = None,
     test_frac: float = 0.2,
     random_seed: int = 42,
+    sample_weights: np.ndarray | None = None,
 ) -> list[RegularizationSweepRow]:
     """Train the same data at each alpha, report metrics + prediction
     stdev. The train/test split is shared across all alphas (same
@@ -158,17 +159,25 @@ def regularization_sweep(
     (learned_corridor_score distribution). ``weight_l2_norm`` shows
     how hard ridge is shrinking — monotone-decreasing with α as a
     sanity check.
+
+    ``sample_weights`` (optional) lets A4's weighted variant share
+    this primitive. Weights are applied to the train split only;
+    test metrics are computed unweighted so the numbers stay
+    comparable across schemes.
     """
     train_idx, test_idx = _deterministic_split(
         n=X.shape[0], test_frac=test_frac, seed=random_seed,
     )
     X_train, X_test = X[train_idx], X[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
+    sw_train = (
+        sample_weights[train_idx] if sample_weights is not None else None
+    )
 
     rows: list[RegularizationSweepRow] = []
     for alpha in alphas:
         model = RidgeRegression(alpha=alpha, feature_names=feature_names)
-        model.fit(X_train, y_train)
+        model.fit(X_train, y_train, sample_weights=sw_train)
         assert model.weights is not None
         pred_train = model.predict(X_train)
         pred_test = model.predict(X_test)
@@ -216,6 +225,7 @@ def feature_ablation(
     neg_ids: set[int] | None = None,
     test_frac: float = 0.2,
     random_seed: int = 42,
+    sample_weights: np.ndarray | None = None,
 ) -> tuple[RegularizationSweepRow, list[FeatureAblationRow]]:
     """Return (baseline_row, per_feature_rows).
 
@@ -241,6 +251,7 @@ def feature_ablation(
         feature_names=feature_names,
         pos_ids=pos_ids, neg_ids=neg_ids,
         test_frac=test_frac, random_seed=random_seed,
+        sample_weights=sample_weights,
     )
     baseline = baseline_rows[0]
 
@@ -253,6 +264,7 @@ def feature_ablation(
             feature_names=feature_names,
             pos_ids=pos_ids, neg_ids=neg_ids,
             test_frac=test_frac, random_seed=random_seed,
+            sample_weights=sample_weights,
         )
         ab = ab_rows[0]
         rows.append(FeatureAblationRow(

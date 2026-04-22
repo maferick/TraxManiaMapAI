@@ -93,7 +93,11 @@ def _run_scheme(
     production_alpha: float,
     pos_ids: set[int],
     neg_ids: set[int],
+    weight_by_id: dict[int, float] | None = None,
 ) -> SchemeDiagnostic:
+    """``weight_by_id`` (optional) plumbs A4's per-corridor sample
+    weights through to the ridge fit. Only the weighted v2 scheme
+    passes a non-None map; other schemes stay uniform-weighted."""
     summary = label_distribution_summary(label_scheme, label_by_id)
     if not label_by_id:
         return SchemeDiagnostic(
@@ -108,16 +112,28 @@ def _run_scheme(
     y = np.array(
         [label_by_id[v.corridor_id] for v in kept_vectors], dtype=np.float64,
     )
+    if weight_by_id is None:
+        sample_weights = None
+    else:
+        # Missing-weight corridors fall back to 1.0 (treated as
+        # unweighted); log-only edge case since the caller should
+        # align label_by_id and weight_by_id keys.
+        sample_weights = np.array(
+            [weight_by_id.get(v.corridor_id, 1.0) for v in kept_vectors],
+            dtype=np.float64,
+        )
 
     sweep = regularization_sweep(
         vectors=kept_vectors, X=X_kept, y=y, alphas=alphas,
         feature_names=FEATURE_NAMES,
         pos_ids=pos_ids, neg_ids=neg_ids,
+        sample_weights=sample_weights,
     )
     baseline, ablation = feature_ablation(
         vectors=kept_vectors, X=X_kept, y=y, alpha=production_alpha,
         feature_names=FEATURE_NAMES,
         pos_ids=pos_ids, neg_ids=neg_ids,
+        sample_weights=sample_weights,
     )
     return SchemeDiagnostic(
         label_scheme=label_scheme,
@@ -190,6 +206,18 @@ def run_diagnostics(
         alphas=alphas, production_alpha=production_alpha,
         pos_ids=pos_ids, neg_ids=neg_ids,
     ))
+    # A4 — same v2 labels, plus per-corridor sample weights driven by
+    # observed-time CV (from A2's label_quality_weight). See
+    # docs/learning/label-quality-weighted-training.md.
+    if v2_labels and v2_quality:
+        schemes.append(_run_scheme(
+            label_scheme="time_envelope_v2_weighted",
+            label_by_id=v2_labels,
+            vectors=vectors, X=X,
+            alphas=alphas, production_alpha=production_alpha,
+            pos_ids=pos_ids, neg_ids=neg_ids,
+            weight_by_id=v2_quality,
+        ))
 
     # Summary of the v2 label_quality_weight distribution so the
     # reader sees whether the CV-based weighting has any range.

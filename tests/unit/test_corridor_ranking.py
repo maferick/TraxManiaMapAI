@@ -198,6 +198,58 @@ class TestModel:
         high_alpha = RidgeRegression(alpha=10.0).fit(X, y)
         assert np.max(np.abs(low_alpha.weights)) > np.max(np.abs(high_alpha.weights))
 
+    # ---- A4: sample-weighted fit ------------------------------------
+
+    def test_uniform_sample_weights_match_unweighted(self) -> None:
+        rng = np.random.default_rng(7)
+        X = rng.standard_normal((40, 3))
+        y = X @ np.array([1.0, -2.0, 0.5])
+        unw = RidgeRegression(alpha=0.01).fit(X, y)
+        w = RidgeRegression(alpha=0.01).fit(
+            X, y, sample_weights=np.ones(40),
+        )
+        np.testing.assert_allclose(unw.weights, w.weights, atol=1e-10)
+
+    def test_sample_weights_change_fit(self) -> None:
+        # Two contradictory clusters: first half says y=+1, second half says y=-1.
+        # Weighting first half heavily should pull the fit toward +1.
+        X = np.ones((20, 1))
+        y = np.concatenate([np.ones(10), -np.ones(10)])
+        weights = np.concatenate([np.full(10, 100.0), np.ones(10)])
+        biased = RidgeRegression(alpha=0.001).fit(
+            X, y, sample_weights=weights,
+        )
+        unweighted = RidgeRegression(alpha=0.001).fit(X, y)
+        # Unweighted mean ≈ 0; heavily biased toward +1 under weights.
+        assert abs(unweighted.weights[0]) < 0.05
+        assert biased.weights[0] > 0.7
+
+    def test_zero_weights_ignore_samples(self) -> None:
+        # First sample is noise; zero-weighting it should recover the
+        # signal from the remaining data.
+        X = np.array([[0.0], [1.0], [2.0], [3.0]])
+        y = np.array([999.0, 1.0, 2.0, 3.0])
+        w = np.array([0.0, 1.0, 1.0, 1.0])
+        m = RidgeRegression(alpha=0.001).fit(X, y, sample_weights=w)
+        # With the noisy sample dropped, weight ≈ 1.0 (line through origin).
+        assert abs(m.weights[0] - 1.0) < 0.01
+
+    def test_negative_weights_rejected(self) -> None:
+        m = RidgeRegression(alpha=1.0)
+        with pytest.raises(ValueError, match="non-negative"):
+            m.fit(
+                np.zeros((3, 2)), np.zeros(3),
+                sample_weights=np.array([1.0, -1.0, 1.0]),
+            )
+
+    def test_weight_shape_mismatch_rejected(self) -> None:
+        m = RidgeRegression(alpha=1.0)
+        with pytest.raises(ValueError, match="sample_weights"):
+            m.fit(
+                np.zeros((3, 2)), np.zeros(3),
+                sample_weights=np.ones(4),
+            )
+
 
 class TestMetrics:
     def test_rmse_zero_on_exact(self) -> None:
