@@ -39,6 +39,10 @@ from src.corridor.ranking.time_envelope_labels import (
     _load_map_mean_interval_ms,
     synthesize_time_envelope_labels,
 )
+from src.corridor.ranking.time_envelope_labels_v2 import (
+    load_map_interval_stats,
+    synthesize_time_envelope_v2_labels,
+)
 from src.corridor.ranking.train import _fetch_cohort_map_ids
 from src.corridor.traversability.classification import CLASSIFICATION_VERSION
 
@@ -69,6 +73,10 @@ class DiagnosticReport:
     alphas: tuple[float, ...]
     production_alpha: float
     schemes: list[SchemeDiagnostic]
+    # v2-only extras — populated when time_envelope_v2 ran
+    v2_aggregation_method: str | None = None
+    v2_map_count: int = 0
+    v2_label_quality_summary: dict[str, float] | None = None
 
 
 def _utcnow() -> datetime:
@@ -127,9 +135,18 @@ def run_diagnostics(
     alphas: Sequence[float] = DEFAULT_ALPHAS,
     production_alpha: float = 1.0,
     classification_version: str = CLASSIFICATION_VERSION,
+    v2_aggregation_method: str = "trimmed_mean",
+    v2_trimmed_q: float = 0.1,
+    v2_outlier_sigma: float | None = 3.0,
 ) -> DiagnosticReport:
     """End-to-end: materialize features + labels, run the three
-    diagnostics per label scheme, return a combined report."""
+    diagnostics per label scheme (inverse_rank, time_envelope,
+    time_envelope_v2), return a combined report.
+
+    v2 parameters control the label refinement pass (see
+    docs/learning/time-envelope-label-v2.md). Defaults match the
+    A2 design note."""
+    import statistics as _stats
     rows = load_corridor_rows(
         conn, classification_version=classification_version,
     )
@@ -140,7 +157,16 @@ def run_diagnostics(
     pos_ids = _fetch_cohort_map_ids(conn, ("tech-strong-proxy",))
     neg_ids = _fetch_cohort_map_ids(conn, ("tech-mediocre-proxy",))
 
+    # v1 time-envelope inputs.
     mean_intervals = _load_map_mean_interval_ms(conn)
+    # v2 time-envelope inputs — refined aggregation + variance/quality.
+    v2_stats = load_map_interval_stats(
+        conn,
+        method=v2_aggregation_method,    # type: ignore[arg-type]
+        trimmed_q=v2_trimmed_q,
+        outlier_sigma=v2_outlier_sigma,
+    )
+    v2_labels, v2_quality = synthesize_time_envelope_v2_labels(rows, v2_stats)
 
     schemes: list[SchemeDiagnostic] = []
     schemes.append(_run_scheme(
@@ -157,6 +183,27 @@ def run_diagnostics(
         alphas=alphas, production_alpha=production_alpha,
         pos_ids=pos_ids, neg_ids=neg_ids,
     ))
+    schemes.append(_run_scheme(
+        label_scheme="time_envelope_v2",
+        label_by_id=v2_labels,
+        vectors=vectors, X=X,
+        alphas=alphas, production_alpha=production_alpha,
+        pos_ids=pos_ids, neg_ids=neg_ids,
+    ))
+
+    # Summary of the v2 label_quality_weight distribution so the
+    # reader sees whether the CV-based weighting has any range.
+    if v2_quality:
+        q_values = list(v2_quality.values())
+        quality_summary = {
+            "min": float(min(q_values)),
+            "median": float(_stats.median(q_values)),
+            "mean": float(_stats.mean(q_values)),
+            "max": float(max(q_values)),
+            "stdev": float(_stats.stdev(q_values)) if len(q_values) >= 2 else 0.0,
+        }
+    else:
+        quality_summary = None
 
     return DiagnosticReport(
         started_at=_utcnow(),
@@ -165,6 +212,9 @@ def run_diagnostics(
         alphas=tuple(float(a) for a in alphas),
         production_alpha=production_alpha,
         schemes=schemes,
+        v2_aggregation_method=v2_aggregation_method,
+        v2_map_count=len(v2_stats),
+        v2_label_quality_summary=quality_summary,
     )
 
 
@@ -187,8 +237,22 @@ def _write_header(buf: io.StringIO, report: DiagnosticReport) -> None:
     )
     buf.write(f"- **Production α**: {report.production_alpha}\n")
     buf.write(
-        f"- **Alpha sweep**: {', '.join(str(a) for a in report.alphas)}\n\n"
+        f"- **Alpha sweep**: {', '.join(str(a) for a in report.alphas)}\n"
     )
+    if report.v2_aggregation_method is not None:
+        buf.write(
+            f"- **v2 aggregation**: `{report.v2_aggregation_method}` "
+            f"({report.v2_map_count} maps)\n"
+        )
+        if report.v2_label_quality_summary is not None:
+            q = report.v2_label_quality_summary
+            buf.write(
+                f"- **v2 label_quality_weight**: "
+                f"median={q['median']:.3f} mean={q['mean']:.3f} "
+                f"range=[{q['min']:.3f}, {q['max']:.3f}] "
+                f"stdev={q['stdev']:.3f}\n"
+            )
+    buf.write("\n")
     buf.write(
         "Purpose: distinguish between LABEL compression, REGULARIZATION "
         "compression, and FEATURE compression as causes of the learned "
