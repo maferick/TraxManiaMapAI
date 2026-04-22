@@ -83,6 +83,11 @@ class IntervalEnumeration:
     non_drivable_cells_in_corridors: int = 0
     deco_adjacent_contamination: float = 0.0
     top_corridor_stable: bool | None = None   # None if not assessed
+    # Optional: full enumerated paths as cell lists. Populated only
+    # when enumerate_map is called with keep_paths=True (used by the
+    # path_support aggregator in evidence.py). Omitted by default to
+    # keep memory bounded on maps with thousands of paths.
+    paths: list[list[tuple[int, int, int]]] = field(default_factory=list)
 
     @property
     def passes_sanity_1_unsupported(self) -> bool:
@@ -444,6 +449,7 @@ def enumerate_map(
     map_id: int,
     *,
     depth_cap: int = DEFAULT_DEPTH_CAP,
+    keep_paths: bool = False,
 ) -> list[IntervalEnumeration]:
     """Enumerate corridor candidates for every (spawn → non-spawn)
     interval on one map. Returns an empty list if the map can't be
@@ -502,6 +508,8 @@ def enumerate_map(
             depth_cap=depth_cap,
         )
         iv.path_count = len(paths)
+        if keep_paths:
+            iv.paths = paths
         _evaluate_corridor_sanity(
             paths, cell_to_family, virtual_edges, all_anchor_cells, iv,
         )

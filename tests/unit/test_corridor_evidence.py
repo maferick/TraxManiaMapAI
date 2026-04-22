@@ -10,7 +10,10 @@ from __future__ import annotations
 import pytest
 
 from src.corridor.traversability.classification import CLASSIFICATION_VERSION
-from src.corridor.traversability.evidence import _build_rows_for_map
+from src.corridor.traversability.evidence import (
+    _build_rows_for_map,
+    _cell_to_placement_map,
+)
 
 
 def _row(pid: int, x: int, y: int, z: int, fam: str) -> tuple[int, int, int, int, str]:
@@ -146,3 +149,40 @@ class TestBuildRowsForMap:
         # Two cells (0,0,0)=100 and (1,0,0)=100. An edge (100, 100)
         # collapses to self-loop → skipped.
         assert rows == []
+
+
+class TestCellToPlacementMap:
+    """The cell→placement mapping used by the path_support update must
+    use the same promotion rule as _build_rows_for_map. If they drift,
+    path_support writes would miss rows that DO exist in the evidence
+    table (because the evidence table was built with one resolution
+    but path_support lookup uses another)."""
+
+    def test_single_placement_maps_directly(self) -> None:
+        m = _cell_to_placement_map([_row(100, 0, 0, 0, "Platform")])
+        assert m == {(0, 0, 0): 100}
+
+    def test_layered_cell_uses_drivable_pid(self) -> None:
+        # Same cell with Structure first (pid 100) and Road second
+        # (pid 101). The map should resolve (0,0,0) → 101.
+        m = _cell_to_placement_map([
+            _row(100, 0, 0, 0, "Structure"),
+            _row(101, 0, 0, 0, "Road"),
+        ])
+        assert m[(0, 0, 0)] == 101
+
+    def test_layered_drivable_first_not_downgraded(self) -> None:
+        # Road first, Structure second — should NOT switch to Structure.
+        m = _cell_to_placement_map([
+            _row(101, 0, 0, 0, "Road"),
+            _row(100, 0, 0, 0, "Structure"),
+        ])
+        assert m[(0, 0, 0)] == 101
+
+    def test_ambiguous_promotes_to_drivable(self) -> None:
+        # Open (ambiguous) first, Road (drivable) second — promote.
+        m = _cell_to_placement_map([
+            _row(100, 0, 0, 0, "Open"),
+            _row(101, 0, 0, 0, "Road"),
+        ])
+        assert m[(0, 0, 0)] == 101

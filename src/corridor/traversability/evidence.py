@@ -225,6 +225,180 @@ def build_map_evidence(
     return counts
 
 
+_UPDATE_PATH_SUPPORT_SQL = """
+UPDATE traversability_edge_evidence
+SET path_support_count = %s
+WHERE map_id = %s
+  AND src_block_id = %s
+  AND dst_block_id = %s
+  AND classification_version = %s
+"""
+
+
+@dataclass
+class PathSupportStats:
+    """Counters from a Signal-1 update run."""
+    started_at: datetime
+    classification_version: str
+    maps_seen: int = 0
+    maps_updated: int = 0
+    maps_skipped_no_evidence: int = 0
+    intervals_enumerated: int = 0
+    edges_updated: int = 0
+    path_count_total: int = 0
+    errors: list[str] = field(default_factory=list)
+    completed_at: datetime | None = None
+
+    def to_summary_json(self) -> dict[str, Any]:
+        return {
+            "classification_version": self.classification_version,
+            "maps_seen": self.maps_seen,
+            "maps_updated": self.maps_updated,
+            "maps_skipped_no_evidence": self.maps_skipped_no_evidence,
+            "intervals_enumerated": self.intervals_enumerated,
+            "edges_updated": self.edges_updated,
+            "path_count_total": self.path_count_total,
+            "error_count": len(self.errors),
+        }
+
+
+def _cell_to_placement_map(
+    placements: list[tuple[int, int, int, int, str]],
+) -> dict[tuple[int, int, int], int]:
+    """Resolve each (x, y, z) cell to a single placement_id using the
+    same priority rule as _build_rows_for_map (DRIVABLE > AMBIGUOUS >
+    NON_DRIVABLE). Mirrors the evidence-row build so the path-support
+    update hits the same rows that exist in the evidence table."""
+    cell_map: dict[tuple[int, int, int], tuple[int, FamilyBucket]] = {}
+    for pid, x, y, z, family in placements:
+        cell = (x, y, z)
+        bucket = classify_family(family)
+        existing = cell_map.get(cell)
+        if existing is None:
+            cell_map[cell] = (pid, bucket)
+            continue
+        _, existing_bucket = existing
+        if (existing_bucket is FamilyBucket.NON_DRIVABLE
+                and bucket is not FamilyBucket.NON_DRIVABLE):
+            cell_map[cell] = (pid, bucket)
+        elif (existing_bucket is FamilyBucket.AMBIGUOUS
+              and bucket is FamilyBucket.DRIVABLE):
+            cell_map[cell] = (pid, bucket)
+    return {cell: pid for cell, (pid, _) in cell_map.items()}
+
+
+def update_path_support_for_map(
+    conn: Connection,
+    map_id: int,
+    *,
+    classification_version: str = CLASSIFICATION_VERSION,
+) -> tuple[int, int, int]:
+    """Enumerate corridor paths for this map, count how often each
+    real grid edge is traversed, and UPDATE path_support_count on the
+    matching evidence rows. Virtual (observation-derived) edges are
+    excluded from counts — only edges that exist in
+    traversability_edge_evidence get updated.
+
+    Returns (intervals_enumerated, edges_updated, path_count_total).
+    Raises on DB errors so the caller can record them.
+    """
+    # Local import to avoid a circular reference (evidence ↔ enumeration).
+    from src.corridor.traversability.enumeration import enumerate_map
+
+    intervals = enumerate_map(conn, map_id, keep_paths=True)
+    if not intervals:
+        return 0, 0, 0
+
+    placements = _fetch_grid_placements(conn, map_id=map_id)
+    cell_to_pid = _cell_to_placement_map(placements)
+
+    # Accumulate (lo_pid, hi_pid) → count across all paths in all
+    # intervals for this map. An edge used in two paths of two
+    # different intervals counts twice — that's the Signal 1 intent
+    # ("edges recurring in plausible paths gain weight").
+    edge_counts: dict[tuple[int, int], int] = {}
+    path_count_total = 0
+    for iv in intervals:
+        for path in iv.paths:
+            path_count_total += 1
+            for i in range(len(path) - 1):
+                pid_a = cell_to_pid.get(path[i])
+                pid_b = cell_to_pid.get(path[i + 1])
+                if pid_a is None or pid_b is None:
+                    # Virtual-edge endpoints may map to pids we did
+                    # resolve, but the cell→pid step above uses the
+                    # same policy as the evidence builder, so a legit
+                    # grid edge must have both pids. Missing-pid =
+                    # cell never made it into block_placements at
+                    # all, which shouldn't happen — defensive skip.
+                    continue
+                if pid_a == pid_b:
+                    continue
+                lo, hi = (pid_a, pid_b) if pid_a < pid_b else (pid_b, pid_a)
+                edge_counts[(lo, hi)] = edge_counts.get((lo, hi), 0) + 1
+
+    if not edge_counts:
+        return len(intervals), 0, path_count_total
+
+    # executemany UPDATE. Rows that don't exist in the evidence table
+    # (virtual-edge pairs that never hit a grid adjacency) silently
+    # match zero rows — that's fine, UPDATE is a no-op there.
+    params = [
+        (count, map_id, lo, hi, classification_version)
+        for (lo, hi), count in edge_counts.items()
+    ]
+    with cursor(conn) as cur:
+        cur.executemany(_UPDATE_PATH_SUPPORT_SQL, params)
+    conn.commit()
+    return len(intervals), len(edge_counts), path_count_total
+
+
+def update_path_support(
+    conn: Connection,
+    map_ids: Iterable[int] | None = None,
+    *,
+    snapshot_id: str | None = None,
+    classification_version: str = CLASSIFICATION_VERSION,
+    limit: int | None = None,
+) -> PathSupportStats:
+    """Run update_path_support_for_map across a map set. Per-map
+    failures are captured, not fatal — mirrors build_set_evidence.
+    """
+    stats = PathSupportStats(
+        started_at=_utcnow(),
+        classification_version=classification_version,
+    )
+    target_ids: list[int]
+    if map_ids is None:
+        target_ids = _fetch_candidate_map_ids(
+            conn, snapshot_id=snapshot_id, limit=limit,
+        )
+    else:
+        target_ids = [int(m) for m in map_ids]
+    try:
+        for mid in target_ids:
+            stats.maps_seen += 1
+            try:
+                ivs, edges, paths = update_path_support_for_map(
+                    conn, mid, classification_version=classification_version,
+                )
+            except Exception as exc:  # noqa: BLE001
+                conn.rollback()
+                stats.errors.append(f"map={mid}: {exc}")
+                _LOG.exception("path_support update failed on map %d", mid)
+                continue
+            if edges == 0:
+                stats.maps_skipped_no_evidence += 1
+                continue
+            stats.maps_updated += 1
+            stats.intervals_enumerated += ivs
+            stats.edges_updated += edges
+            stats.path_count_total += paths
+    finally:
+        stats.completed_at = _utcnow()
+    return stats
+
+
 def build_set_evidence(
     conn: Connection,
     map_ids: Iterable[int] | None = None,
