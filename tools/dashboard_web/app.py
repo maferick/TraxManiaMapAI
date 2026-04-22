@@ -130,8 +130,14 @@ def create_app(*, state_fetcher: Any = None, refresh_seconds: int = 10) -> Flask
 
 
 def run() -> None:
-    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
-    port = int(os.environ.get("DASHBOARD_PORT", "8765"))
+    # Defaults bind to 0.0.0.0 so the dashboard is reachable from
+    # other devices on the LAN (phone, second screen) without env
+    # tweaking. The app surfaces pipeline telemetry only — no secrets,
+    # no PII, no write endpoints — so LAN exposure is the intended
+    # threat model for this dev tool. Set DASHBOARD_HOST=127.0.0.1 if
+    # you want localhost-only.
+    host = os.environ.get("DASHBOARD_HOST", "0.0.0.0")  # noqa: S104
+    port = int(os.environ.get("DASHBOARD_PORT", "18080"))
     debug = os.environ.get("DASHBOARD_DEBUG", "").lower() in ("1", "true", "yes")
     app = create_app()
     _LOG.info("dashboard_web on http://%s:%d", host, port)
