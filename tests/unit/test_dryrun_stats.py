@@ -6,6 +6,7 @@ from src.evaluation.dryrun.stats import (
     disagreement_pairs,
     histogram,
     quartiles,
+    rank_correlation,
     separation_auc,
 )
 
@@ -92,3 +93,30 @@ class TestDisagreementPairs:
         a = {1: 0.9}
         b = {2: 0.1}
         assert disagreement_pairs(a, b, threshold=0.1) == []
+
+
+class TestRankCorrelation:
+    def test_perfect_positive(self) -> None:
+        a = {1: 0.1, 2: 0.2, 3: 0.3, 4: 0.4}
+        b = {1: 10.0, 2: 20.0, 3: 30.0, 4: 40.0}
+        assert rank_correlation(a, b) == pytest.approx(1.0)
+
+    def test_perfect_negative(self) -> None:
+        a = {1: 0.1, 2: 0.2, 3: 0.3, 4: 0.4}
+        b = {1: 40.0, 2: 30.0, 3: 20.0, 4: 10.0}
+        assert rank_correlation(a, b) == pytest.approx(-1.0)
+
+    def test_only_shared_maps_contribute(self) -> None:
+        a = {1: 1.0, 2: 2.0, 3: 3.0, 99: 999.0}  # 99 only in a
+        b = {1: 10.0, 2: 20.0, 3: 30.0}
+        assert rank_correlation(a, b) == pytest.approx(1.0)
+
+    def test_none_when_too_few_shared(self) -> None:
+        assert rank_correlation({1: 1.0}, {1: 2.0}) is None
+        assert rank_correlation({1: 1.0}, {2: 2.0}) is None
+
+    def test_none_on_constant_series(self) -> None:
+        # No variance → correlation undefined.
+        a = {1: 0.5, 2: 0.5, 3: 0.5}
+        b = {1: 1.0, 2: 2.0, 3: 3.0}
+        assert rank_correlation(a, b) is None
