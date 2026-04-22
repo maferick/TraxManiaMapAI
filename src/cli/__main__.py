@@ -297,6 +297,48 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
     return 0 if not stats.errors else 1
 
 
+def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
+    import json as _json
+    from src.corridor.ranking import train_and_evaluate
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        report = train_and_evaluate(
+            conn,
+            alpha=args.alpha,
+            test_frac=args.test_frac,
+            random_seed=args.random_seed,
+        )
+    finally:
+        conn.close()
+
+    _LOG.info(
+        "train-corridor-ranking: rows=%d train=%d test=%d alpha=%.3f seed=%d",
+        report.total_rows, report.train_rows, report.test_rows,
+        report.alpha, report.random_seed,
+    )
+    _LOG.info(
+        "  train_rmse=%.4f test_rmse=%.4f "
+        "test_rank_corr=%.4f heuristic_rank_corr=%.4f",
+        report.train_rmse, report.test_rmse,
+        report.test_rank_corr, report.heuristic_rank_corr,
+    )
+    _LOG.info(
+        "  AUC learned=%s heuristic=%s delta=%s (n_maps_learned=%d n_maps_heuristic=%d)",
+        f"{report.auc_learned:.4f}" if report.auc_learned is not None else "n/a",
+        f"{report.auc_heuristic:.4f}" if report.auc_heuristic is not None else "n/a",
+        f"{report.auc_delta:+.4f}" if report.auc_delta is not None else "n/a",
+        report.n_maps_learned, report.n_maps_heuristic,
+    )
+    if args.output:
+        report.write_json(Path(args.output))
+        _LOG.info("wrote model report: %s", args.output)
+    if args.verbose:
+        for name, weight in zip(report.feature_names, report.weights):
+            _LOG.info("  weight[%-30s] = %+.4f", name, weight)
+    return 0
+
+
 def _cmd_score_route_corridors(args: argparse.Namespace) -> int:
     from src.corridor import score_corridors
     config = load_config(args.config)
@@ -1437,6 +1479,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     score_route_corridors_cmd.add_argument("--limit", type=int, default=None)
     score_route_corridors_cmd.set_defaults(func=_cmd_score_route_corridors)
+
+    train_corridor_ranking_cmd = sub.add_parser(
+        "train-corridor-ranking",
+        help="Phase 4: train ridge-regression corridor ranking model "
+             "and compare AUC vs corridor_confidence heuristic.",
+    )
+    train_corridor_ranking_cmd.add_argument("--alpha", type=float, default=1.0,
+        help="ridge regularization strength (default 1.0)")
+    train_corridor_ranking_cmd.add_argument("--test-frac", type=float, default=0.2,
+        help="fraction of rows held out for test (default 0.2)")
+    train_corridor_ranking_cmd.add_argument("--random-seed", type=int, default=42,
+        help="random seed for the train/test split (default 42)")
+    train_corridor_ranking_cmd.add_argument("--output", type=str, default=None,
+        help="write the training report (JSON) to this path")
+    train_corridor_ranking_cmd.add_argument("--verbose", action="store_true",
+        help="log learned per-feature weights")
+    train_corridor_ranking_cmd.set_defaults(func=_cmd_train_corridor_ranking)
 
     validate_traversability_cmd = sub.add_parser(
         "validate-traversability",
