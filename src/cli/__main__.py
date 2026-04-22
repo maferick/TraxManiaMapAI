@@ -252,6 +252,29 @@ def _cmd_label_traversability(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_build_traversability_evidence(args: argparse.Namespace) -> int:
+    from src.corridor.traversability import build_set_evidence
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        stats = build_set_evidence(
+            conn,
+            map_ids=args.map_ids,
+            snapshot_id=args.snapshot,
+            limit=args.limit,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "build-traversability-evidence: maps_seen=%d maps_written=%d "
+        "skipped=%d edges=%d (sv=%d us=%d uk=%d) errors=%d version=%s",
+        stats.maps_seen, stats.maps_written, stats.maps_skipped_no_placements,
+        stats.edges_written, stats.seed_valid, stats.unsupported,
+        stats.unknown, len(stats.errors), stats.classification_version,
+    )
+    return 0 if not stats.errors else 1
+
+
 def _cmd_enumerate_corridors(args: argparse.Namespace) -> int:
     import json as _json
     from src.corridor.traversability import (
@@ -1228,6 +1251,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="UNWIND batch size for the per-edge property update (default 2000)",
     )
     label_traversability_cmd.set_defaults(func=_cmd_label_traversability)
+
+    build_evidence_cmd = sub.add_parser(
+        "build-traversability-evidence",
+        help="Phase 3: materialize per-map traversability_edge_evidence rows "
+             "(design note §6.1). Idempotent under classification_version.",
+    )
+    build_evidence_cmd.add_argument("--snapshot", type=str, default=None,
+        help="restrict to maps in this ingestion_snapshot (default: all parsed)")
+    build_evidence_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+        help="restrict to specific maps.id values (repeatable); overrides --snapshot",
+    )
+    build_evidence_cmd.add_argument("--limit", type=int, default=None,
+        help="cap on map count for smoke runs")
+    build_evidence_cmd.set_defaults(func=_cmd_build_traversability_evidence)
 
     validate_traversability_cmd = sub.add_parser(
         "validate-traversability",

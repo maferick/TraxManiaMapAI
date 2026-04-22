@@ -30,6 +30,11 @@ from src.corridor.traversability.enumeration import (
     enumerate_map,
     enumerate_set,
 )
+from src.corridor.traversability.evidence import (
+    EvidenceBuildStats,
+    build_map_evidence,
+    build_set_evidence,
+)
 from src.corridor.traversability.reachability import (
     VALIDATION_MAP_IDS,
     VALIDATION_MAP_IDS_V1,
@@ -51,6 +56,7 @@ __all__ = [
     "DRIVABLE_FAMILIES",
     "EdgeLabel",
     "EnumerationReport",
+    "EvidenceBuildStats",
     "FamilyBucket",
     "IntervalEnumeration",
     "LabelingStats",
@@ -67,6 +73,8 @@ __all__ = [
     "VALIDATION_MAP_IDS_V1",
     "VALIDATION_MAP_IDS_V2",
     "ValidationReport",
+    "build_map_evidence",
+    "build_set_evidence",
     "classify_family",
     "enumerate_map",
     "enumerate_set",
