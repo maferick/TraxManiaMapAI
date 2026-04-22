@@ -81,9 +81,15 @@ class RidgeRegression:
 @dataclass
 class TrainingReport:
     """Everything a training run produces: model, metrics, metadata.
-    Serialized to JSON for downstream analysis + comparison."""
+    Serialized to JSON for downstream analysis + comparison.
+
+    One ``TrainingReport`` = one label scheme. A run that trains both
+    the inverse-rank baseline and a time-envelope model emits a
+    :class:`ComparativeTrainingReport` holding two of these.
+    """
+    label_scheme: str                 # "inverse_rank" | "time_envelope"
     trained_at: datetime
-    total_rows: int
+    total_rows: int                   # rows LABELED for this scheme (may differ across schemes)
     train_rows: int
     test_rows: int
     alpha: float
@@ -103,6 +109,7 @@ class TrainingReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "label_scheme": self.label_scheme,
             "trained_at": self.trained_at.isoformat(),
             "total_rows": self.total_rows,
             "train_rows": self.train_rows,
@@ -121,6 +128,35 @@ class TrainingReport:
             "n_maps_heuristic": self.n_maps_heuristic,
             "random_seed": self.random_seed,
             "extra": self.extra,
+        }
+
+    def write_json(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+
+
+@dataclass
+class ComparativeTrainingReport:
+    """Pair of TrainingReports — the inverse-rank baseline and the
+    time-envelope model, trained on the same feature matrix and split
+    but different label schemes. Enables head-to-head comparison of
+    whether a behavior-grounded label shifts model behavior.
+
+    ``time_envelope`` may be None when no clean replays supply
+    checkpoint times on any corridor-owning map (the label set would be
+    empty). In that case only the baseline trains.
+    """
+    inverse_rank: TrainingReport
+    time_envelope: TrainingReport | None
+    map_mean_interval_ms_count: int   # how many maps contributed a mean interval time
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "inverse_rank": self.inverse_rank.to_dict(),
+            "time_envelope": (
+                self.time_envelope.to_dict() if self.time_envelope is not None else None
+            ),
+            "map_mean_interval_ms_count": self.map_mean_interval_ms_count,
         }
 
     def write_json(self, path: Path) -> None:

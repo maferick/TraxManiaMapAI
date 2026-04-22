@@ -298,8 +298,7 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
 
 
 def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
-    import json as _json
-    from src.corridor.ranking import train_and_evaluate
+    from src.corridor.ranking import TrainingReport, train_and_evaluate
     config = load_config(args.config)
     conn = open_connection(config)
     try:
@@ -312,30 +311,58 @@ def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
     finally:
         conn.close()
 
+    def _log_scheme(r: TrainingReport) -> None:
+        _LOG.info(
+            "[%s] rows=%d train=%d test=%d alpha=%.3f seed=%d",
+            r.label_scheme, r.total_rows, r.train_rows, r.test_rows,
+            r.alpha, r.random_seed,
+        )
+        _LOG.info(
+            "  train_rmse=%.4f test_rmse=%.4f "
+            "test_rank_corr=%.4f heuristic_rank_corr=%.4f",
+            r.train_rmse, r.test_rmse,
+            r.test_rank_corr, r.heuristic_rank_corr,
+        )
+        _LOG.info(
+            "  AUC learned=%s heuristic=%s delta=%s "
+            "(n_maps_learned=%d n_maps_heuristic=%d)",
+            f"{r.auc_learned:.4f}" if r.auc_learned is not None else "n/a",
+            f"{r.auc_heuristic:.4f}" if r.auc_heuristic is not None else "n/a",
+            f"{r.auc_delta:+.4f}" if r.auc_delta is not None else "n/a",
+            r.n_maps_learned, r.n_maps_heuristic,
+        )
+        if args.verbose:
+            for name, weight in zip(r.feature_names, r.weights):
+                _LOG.info("  weight[%-30s] = %+.4f", name, weight)
+
     _LOG.info(
-        "train-corridor-ranking: rows=%d train=%d test=%d alpha=%.3f seed=%d",
-        report.total_rows, report.train_rows, report.test_rows,
-        report.alpha, report.random_seed,
+        "train-corridor-ranking: comparative run "
+        "(maps with mean-interval-time=%d)",
+        report.map_mean_interval_ms_count,
     )
-    _LOG.info(
-        "  train_rmse=%.4f test_rmse=%.4f "
-        "test_rank_corr=%.4f heuristic_rank_corr=%.4f",
-        report.train_rmse, report.test_rmse,
-        report.test_rank_corr, report.heuristic_rank_corr,
-    )
-    _LOG.info(
-        "  AUC learned=%s heuristic=%s delta=%s (n_maps_learned=%d n_maps_heuristic=%d)",
-        f"{report.auc_learned:.4f}" if report.auc_learned is not None else "n/a",
-        f"{report.auc_heuristic:.4f}" if report.auc_heuristic is not None else "n/a",
-        f"{report.auc_delta:+.4f}" if report.auc_delta is not None else "n/a",
-        report.n_maps_learned, report.n_maps_heuristic,
-    )
+    _log_scheme(report.inverse_rank)
+    if report.time_envelope is not None:
+        _log_scheme(report.time_envelope)
+        # Side-by-side delta line so the "did the better label move
+        # the signal?" question is answered in one glance.
+        ir = report.inverse_rank
+        te = report.time_envelope
+        _LOG.info(
+            "delta (time_envelope - inverse_rank): "
+            "test_rank_corr=%+.4f  AUC_learned=%s",
+            te.test_rank_corr - ir.test_rank_corr,
+            (f"{(te.auc_learned - ir.auc_learned):+.4f}"
+             if (te.auc_learned is not None and ir.auc_learned is not None) else "n/a"),
+        )
+    else:
+        _LOG.warning(
+            "time_envelope scheme skipped — no maps had mean inter-CP "
+            "times (need clean replays with checkpoint_times_ms sidecars)",
+        )
+
     if args.output:
         report.write_json(Path(args.output))
-        _LOG.info("wrote model report: %s", args.output)
-    if args.verbose:
-        for name, weight in zip(report.feature_names, report.weights):
-            _LOG.info("  weight[%-30s] = %+.4f", name, weight)
+        _LOG.info("wrote comparative model report: %s", args.output)
     return 0
 
 

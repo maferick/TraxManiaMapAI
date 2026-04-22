@@ -12,11 +12,18 @@ from src.corridor.ranking.features import (
 )
 from src.corridor.ranking.labels import synthesize_inverse_rank_labels
 from src.corridor.ranking.model import (
+    ComparativeTrainingReport,
     RidgeRegression,
+    TrainingReport,
     _rank_with_ties,
+    _utcnow,
     auc_roc,
     rmse,
     spearman_rank_corr,
+)
+from src.corridor.ranking.time_envelope_labels import (
+    plausibility,
+    synthesize_time_envelope_labels,
 )
 from src.corridor.scoring import EdgeEvidence
 
@@ -239,3 +246,116 @@ class TestMetrics:
 
     def test_auc_empty_class_returns_half(self) -> None:
         assert auc_roc(np.array([1.0, 2.0]), np.array([0, 0])) == 0.5
+
+
+class TestPlausibility:
+    def test_exact_match_returns_one(self) -> None:
+        # path_length=3 cells × 32m / 30 m/s × 1000ms = 3200 ms expected.
+        # observed = 3200 → rel_err = 0 → exp(0) = 1.0
+        p = plausibility(path_length_cells=3, observed_elapsed_ms=3200.0)
+        assert p == pytest.approx(1.0)
+
+    def test_non_positive_inputs_return_zero(self) -> None:
+        assert plausibility(0, 5000.0) == 0.0
+        assert plausibility(-1, 5000.0) == 0.0
+        assert plausibility(3, 0.0) == 0.0
+        assert plausibility(3, -500.0) == 0.0
+        assert plausibility(3, 5000.0, speed_prior_m_s=0.0) == 0.0
+        assert plausibility(3, 5000.0, block_size_m=0.0) == 0.0
+
+    def test_monotone_decay_on_length_mismatch(self) -> None:
+        # Observed = 3200 ms (fits 3 cells exactly at 30 m/s).
+        # As path_length diverges from 3, plausibility should decrease.
+        p_exact = plausibility(3, 3200.0)
+        p_plus = plausibility(6, 3200.0)
+        p_minus = plausibility(1, 3200.0)
+        assert p_exact > p_plus
+        assert p_exact > p_minus
+
+    def test_values_stay_in_unit_interval(self) -> None:
+        # Exponential decay on non-negative relative error → (0, 1].
+        for length, obs in [(1, 100.0), (50, 500.0), (5, 1e6)]:
+            p = plausibility(length, obs)
+            assert 0.0 <= p <= 1.0
+
+    def test_speed_prior_changes_expected_time(self) -> None:
+        # Doubling the speed prior halves expected time; plausibility
+        # changes accordingly. At speed=30, path_length=3 → 3200ms exact.
+        # At speed=60, path_length=3 → 1600ms expected; observed=3200ms
+        # gives rel_err=0.5, plausibility=exp(-0.5)≈0.606.
+        p60 = plausibility(3, 3200.0, speed_prior_m_s=60.0)
+        assert p60 == pytest.approx(pytest.approx(0.6065, abs=1e-3))
+
+
+class TestTimeEnvelopeLabels:
+    def test_no_replay_data_omits_corridor(self) -> None:
+        rows = [_mk_row(corridor_id=1, map_id=100, path_length=3)]
+        labels = synthesize_time_envelope_labels(rows, map_mean_interval_ms={})
+        assert labels == {}
+
+    def test_with_replay_data_produces_label(self) -> None:
+        rows = [_mk_row(corridor_id=1, map_id=100, path_length=3)]
+        # map_id=100 has observed mean interval 3200ms → exact match at
+        # default 30 m/s speed prior → label 1.0.
+        labels = synthesize_time_envelope_labels(
+            rows, map_mean_interval_ms={100: 3200.0},
+        )
+        assert labels[1] == pytest.approx(1.0)
+
+    def test_partial_coverage_only_labels_mapped(self) -> None:
+        rows = [
+            _mk_row(corridor_id=1, map_id=100, path_length=3),
+            _mk_row(corridor_id=2, map_id=200, path_length=3),
+        ]
+        labels = synthesize_time_envelope_labels(
+            rows, map_mean_interval_ms={100: 3200.0},
+        )
+        assert 1 in labels
+        assert 2 not in labels  # map 200 has no mean — corridor dropped
+
+    def test_labels_in_unit_interval(self) -> None:
+        rows = [
+            _mk_row(corridor_id=1, map_id=1, path_length=1),
+            _mk_row(corridor_id=2, map_id=1, path_length=10),
+            _mk_row(corridor_id=3, map_id=1, path_length=100),
+        ]
+        labels = synthesize_time_envelope_labels(
+            rows, map_mean_interval_ms={1: 3200.0},
+        )
+        for v in labels.values():
+            assert 0.0 <= v <= 1.0
+
+
+class TestComparativeTrainingReport:
+    def _mk_report(self, scheme: str) -> TrainingReport:
+        return TrainingReport(
+            label_scheme=scheme,
+            trained_at=_utcnow(),
+            total_rows=10, train_rows=8, test_rows=2,
+            alpha=1.0, feature_names=["bias"], weights=[0.1],
+            train_rmse=0.1, test_rmse=0.2,
+            test_rank_corr=0.3, heuristic_rank_corr=0.0,
+            auc_learned=0.7, auc_heuristic=0.5, auc_delta=0.2,
+            n_maps_learned=20, n_maps_heuristic=20,
+            random_seed=42,
+        )
+
+    def test_serializes_both_schemes(self) -> None:
+        rep = ComparativeTrainingReport(
+            inverse_rank=self._mk_report("inverse_rank"),
+            time_envelope=self._mk_report("time_envelope"),
+            map_mean_interval_ms_count=42,
+        )
+        payload = rep.to_dict()
+        assert payload["inverse_rank"]["label_scheme"] == "inverse_rank"
+        assert payload["time_envelope"]["label_scheme"] == "time_envelope"
+        assert payload["map_mean_interval_ms_count"] == 42
+
+    def test_time_envelope_can_be_none(self) -> None:
+        rep = ComparativeTrainingReport(
+            inverse_rank=self._mk_report("inverse_rank"),
+            time_envelope=None,
+            map_mean_interval_ms_count=0,
+        )
+        payload = rep.to_dict()
+        assert payload["time_envelope"] is None
