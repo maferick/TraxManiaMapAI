@@ -8,6 +8,8 @@ isolation.
 from __future__ import annotations
 
 from src.corridor.traversability.reachability import (
+    VALIDATION_MAP_IDS_V1,
+    VALIDATION_MAP_IDS_V2,
     AnchorSet,
     MapReachability,
     ReplayObservation,
@@ -16,6 +18,7 @@ from src.corridor.traversability.reachability import (
     _build_anchor_sets,
     _build_cell_graph,
     _build_observations,
+    _snap_free_waypoints_to_grid,
     _UnionFind,
 )
 
@@ -313,6 +316,122 @@ class TestMapReachabilityObservationFields:
         assert m.observations_available == 0
         assert m.observations_applied == 0
         assert m.anchor_sets_reachable_seed_only == 0
+
+
+class TestValidationMapSets:
+    """Sanity-check the frozen sets — tampering silently with them
+    would undermine historical reproducibility of gate results."""
+
+    def test_v1_has_ten_maps(self) -> None:
+        assert len(VALIDATION_MAP_IDS_V1) == 10
+
+    def test_v2_has_ten_maps(self) -> None:
+        assert len(VALIDATION_MAP_IDS_V2) == 10
+
+    def test_sets_are_disjoint_except_1212(self) -> None:
+        # Map 1212 is the only LinkedCheckpoint map in the scale-1k
+        # corpus with enough replay coverage; it's in both sets by
+        # design as the multilap representative.
+        overlap = set(VALIDATION_MAP_IDS_V1) & set(VALIDATION_MAP_IDS_V2)
+        assert overlap == {1212}
+
+
+class TestFreeWaypointSnapping:
+    def test_empty_inputs_return_empty(self) -> None:
+        assert _snap_free_waypoints_to_grid([], [(0, 0, 0)]) == []
+        assert _snap_free_waypoints_to_grid(
+            [("Goal", 0, 0.0, 0.0, 0.0)], []
+        ) == []
+
+    def test_snap_to_exact_cell_center(self) -> None:
+        # Grid cell (0, 0, 0) has center approximately at (16, 4, 16).
+        # A free waypoint at exactly that absolute position should snap
+        # to (0, 0, 0).
+        grid_cells = [(0, 0, 0), (5, 5, 5)]
+        snapped = _snap_free_waypoints_to_grid(
+            [("Goal", 0, 16.0, 4.0, 16.0)], grid_cells,
+        )
+        assert snapped == [("Goal", 0, 0, 0, 0)]
+
+    def test_snap_picks_nearest_when_between(self) -> None:
+        # Free waypoint between two cells — picks the closer one.
+        # Cell (0,0,0) center ≈ (16, 4, 16). Cell (1,0,0) center ≈ (48, 4, 16).
+        # A waypoint at (20, 4, 16) is closer to (0,0,0).
+        snapped = _snap_free_waypoints_to_grid(
+            [("Goal", 0, 20.0, 4.0, 16.0)],
+            [(0, 0, 0), (1, 0, 0)],
+        )
+        assert snapped == [("Goal", 0, 0, 0, 0)]
+
+    def test_preserves_tag_and_order(self) -> None:
+        snapped = _snap_free_waypoints_to_grid(
+            [("LinkedCheckpoint", 42, 16.0, 4.0, 16.0)],
+            [(0, 0, 0)],
+        )
+        assert snapped[0][0] == "LinkedCheckpoint"
+        assert snapped[0][1] == 42
+
+    def test_multiple_free_waypoints(self) -> None:
+        grid = [(0, 0, 0), (10, 0, 0)]
+        snapped = _snap_free_waypoints_to_grid(
+            [
+                ("Spawn", 0, 16.0, 4.0, 16.0),      # → (0,0,0)
+                ("Goal", 0, 336.0, 4.0, 16.0),      # → (10,0,0)
+            ],
+            grid,
+        )
+        assert len(snapped) == 2
+        assert snapped[0][2:] == (0, 0, 0)
+        assert snapped[1][2:] == (10, 0, 0)
+
+
+class TestObservationBuildingPlainCPCellMatch:
+    """Regression test for the count-by-cells fix: plain Checkpoint
+    observations must match against the number of distinct checkpoint
+    CELLS in the map, not the number of anchor sets (which is always 1
+    for plain Checkpoints, since they all share waypoint_order=0)."""
+
+    def _bc(self, tmp_path, n: int) -> str:
+        p = tmp_path / f"r{n}.breadcrumbs.json"
+        p.write_text(
+            f'{{"checkpoint_times_ms": {list(range(n))}}}'
+        )
+        return str(p)
+
+    def test_plain_cp_match_by_cell_count(self, tmp_path) -> None:
+        # Map has 4 distinct plain-CP cells all at waypoint_order=0
+        # (collapsed into one AnchorSet of 4 cells). A replay with 4
+        # or 5 CP timestamps should match and include all 4 CP cells.
+        anchors = [
+            AnchorSet(tag="Spawn", waypoint_order=0, cells=frozenset({(0, 0, 0)})),
+            AnchorSet(tag="Goal", waypoint_order=0, cells=frozenset({(10, 0, 0)})),
+            AnchorSet(
+                tag="Checkpoint", waypoint_order=0,
+                cells=frozenset({(2, 0, 0), (4, 0, 0), (6, 0, 0), (8, 0, 0)}),
+            ),
+        ]
+        obs = _build_observations(anchors, [(1, self._bc(tmp_path, 4))])
+        assert len(obs) == 1
+        assert obs[0].kind == "checkpoint_matched"
+        # All 4 CP cells included
+        for c in [(2, 0, 0), (4, 0, 0), (6, 0, 0), (8, 0, 0)]:
+            assert c in obs[0].cells
+
+    def test_plain_cp_no_match_falls_back(self, tmp_path) -> None:
+        # 4 CP cells but replay has 99 timestamps → no match → spawn_goal_only
+        anchors = [
+            AnchorSet(tag="Spawn", waypoint_order=0, cells=frozenset({(0, 0, 0)})),
+            AnchorSet(tag="Goal", waypoint_order=0, cells=frozenset({(10, 0, 0)})),
+            AnchorSet(
+                tag="Checkpoint", waypoint_order=0,
+                cells=frozenset({(2, 0, 0), (4, 0, 0), (6, 0, 0), (8, 0, 0)}),
+            ),
+        ]
+        obs = _build_observations(anchors, [(1, self._bc(tmp_path, 99))])
+        assert len(obs) == 1
+        assert obs[0].kind == "spawn_goal_only"
+        # CP cells NOT included
+        assert (2, 0, 0) not in obs[0].cells
 
 
 class TestValidationReportAggregation:

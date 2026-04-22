@@ -79,10 +79,36 @@ _LOG = logging.getLogger(__name__)
 # Block counts span 176–19,524 grid blocks; waypoint counts span 5–78.
 # The set is intentionally STABLE across runs — swapping members
 # silently would undermine the Phase-1 gate.
-VALIDATION_MAP_IDS: tuple[int, ...] = (
+VALIDATION_MAP_IDS_V1: tuple[int, ...] = (
     1212, 624, 912, 950, 403,
     901, 676, 736, 418, 229,
 )
+# V2: data-coverage-aware validation set. Selected from maps that have
+# ≥3 clean breadcrumb replays in the 2026-04-scale-1k corpus so the
+# inductive observation layer has something to work with. V1 stays
+# frozen as the historical first-gate record; V2 is what the Phase 3
+# mechanism is validated against going forward.
+#
+# Structural composition:
+#   9 plain-Checkpoint maps (diverse block counts 93 to 7151)
+#   1 LinkedCheckpoint map (1212 — only multilap map with ≥3 replays)
+# Replay counts across V2: 3–15 per map.
+VALIDATION_MAP_IDS_V2: tuple[int, ...] = (
+    491, 1156, 298, 990, 1046,
+    336, 803, 1177, 787, 1212,
+)
+# Current default — callers can pin to V1 explicitly for historical runs.
+VALIDATION_MAP_IDS: tuple[int, ...] = VALIDATION_MAP_IDS_V2
+
+# Approximate block dimensions in absolute coords. TM2020 grid cells
+# are 32m × 8m × 32m (X × Y × Z); the center of the cell at grid
+# coord (x, y, z) sits at approximately (x*32 + 16, y*8 + 4, z*32 + 16).
+# Used only for snapping free-placed waypoint triggers to the nearest
+# grid block; approximate because per-block-type anchor offsets vary
+# slightly and we don't model them.
+_BLOCK_SIZE_X: float = 32.0
+_BLOCK_SIZE_Y: float = 8.0
+_BLOCK_SIZE_Z: float = 32.0
 
 # Waypoint tags that start a race (used as the BFS source set).
 # ``StartFinish`` is a combined start+finish marker on some looping
@@ -379,6 +405,9 @@ def _fetch_map_grid_blocks(
 def _fetch_map_waypoints(
     conn: Connection, *, map_id: int
 ) -> list[tuple[str, int, int, int, int]]:
+    """Grid-placed waypoints only; free-placed waypoints are fetched
+    separately via :func:`_fetch_free_map_waypoints` so the caller can
+    decide whether to snap them to the grid."""
     with cursor(conn) as cur:
         cur.execute(
             "SELECT tag, waypoint_order, x, y, z "
@@ -388,6 +417,68 @@ def _fetch_map_waypoints(
             (map_id,),
         )
         return list(cur.fetchall())
+
+
+def _fetch_free_map_waypoints(
+    conn: Connection, *, map_id: int
+) -> list[tuple[str, int, float, float, float]]:
+    """Return ``(tag, waypoint_order, abs_x, abs_y, abs_z)`` for free-
+    placed waypoints with populated absolute coords."""
+    with cursor(conn) as cur:
+        cur.execute(
+            "SELECT tag, waypoint_order, abs_x, abs_y, abs_z "
+            "FROM map_checkpoints "
+            "WHERE map_id = %s AND placement = 'free' "
+            "AND abs_x IS NOT NULL AND abs_y IS NOT NULL AND abs_z IS NOT NULL",
+            (map_id,),
+        )
+        return [
+            (str(r[0]), int(r[1]), float(r[2]), float(r[3]), float(r[4]))
+            for r in cur.fetchall()
+        ]
+
+
+def _snap_free_waypoints_to_grid(
+    free_waypoints: list[tuple[str, int, float, float, float]],
+    grid_cells: list[tuple[int, int, int]],
+) -> list[tuple[str, int, int, int, int]]:
+    """For each free-placed waypoint, pick the grid cell whose estimated
+    absolute center is nearest (Euclidean). Returns a list in the same
+    shape as :func:`_fetch_map_waypoints` so downstream code handles
+    snapped free and native grid waypoints uniformly.
+
+    Skip-silently policy: a free waypoint with no grid blocks in the
+    map returns nothing (the caller will log 'no_grid_waypoints' if
+    that leaves the map without any anchors). Conservative to avoid
+    inventing anchors where there's no block to snap to.
+    """
+    if not grid_cells:
+        return []
+    # Precompute grid-cell absolute centers once.
+    grid_abs: list[tuple[int, int, int, float, float, float]] = [
+        (
+            gx, gy, gz,
+            gx * _BLOCK_SIZE_X + _BLOCK_SIZE_X / 2,
+            gy * _BLOCK_SIZE_Y + _BLOCK_SIZE_Y / 2,
+            gz * _BLOCK_SIZE_Z + _BLOCK_SIZE_Z / 2,
+        )
+        for gx, gy, gz in grid_cells
+    ]
+    snapped: list[tuple[str, int, int, int, int]] = []
+    for tag, order, ax, ay, az in free_waypoints:
+        best_dist = float("inf")
+        best_cell: tuple[int, int, int] | None = None
+        for gx, gy, gz, cx, cy, cz in grid_abs:
+            dx = ax - cx
+            dy = ay - cy
+            dz = az - cz
+            dist = dx * dx + dy * dy + dz * dz  # squared distance is fine for argmin
+            if dist < best_dist:
+                best_dist = dist
+                best_cell = (gx, gy, gz)
+        if best_cell is not None:
+            snapped.append((tag, order, best_cell[0], best_cell[1], best_cell[2]))
+    return snapped
 
 
 def _fetch_clean_replays(
@@ -459,13 +550,17 @@ def _build_observations(
             checkpoint_cells.update(aset.cells)
             has_plain_cp = True
 
-    # Count of distinct intermediate-CP logical anchors (by tag+order):
+    # Count of distinct intermediate-CP logical anchors. LinkedCheckpoint
+    # anchors each have a unique waypoint_order so the anchor_set count
+    # equals the logical-CP count. Plain Checkpoint anchors all share
+    # order=0 (TM2020 resolves order at run time from the player's
+    # trajectory), so they collapse into a single anchor_set — the real
+    # count we want to match against a replay's checkpoint_times_ms
+    # length is the number of distinct Checkpoint *cells*.
     linked_anchor_count = sum(
         1 for a in anchor_sets if a.tag == "LinkedCheckpoint"
     )
-    plain_cp_anchor_count = sum(
-        1 for a in anchor_sets if a.tag == "Checkpoint"
-    )
+    plain_cp_anchor_count = len(checkpoint_cells)
 
     out: list[ReplayObservation] = []
     for replay_id, bc_path in replays:
@@ -557,6 +652,12 @@ def validate_map(
     )
 
     wp_rows = _fetch_map_waypoints(conn, map_id=map_id)
+    free_wp_rows = _fetch_free_map_waypoints(conn, map_id=map_id)
+    if free_wp_rows:
+        snapped = _snap_free_waypoints_to_grid(
+            free_wp_rows, list(cell_to_family.keys())
+        )
+        wp_rows = list(wp_rows) + snapped
     anchor_sets = _build_anchor_sets(wp_rows)
     if not anchor_sets:
         result.errors.append("no_grid_waypoints")

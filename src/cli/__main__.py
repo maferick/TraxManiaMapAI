@@ -256,12 +256,18 @@ def _cmd_validate_traversability(args: argparse.Namespace) -> int:
     import json as _json
     from src.corridor.traversability import (
         VALIDATION_MAP_IDS,
+        VALIDATION_MAP_IDS_V1,
+        VALIDATION_MAP_IDS_V2,
         validate_set,
     )
     config = load_config(args.config)
     ids: tuple[int, ...]
     if args.map_ids:
         ids = tuple(int(m) for m in args.map_ids)
+    elif args.set == "v1":
+        ids = VALIDATION_MAP_IDS_V1
+    elif args.set == "v2":
+        ids = VALIDATION_MAP_IDS_V2
     else:
         ids = VALIDATION_MAP_IDS
     conn = open_connection(config)
@@ -1157,7 +1163,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     validate_traversability_cmd.add_argument(
         "--map-id", dest="map_ids", type=int, action="append", default=None,
-        help="override the default 10-map validation set (repeatable)",
+        help="override the default validation set (repeatable)",
+    )
+    validate_traversability_cmd.add_argument(
+        "--set", choices=("v1", "v2"), default=None,
+        help="pick one of the frozen sets: v1 (original, structural diversity), "
+             "v2 (data-aware, replay-coverage-first). Default: current = v2",
     )
     validate_traversability_cmd.add_argument(
         "--min-reachability", type=float, default=0.90,
