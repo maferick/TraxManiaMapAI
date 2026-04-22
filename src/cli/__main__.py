@@ -34,6 +34,7 @@ from src.evaluation import (
     AdjacencyGraphEvaluator,
     BehaviorProfileEvaluator,
     CorridorConfidenceEvaluator,
+    CorridorLearnedEvaluator,
     Evaluator,
     RouteCoverageEvaluator,
     StructuralEvaluator,
@@ -412,6 +413,34 @@ def _cmd_diagnose_corridor_ranking(args: argparse.Namespace) -> int:
         write_report(report, Path(args.output))
         _LOG.info("wrote diagnostics report: %s", args.output)
     return 0
+
+
+def _cmd_score_corridors_learned(args: argparse.Namespace) -> int:
+    from src.corridor.ranking.scoring_pipeline import (
+        load_model_from_report,
+        score_corridors_learned,
+    )
+    config = load_config(args.config)
+    model, scheme_tag = load_model_from_report(Path(args.model_report))
+    conn = open_connection(config)
+    try:
+        stats = score_corridors_learned(
+            conn,
+            model=model,
+            learned_score_version=scheme_tag,
+            map_ids=args.map_ids,
+            snapshot_id=args.snapshot,
+            limit=args.limit,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "score-corridors-learned: maps_seen=%d updated=%d scored=%d "
+        "scheme=%s model_hash=%s errors=%d",
+        stats.maps_seen, stats.maps_updated, stats.corridors_scored,
+        stats.learned_score_version, stats.model_hash[:12], len(stats.errors),
+    )
+    return 0 if not stats.errors else 1
 
 
 def _cmd_score_route_corridors(args: argparse.Namespace) -> int:
@@ -1065,6 +1094,8 @@ def _build_evaluator_stack(
             stack.append(BehaviorProfileEvaluator(conn))
         elif name == "route_corridor":
             stack.append(CorridorConfidenceEvaluator(conn))
+        elif name == "route_corridor_learned":
+            stack.append(CorridorLearnedEvaluator(conn))
         else:
             raise ValueError(f"unknown evaluator name: {name!r}")
     return stack
@@ -1594,6 +1625,23 @@ def _build_parser() -> argparse.ArgumentParser:
     diagnose_corridor_ranking_cmd.set_defaults(
         func=_cmd_diagnose_corridor_ranking,
     )
+
+    score_corridors_learned_cmd = sub.add_parser(
+        "score-corridors-learned",
+        help="Phase 4: persist the learned corridor score to "
+             "route_corridors.learned_corridor_score from a "
+             "train-corridor-ranking model JSON.",
+    )
+    score_corridors_learned_cmd.add_argument(
+        "--model-report", type=str, required=True,
+        help="path to a train-corridor-ranking comparative report JSON",
+    )
+    score_corridors_learned_cmd.add_argument("--snapshot", type=str, default=None)
+    score_corridors_learned_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+    )
+    score_corridors_learned_cmd.add_argument("--limit", type=int, default=None)
+    score_corridors_learned_cmd.set_defaults(func=_cmd_score_corridors_learned)
 
     validate_traversability_cmd = sub.add_parser(
         "validate-traversability",

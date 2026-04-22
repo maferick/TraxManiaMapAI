@@ -12,6 +12,7 @@ lands after real data passes through PRs 3–6.
 from src.evaluation.evaluators.adjacency import AdjacencyGraphEvaluator
 from src.evaluation.evaluators.behavior_profile import BehaviorProfileEvaluator
 from src.evaluation.evaluators.corridor_confidence import CorridorConfidenceEvaluator
+from src.evaluation.evaluators.corridor_learned import CorridorLearnedEvaluator
 from src.evaluation.evaluators.route_coverage import RouteCoverageEvaluator
 from src.evaluation.evaluators.structural import StructuralEvaluator
 
@@ -19,6 +20,7 @@ __all__ = [
     "AdjacencyGraphEvaluator",
     "BehaviorProfileEvaluator",
     "CorridorConfidenceEvaluator",
+    "CorridorLearnedEvaluator",
     "RouteCoverageEvaluator",
     "StructuralEvaluator",
 ]

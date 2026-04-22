@@ -4,6 +4,7 @@ from .evaluators import (
     AdjacencyGraphEvaluator,
     BehaviorProfileEvaluator,
     CorridorConfidenceEvaluator,
+    CorridorLearnedEvaluator,
     RouteCoverageEvaluator,
     StructuralEvaluator,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "AdjacencyGraphEvaluator",
     "BehaviorProfileEvaluator",
     "CorridorConfidenceEvaluator",
+    "CorridorLearnedEvaluator",
     "Evaluator",
     "EvaluationResult",
     "EvaluatorVersion",

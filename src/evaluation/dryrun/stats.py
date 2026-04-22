@@ -135,3 +135,31 @@ def disagreement_pairs(
         for map_id in sorted(shared)
         if abs(a_scores[map_id] - b_scores[map_id]) >= threshold
     ]
+
+
+def rank_correlation(
+    a_scores: dict[int, float], b_scores: dict[int, float]
+) -> float | None:
+    """Spearman rank correlation on the shared map set. Returns
+    ``None`` when there are fewer than 2 shared maps (correlation
+    undefined)."""
+    shared = sorted(a_scores.keys() & b_scores.keys())
+    if len(shared) < 2:
+        return None
+    a = np.array([a_scores[m] for m in shared], dtype=np.float64)
+    b = np.array([b_scores[m] for m in shared], dtype=np.float64)
+    # Average-rank tie handling.
+    def _ranks(x: np.ndarray) -> np.ndarray:
+        order = x.argsort()
+        ranks = np.empty_like(order, dtype=np.float64)
+        ranks[order] = np.arange(1, len(x) + 1, dtype=np.float64)
+        unique, counts = np.unique(x, return_counts=True)
+        for val, c in zip(unique, counts):
+            if c > 1:
+                idx = np.where(x == val)[0]
+                ranks[idx] = ranks[idx].mean()
+        return ranks
+    ar, br = _ranks(a), _ranks(b)
+    if ar.std() == 0 or br.std() == 0:
+        return None
+    return float(((ar - ar.mean()) * (br - br.mean())).mean() / (ar.std() * br.std()))
