@@ -316,6 +316,7 @@ def _cmd_ingest_maps(args: argparse.Namespace) -> int:
     artifacts_root = Path(artifacts_cfg.get("root", "./data/artifacts"))
     retry_cfg = tmx_cfg.get("retry", {}) or {}
     backoff = tuple(float(s) for s in retry_cfg.get("backoff_seconds", (2, 4, 8, 16)))
+    max_total_retry = float(retry_cfg.get("max_total_retry_seconds", 120.0))
     timeout = float(tmx_cfg.get("timeout_seconds", 30.0))
 
     config_hash = resolve_config_hash(config)
@@ -328,6 +329,7 @@ def _cmd_ingest_maps(args: argparse.Namespace) -> int:
         cache=ResponseCache(cache_dir),
         backoff_seconds=backoff,
         timeout_seconds=timeout,
+        max_total_retry_seconds=max_total_retry,
     )
     tmx_client = TmxClient(http)
     store = ArtifactStore(artifacts_root)
@@ -455,6 +457,7 @@ def _cmd_ingest_replays(args: argparse.Namespace) -> int:
     artifacts_root = Path(artifacts_cfg.get("root", "./data/artifacts"))
     retry_cfg = tmx_cfg.get("retry", {}) or {}
     backoff = tuple(float(s) for s in retry_cfg.get("backoff_seconds", (2, 4, 8, 16)))
+    max_total_retry = float(retry_cfg.get("max_total_retry_seconds", 120.0))
     timeout = float(tmx_cfg.get("timeout_seconds", 30.0))
 
     config_hash = resolve_config_hash(config)
@@ -467,6 +470,7 @@ def _cmd_ingest_replays(args: argparse.Namespace) -> int:
         cache=ResponseCache(cache_dir),
         backoff_seconds=backoff,
         timeout_seconds=timeout,
+        max_total_retry_seconds=max_total_retry,
     )
     tmx_client = TmxClient(http)
     store = ArtifactStore(artifacts_root)
