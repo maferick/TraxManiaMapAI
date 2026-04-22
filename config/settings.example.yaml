@@ -150,6 +150,7 @@ evaluation:
       - structural         # orphan-fraction over block_placements
       - adjacency_graph    # queries Neo4j for validity_label per adjacency
       - route_coverage     # surfaces extraction_confidence from route_artifacts
+      - behavior_profile   # cross-replay input-density consistency from breadcrumb diagnostics
     # Must match the parser_version that `parse-maps` stamped on
     # block_placements; bump both together.
     parser_version: "0.1.0"

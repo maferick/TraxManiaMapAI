@@ -32,6 +32,7 @@ from src.constraints import ConstraintGraphPipeline
 from src.parsers import MapParsePipeline, ReplayParsePipeline, SubprocessParser
 from src.evaluation import (
     AdjacencyGraphEvaluator,
+    BehaviorProfileEvaluator,
     Evaluator,
     RouteCoverageEvaluator,
     StructuralEvaluator,
@@ -637,6 +638,8 @@ def _build_evaluator_stack(
             )
         elif name == "route_coverage":
             stack.append(RouteCoverageEvaluator(conn))
+        elif name == "behavior_profile":
+            stack.append(BehaviorProfileEvaluator(conn))
         else:
             raise ValueError(f"unknown evaluator name: {name!r}")
     return stack
