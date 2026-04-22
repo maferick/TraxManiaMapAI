@@ -296,6 +296,26 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
     return 0 if not stats.errors else 1
 
 
+def _cmd_score_route_corridors(args: argparse.Namespace) -> int:
+    from src.corridor import score_corridors
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        stats = score_corridors(
+            conn, map_ids=args.map_ids,
+            snapshot_id=args.snapshot, limit=args.limit,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "score-route-corridors: maps_seen=%d updated=%d scored=%d "
+        "score_version=%s errors=%d",
+        stats.maps_seen, stats.maps_updated, stats.corridors_scored,
+        stats.score_version, len(stats.errors),
+    )
+    return 0 if not stats.errors else 1
+
+
 def _cmd_build_route_corridors(args: argparse.Namespace) -> int:
     from src.corridor.traversability import build_route_corridors
     config = load_config(args.config)
@@ -1402,6 +1422,18 @@ def _build_parser() -> argparse.ArgumentParser:
              "Default 100.",
     )
     build_route_corridors_cmd.set_defaults(func=_cmd_build_route_corridors)
+
+    score_route_corridors_cmd = sub.add_parser(
+        "score-route-corridors",
+        help="Combine the four evidence signals into a single "
+             "corridor_confidence per route_corridors row.",
+    )
+    score_route_corridors_cmd.add_argument("--snapshot", type=str, default=None)
+    score_route_corridors_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+    )
+    score_route_corridors_cmd.add_argument("--limit", type=int, default=None)
+    score_route_corridors_cmd.set_defaults(func=_cmd_score_route_corridors)
 
     validate_traversability_cmd = sub.add_parser(
         "validate-traversability",
