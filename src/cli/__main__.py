@@ -415,6 +415,51 @@ def _cmd_diagnose_corridor_ranking(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_diagnose_corridor_diversity(args: argparse.Namespace) -> int:
+    from src.diversity.metrics import build_report as build_diversity_report
+    from src.diversity.metrics import fetch_paths
+    from src.diversity.report import render_markdown as render_diversity_md
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        paths = fetch_paths(conn, snapshot_id=args.snapshot)
+    finally:
+        conn.close()
+    if not paths:
+        _LOG.error("no corridors found — did you run build-route-corridors?")
+        return 1
+    report = build_diversity_report(paths, k=args.top_k)
+    _LOG.info(
+        "diagnose-corridor-diversity: corridors=%d maps=%d "
+        "intervals_with_multiple=%d top_k=%d "
+        "rank0_cross_map_median_jaccard=%.4f "
+        "top_rank_virtual_fraction=%.4f "
+        "top_rank_length_stdev=%.2f",
+        report.total_corridors,
+        report.corridor_owning_maps,
+        len(report.intervals),
+        report.top_k,
+        report.rank0_cross_map_similarity_quartiles.get("median", 0.0),
+        report.virtual_edge_fraction_top_rank,
+        report.path_length_stdev_top_rank,
+    )
+    if report.heuristic_summary is not None and report.learned_summary is not None:
+        h = report.heuristic_summary
+        l = report.learned_summary
+        _LOG.info(
+            "  heuristic diversity median=%.4f | learned diversity median=%.4f "
+            "(delta=%+.4f)",
+            h.diversity_median, l.diversity_median,
+            l.diversity_median - h.diversity_median,
+        )
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(render_diversity_md(report), encoding="utf-8")
+        _LOG.info("wrote diversity report: %s", args.output)
+    return 0
+
+
 def _cmd_report_replay_coverage(args: argparse.Namespace) -> int:
     from src.coverage.replay_value import (
         CohortThresholdConfig,
@@ -1682,6 +1727,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="write the report (markdown) to this path",
     )
     report_replay_coverage_cmd.set_defaults(func=_cmd_report_replay_coverage)
+
+    diagnose_corridor_diversity_cmd = sub.add_parser(
+        "diagnose-corridor-diversity",
+        help="A3: corridor diversity diagnostic — Jaccard-on-cells "
+             "similarity, within-interval distribution, heuristic vs "
+             "learned top-K collapse comparison.",
+    )
+    diagnose_corridor_diversity_cmd.add_argument(
+        "--snapshot", type=str, default=None,
+        help="restrict to one ingestion_snapshot (via parent map filter)",
+    )
+    diagnose_corridor_diversity_cmd.add_argument(
+        "--top-k", type=int, default=3,
+        help="top-K corridors per interval used for pairwise similarity (default 3)",
+    )
+    diagnose_corridor_diversity_cmd.add_argument(
+        "--output", type=str, default=None,
+        help="write the report (markdown) to this path",
+    )
+    diagnose_corridor_diversity_cmd.set_defaults(
+        func=_cmd_diagnose_corridor_diversity,
+    )
 
     score_corridors_learned_cmd = sub.add_parser(
         "score-corridors-learned",
