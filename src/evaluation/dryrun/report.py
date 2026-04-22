@@ -23,6 +23,7 @@ from src.evaluation.dryrun.stats import (
     disagreement_pairs,
     histogram,
     quartiles,
+    rank_correlation,
     separation_auc,
 )
 
@@ -292,6 +293,58 @@ def _write_cross_evaluator_disagreements(
         )
 
 
+def _write_ranking_stability(
+    buf: io.StringIO, scores: list[_ScoresByMap]
+) -> None:
+    """Spearman rank correlation + stdev ratio for every pair of
+    evaluators that share a score dimension.
+
+    Answers the question "does the learned evaluator agree with the
+    heuristic on rank, without collapsing the distribution?" High
+    correlation + comparable stdev = improved ranking without diversity
+    loss. High correlation + much lower stdev = diversity collapse —
+    the learned model agrees where the heuristic was confident but
+    flattens signal elsewhere. Low correlation = genuine disagreement
+    (follow-up analysis territory).
+    """
+    buf.write("## Ranking stability + diversity\n\n")
+    by_field: dict[str, list[_ScoresByMap]] = defaultdict(list)
+    for s in scores:
+        by_field[s.score_field].append(s)
+
+    any_rows = False
+    for field, entries in sorted(by_field.items()):
+        if len(entries) < 2:
+            continue
+        any_rows = True
+        buf.write(f"### `{field}`\n\n")
+        buf.write(
+            "| evaluator A | evaluator B | shared maps | "
+            "rank corr | stdev(A) | stdev(B) | stdev ratio (B/A) |\n"
+            "|---|---|---|---|---|---|---|\n"
+        )
+        for i in range(len(entries)):
+            for j in range(i + 1, len(entries)):
+                a, b = entries[i], entries[j]
+                shared = a.values.keys() & b.values.keys()
+                corr = rank_correlation(a.values, b.values)
+                a_vals = list(a.values.values())
+                b_vals = list(b.values.values())
+                import statistics as _stats
+                a_std = _stats.stdev(a_vals) if len(a_vals) >= 2 else 0.0
+                b_std = _stats.stdev(b_vals) if len(b_vals) >= 2 else 0.0
+                ratio = (b_std / a_std) if a_std > 0 else float("inf")
+                corr_str = f"{corr:+.4f}" if corr is not None else "n/a"
+                buf.write(
+                    f"| `{a.evaluator_id}` | `{b.evaluator_id}` | "
+                    f"{len(shared)} | {corr_str} | {a_std:.4f} | {b_std:.4f} | "
+                    f"{ratio:.3f} |\n"
+                )
+        buf.write("\n")
+    if not any_rows:
+        buf.write("_Only one evaluator per score dimension; no pairs to compare._\n\n")
+
+
 def _write_errors(buf: io.StringIO, report: DryRunReport) -> None:
     if not report.errors:
         return
@@ -311,5 +364,6 @@ def render_markdown(report: DryRunReport) -> str:
     _write_separation(buf, report, scores)
     _write_evaluator_vs_benchmark_disagreements(buf, report, scores)
     _write_cross_evaluator_disagreements(buf, scores)
+    _write_ranking_stability(buf, scores)
     _write_errors(buf, report)
     return buf.getvalue()
