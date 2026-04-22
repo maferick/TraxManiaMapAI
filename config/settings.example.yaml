@@ -45,6 +45,10 @@ ingestion:
     retry:
       max_attempts: 4
       backoff_seconds: [2, 4, 8, 16]
+      # Safety net: abort one request if total retry-wait would exceed this.
+      # Prevents a server that keeps replying "Retry-After: 120" from
+      # stalling a worker indefinitely. Applied on top of Retry-After + jitter.
+      max_total_retry_seconds: 120.0
   snapshot:
     # Each ingestion run tags its artifacts with this snapshot id so
     # benchmarks and evaluators can pin a reproducible view of the world.
@@ -146,6 +150,7 @@ evaluation:
       - structural         # orphan-fraction over block_placements
       - adjacency_graph    # queries Neo4j for validity_label per adjacency
       - route_coverage     # surfaces extraction_confidence from route_artifacts
+      - behavior_profile   # cross-replay input-density consistency from breadcrumb diagnostics
     # Must match the parser_version that `parse-maps` stamped on
     # block_placements; bump both together.
     parser_version: "0.1.0"

@@ -2,6 +2,7 @@
 from .base import Evaluator, EvaluationResult, utcnow
 from .evaluators import (
     AdjacencyGraphEvaluator,
+    BehaviorProfileEvaluator,
     RouteCoverageEvaluator,
     StructuralEvaluator,
 )
@@ -10,6 +11,7 @@ from .versioning import EvaluatorVersion, VersionCompatibility, invalidates_rank
 
 __all__ = [
     "AdjacencyGraphEvaluator",
+    "BehaviorProfileEvaluator",
     "Evaluator",
     "EvaluationResult",
     "EvaluatorVersion",

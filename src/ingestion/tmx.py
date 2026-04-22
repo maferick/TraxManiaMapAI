@@ -62,6 +62,7 @@ _DEFAULT_SUMMARY_FIELDS: tuple[str, ...] = (
     "AwardCount",
     "Length",
     "Difficulty",
+    "TrackValue",
     "UpdatedAt",
     "UploadedAt",
     "TitlePack",
@@ -80,6 +81,11 @@ class TmxMapSummary:
     award_count: int | None
     average_rating: float | None
     popularity_metric: int | None
+    # TMX-derived quality signals from the v2 /api/maps summary.
+    # track_value is TMX's map-to-leaderboard contribution score.
+    # difficulty is the author-declared level (0-5 integer).
+    track_value: int | None
+    difficulty: int | None
     has_items: bool
     is_block_mode: bool
     raw: dict[str, Any]
@@ -184,6 +190,8 @@ def _normalize_summary(raw: Mapping[str, Any]) -> TmxMapSummary | None:
         # on the summary; these stay None and can be enriched later.
         average_rating=None,
         popularity_metric=None,
+        track_value=_as_int(raw.get("TrackValue")),
+        difficulty=_as_int(raw.get("Difficulty")),
         # has_items requires an anchored-objects query; mark unknown=False
         # on the summary. The parser result carries the ground truth.
         has_items=False,

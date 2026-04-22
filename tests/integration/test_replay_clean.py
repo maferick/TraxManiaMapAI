@@ -13,11 +13,14 @@ from src.replay import (
     CohortAssignmentPipeline,
     ReplayCleanPipeline,
     ReplayRow,
+    default_breadcrumb_rules,
     default_rules,
 )
+from src.replay.breadcrumbs import BreadcrumbsLoadError, ReplayBreadcrumbs
 from src.replay.pipeline import TelemetryLoadError
 from src.replay.telemetry import ReplayTelemetry
 from src.schema.replays import CleanStatus, ReplayCohort
+from tests.unit._breadcrumb_builders import make_breadcrumbs, with_respawns
 from tests.unit._telemetry_builders import make_telemetry, with_samples
 
 _TEST_SNAPSHOT = "replay-it-test"
@@ -33,6 +36,18 @@ class _DictTelemetryLoader:
         if replay.id not in self._by_id:
             raise TelemetryLoadError(f"no telemetry for replay {replay.id}")
         return self._by_id[replay.id]
+
+
+class _DictBreadcrumbLoader:
+    """In-memory breadcrumb loader keyed by raw_artifact_path."""
+
+    def __init__(self, by_path: dict[str, ReplayBreadcrumbs]) -> None:
+        self._by_path = by_path
+
+    def load_by_path(self, raw_artifact_path: str) -> ReplayBreadcrumbs:
+        if raw_artifact_path not in self._by_path:
+            raise BreadcrumbsLoadError(f"no breadcrumbs for {raw_artifact_path}")
+        return self._by_path[raw_artifact_path]
 
 
 def _cleanup_replay_state(conn, snapshot_id: str) -> None:
@@ -229,3 +244,139 @@ def test_cohort_ignores_unprocessed_replays(seeded) -> None:
     pipeline = CohortAssignmentPipeline(conn=conn)
     stats = pipeline.run(snapshot_id=_TEST_SNAPSHOT)
     assert stats.replays_assigned == 1
+
+
+def test_breadcrumb_fallback_classifies_when_telemetry_empty(seeded) -> None:
+    """Replays with empty telemetry samples but valid breadcrumbs get
+    classified via the breadcrumb rule set rather than rejected as
+    telemetry_unavailable. Diagnostics must record signal_source:
+    'breadcrumbs' and breadcrumb_path_used must increment.
+    """
+    conn, map_id = seeded
+    replay_id = _insert_replay(
+        conn, map_id=map_id, source_id="bc1", finish_ms=60_000, raw_path="/fake/bc1"
+    )
+
+    pipeline = ReplayCleanPipeline(
+        conn=conn,
+        loader=_DictTelemetryLoader({}),  # forces telemetry unavailable for all
+        rules=default_rules(),
+        thresholds_by_rule={},
+        clean_version="0.1.0",
+        breadcrumb_loader=_DictBreadcrumbLoader({
+            "/fake/bc1": make_breadcrumbs(finish_time_ms=60_000),
+        }),
+        breadcrumb_rules=default_breadcrumb_rules(),
+    )
+    stats = pipeline.run(snapshot_id=_TEST_SNAPSHOT)
+    assert stats.replays_seen == 1
+    assert stats.breadcrumb_path_used == 1
+    assert stats.replays_clean == 1
+    assert stats.replays_rejected == 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT clean_status, clean_diagnostics FROM replays WHERE id=%s",
+            (replay_id,),
+        )
+        row = cur.fetchone()
+    assert row[0] == CleanStatus.CLEAN.value
+    diag = json.loads(row[1])
+    assert diag["signal_source"] == "breadcrumbs"
+    assert "breadcrumb_incomplete" in {r["name"] for r in diag["rules"]}
+
+
+def test_breadcrumb_fallback_rejects_low_input_density(seeded) -> None:
+    conn, map_id = seeded
+    replay_id = _insert_replay(
+        conn, map_id=map_id, source_id="bc2", finish_ms=60_000, raw_path="/fake/bc2"
+    )
+    # 2 inputs over 60s = 0.033/sec — below 1/sec spectator threshold
+    sparse = make_breadcrumbs(
+        inputs=tuple(),
+        inputs_count=2,
+        finish_time_ms=60_000,
+    )
+    pipeline = ReplayCleanPipeline(
+        conn=conn,
+        loader=_DictTelemetryLoader({}),
+        rules=default_rules(),
+        thresholds_by_rule={},
+        clean_version="0.1.0",
+        breadcrumb_loader=_DictBreadcrumbLoader({"/fake/bc2": sparse}),
+        breadcrumb_rules=default_breadcrumb_rules(),
+    )
+    stats = pipeline.run(snapshot_id=_TEST_SNAPSHOT)
+    assert stats.breadcrumb_path_used == 1
+    assert stats.replays_rejected == 1
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT clean_status, clean_diagnostics FROM replays WHERE id=%s",
+            (replay_id,),
+        )
+        row = cur.fetchone()
+    assert row[0] == CleanStatus.REJECTED.value
+    diag = json.loads(row[1])
+    assert diag["signal_source"] == "breadcrumbs"
+
+
+def test_telemetry_path_preferred_when_both_available(seeded) -> None:
+    """If telemetry loads, breadcrumbs aren't consulted — signal_source
+    must be 'telemetry' and breadcrumb_path_used stays zero.
+    """
+    conn, map_id = seeded
+    replay_id = _insert_replay(
+        conn, map_id=map_id, source_id="both", finish_ms=30_000, raw_path="/fake/both"
+    )
+    pipeline = ReplayCleanPipeline(
+        conn=conn,
+        loader=_DictTelemetryLoader({
+            replay_id: make_telemetry(duration_ms=30_000, straight_speed_mps=30.0),
+        }),
+        rules=default_rules(),
+        thresholds_by_rule={},
+        clean_version="0.1.0",
+        breadcrumb_loader=_DictBreadcrumbLoader({
+            "/fake/both": make_breadcrumbs(),
+        }),
+        breadcrumb_rules=default_breadcrumb_rules(),
+    )
+    stats = pipeline.run(snapshot_id=_TEST_SNAPSHOT)
+    assert stats.replays_clean == 1
+    assert stats.breadcrumb_path_used == 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT clean_diagnostics FROM replays WHERE id=%s", (replay_id,)
+        )
+        diag = json.loads(cur.fetchone()[0])
+    assert diag["signal_source"] == "telemetry"
+
+
+def test_both_loaders_fail_routes_to_telemetry_unavailable(seeded) -> None:
+    """When telemetry AND breadcrumbs are both missing, the replay
+    gets the original telemetry_unavailable rejection (and
+    breadcrumb_path_used stays zero)."""
+    conn, map_id = seeded
+    replay_id = _insert_replay(
+        conn, map_id=map_id, source_id="neither", finish_ms=30_000, raw_path="/fake/neither"
+    )
+    pipeline = ReplayCleanPipeline(
+        conn=conn,
+        loader=_DictTelemetryLoader({}),
+        rules=default_rules(),
+        thresholds_by_rule={},
+        clean_version="0.1.0",
+        breadcrumb_loader=_DictBreadcrumbLoader({}),
+        breadcrumb_rules=default_breadcrumb_rules(),
+    )
+    stats = pipeline.run(snapshot_id=_TEST_SNAPSHOT)
+    assert stats.replays_rejected == 1
+    assert stats.breadcrumb_path_used == 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT clean_diagnostics FROM replays WHERE id=%s", (replay_id,)
+        )
+        diag = json.loads(cur.fetchone()[0])
+    assert "telemetry_unavailable" in diag["triggered"]

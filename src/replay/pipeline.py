@@ -23,6 +23,11 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from pymysql.connections import Connection
 
+from src.replay.breadcrumbs import (
+    BreadcrumbsLoadError,
+    FileBreadcrumbLoader,
+    ReplayBreadcrumbs,
+)
 from src.replay.classify import ClassificationOutcome, classify
 from src.replay.cohorts import (
     CohortAssignmentConfig,
@@ -31,6 +36,11 @@ from src.replay.cohorts import (
     summarize,
 )
 from src.replay.rules.base import Rule, run_rules
+from src.replay.rules.breadcrumb import (
+    BreadcrumbRule,
+    default_breadcrumb_rules,
+    run_breadcrumb_rules,
+)
 from src.replay.telemetry import ReplayTelemetry, from_dict
 from src.schema.replays import CleanStatus, ReplayCohort
 from src.storage.mariadb import cursor
@@ -100,6 +110,10 @@ class CleanStats:
     replays_rejected: int = 0
     load_failures: int = 0
     rule_exceptions: int = 0
+    # Track the breadcrumb-fallback path separately so we can see what
+    # fraction of the cohort is coming from partial signal. These count
+    # are subsets of replays_clean / replays_usable_with_warnings.
+    breadcrumb_path_used: int = 0
     errors: list[str] = field(default_factory=list)
     completed_at: datetime | None = None
 
@@ -111,6 +125,7 @@ class CleanStats:
             "replays_rejected": self.replays_rejected,
             "load_failures": self.load_failures,
             "rule_exceptions": self.rule_exceptions,
+            "breadcrumb_path_used": self.breadcrumb_path_used,
             "error_count": len(self.errors),
         }
 
@@ -154,7 +169,17 @@ def _write_classification(
     replay_id: int,
     outcome: ClassificationOutcome,
     clean_version: str,
+    signal_source: str = "telemetry",
+    extra_diagnostics: Mapping[str, Any] | None = None,
 ) -> None:
+    """Persist the classification. ``signal_source`` lands in diagnostics
+    so downstream can tell telemetry-based from breadcrumb-only cleanings
+    apart without re-reading the sidecar.
+    """
+    payload = outcome.diagnostics_payload()
+    payload["signal_source"] = signal_source
+    if extra_diagnostics:
+        payload.update(extra_diagnostics)
     with cursor(conn) as cur:
         cur.execute(
             "UPDATE replays SET clean_status=%s, clean_version=%s, clean_diagnostics=%s "
@@ -162,7 +187,7 @@ def _write_classification(
             (
                 outcome.status.value,
                 clean_version,
-                json.dumps(outcome.diagnostics_payload()),
+                json.dumps(payload),
                 replay_id,
             ),
         )
@@ -192,6 +217,23 @@ def _write_telemetry_unavailable(
 
 
 class ReplayCleanPipeline:
+    """Cleans replays using telemetry when samples are present, and
+    falls back to a breadcrumb-only rule set when they're not (the
+    expected path for offline-parsed TM2020 replays — see
+    ``docs/reverse-engineering/tm2020-replay-telemetry-spike.md``).
+
+    When both ``breadcrumb_loader`` and ``breadcrumb_rules`` are
+    provided, a :class:`TelemetryLoadError` on the primary loader
+    triggers a second attempt using breadcrumbs. If the breadcrumb
+    sidecar is also unavailable or unparseable, the replay is
+    rejected as ``telemetry_unavailable`` exactly as before.
+
+    The breadcrumb path's signal source is tracked in the diagnostics
+    payload (``signal_source: "breadcrumbs"``) and counted separately
+    in :class:`CleanStats` so the operator can see what fraction of a
+    cohort was classified from partial signal.
+    """
+
     def __init__(
         self,
         *,
@@ -200,6 +242,8 @@ class ReplayCleanPipeline:
         rules: Sequence[Rule],
         thresholds_by_rule: Mapping[str, Mapping[str, Any]] | None,
         clean_version: str,
+        breadcrumb_loader: FileBreadcrumbLoader | None = None,
+        breadcrumb_rules: Sequence[BreadcrumbRule] | None = None,
     ) -> None:
         if not rules:
             raise ValueError("at least one rule is required")
@@ -208,6 +252,8 @@ class ReplayCleanPipeline:
         self._rules = list(rules)
         self._thresholds = thresholds_by_rule or {}
         self._clean_version = clean_version
+        self._breadcrumb_loader = breadcrumb_loader
+        self._breadcrumb_rules = list(breadcrumb_rules) if breadcrumb_rules else []
 
     def run(
         self,
@@ -222,42 +268,96 @@ class ReplayCleanPipeline:
         try:
             for row in rows:
                 stats.replays_seen += 1
-                try:
-                    telemetry = self._loader.load(row)
-                except TelemetryLoadError as exc:
-                    stats.load_failures += 1
-                    stats.errors.append(f"load replay={row.id}: {exc}")
-                    _write_telemetry_unavailable(
-                        self._conn,
-                        replay_id=row.id,
-                        clean_version=self._clean_version,
-                        detail=str(exc),
-                    )
-                    stats.replays_rejected += 1
-                    continue
-                try:
-                    results = run_rules(telemetry, self._rules, self._thresholds)
-                except Exception as exc:  # noqa: BLE001
-                    stats.rule_exceptions += 1
-                    stats.errors.append(f"rules replay={row.id}: {exc}")
-                    _LOG.exception("rule exception on replay %d", row.id)
-                    continue
-                outcome = classify(results)
-                _write_classification(
-                    self._conn,
-                    replay_id=row.id,
-                    outcome=outcome,
-                    clean_version=self._clean_version,
-                )
-                if outcome.status is CleanStatus.CLEAN:
-                    stats.replays_clean += 1
-                elif outcome.status is CleanStatus.USABLE_WITH_WARNINGS:
-                    stats.replays_usable_with_warnings += 1
-                else:
-                    stats.replays_rejected += 1
+                self._clean_one(row, stats)
         finally:
             stats.completed_at = _utcnow()
         return stats
+
+    def _clean_one(self, row: ReplayRow, stats: CleanStats) -> None:
+        try:
+            telemetry = self._loader.load(row)
+        except TelemetryLoadError as telemetry_exc:
+            stats.load_failures += 1
+            if self._try_breadcrumb_path(row, stats, telemetry_exc):
+                return
+            # No breadcrumb fallback configured or it also failed.
+            stats.errors.append(f"load replay={row.id}: {telemetry_exc}")
+            _write_telemetry_unavailable(
+                self._conn,
+                replay_id=row.id,
+                clean_version=self._clean_version,
+                detail=str(telemetry_exc),
+            )
+            stats.replays_rejected += 1
+            return
+        try:
+            results = run_rules(telemetry, self._rules, self._thresholds)
+        except Exception as exc:  # noqa: BLE001
+            stats.rule_exceptions += 1
+            stats.errors.append(f"rules replay={row.id}: {exc}")
+            _LOG.exception("rule exception on replay %d", row.id)
+            return
+        outcome = classify(results)
+        _write_classification(
+            self._conn,
+            replay_id=row.id,
+            outcome=outcome,
+            clean_version=self._clean_version,
+            signal_source="telemetry",
+        )
+        self._bump_stats(outcome, stats)
+
+    def _try_breadcrumb_path(
+        self,
+        row: ReplayRow,
+        stats: CleanStats,
+        telemetry_exc: TelemetryLoadError,
+    ) -> bool:
+        """Attempt to classify using breadcrumbs. Returns True if the
+        replay was classified (regardless of outcome); False if the
+        breadcrumb path wasn't available and the caller should fall
+        through to telemetry_unavailable rejection.
+        """
+        if self._breadcrumb_loader is None or not self._breadcrumb_rules:
+            return False
+        if not row.raw_artifact_path:
+            return False
+        try:
+            breadcrumbs = self._breadcrumb_loader.load_by_path(row.raw_artifact_path)
+        except BreadcrumbsLoadError:
+            return False
+        try:
+            results = run_breadcrumb_rules(
+                breadcrumbs, self._breadcrumb_rules, self._thresholds
+            )
+        except Exception as exc:  # noqa: BLE001
+            stats.rule_exceptions += 1
+            stats.errors.append(f"breadcrumb rules replay={row.id}: {exc}")
+            _LOG.exception("breadcrumb rule exception on replay %d", row.id)
+            return True  # replay handled (poorly) — don't fall through.
+        outcome = classify(results)
+        _write_classification(
+            self._conn,
+            replay_id=row.id,
+            outcome=outcome,
+            clean_version=self._clean_version,
+            signal_source="breadcrumbs",
+            extra_diagnostics={
+                "telemetry_unavailable_reason": str(telemetry_exc)[:400],
+            },
+        )
+        stats.breadcrumb_path_used += 1
+        self._bump_stats(outcome, stats)
+        return True
+
+    @staticmethod
+    def _bump_stats(outcome: ClassificationOutcome, stats: CleanStats) -> None:
+        if outcome.status is CleanStatus.CLEAN:
+            stats.replays_clean += 1
+        elif outcome.status is CleanStatus.USABLE_WITH_WARNINGS:
+            stats.replays_usable_with_warnings += 1
+        else:
+            stats.replays_rejected += 1
 
 
 @dataclass

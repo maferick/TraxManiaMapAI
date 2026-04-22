@@ -14,6 +14,7 @@ discriminator (migration 010). ``is_free=False`` rows carry integer
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -216,6 +217,45 @@ def _block_row(
     )
 
 
+_INSERT_WAYPOINT_SQL = """
+INSERT INTO map_checkpoints (
+    map_id, parser_version, waypoint_index, tag, waypoint_order,
+    block_name, placement, x, y, z, abs_x, abs_y, abs_z
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+
+def _waypoint_row(
+    *,
+    map_id: int,
+    parser_version: str,
+    waypoint_index: int,
+    waypoint: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    placement = "free" if waypoint.get("placement") == "free" else "grid"
+    x = y = z = None
+    abs_x = abs_y = abs_z = None
+    if placement == "free":
+        abs_x = _as_float(waypoint.get("abs_x"))
+        abs_y = _as_float(waypoint.get("abs_y"))
+        abs_z = _as_float(waypoint.get("abs_z"))
+    else:
+        x = _as_int(waypoint.get("x"))
+        y = _as_int(waypoint.get("y"))
+        z = _as_int(waypoint.get("z"))
+    return (
+        map_id,
+        parser_version,
+        waypoint_index,
+        str(waypoint.get("tag") or ""),
+        _as_int(waypoint.get("order")) or 0,
+        str(waypoint.get("block_name") or ""),
+        placement,
+        x, y, z,
+        abs_x, abs_y, abs_z,
+    )
+
+
 def _as_int(v: Any) -> int | None:
     if v is None or isinstance(v, bool):
         return None
@@ -408,6 +448,7 @@ class MapParsePipeline:
         output = result.output or {}
         blocks = output.get("blocks") or []
         scenery = output.get("scenery") or {}
+        waypoints = output.get("waypoints") or []
         source_ids = {
             "map": str(row.id),
             "raw_artifact_hash": row.raw_artifact_hash or "",
@@ -424,11 +465,33 @@ class MapParsePipeline:
             for i, block in enumerate(blocks)
             if isinstance(block, Mapping)
         ]
+        waypoint_rows = [
+            _waypoint_row(
+                map_id=row.id,
+                parser_version=self._parser_version,
+                waypoint_index=i,
+                waypoint=wp,
+            )
+            for i, wp in enumerate(waypoints)
+            if isinstance(wp, Mapping)
+        ]
 
         try:
             with cursor(self._conn) as cur:
                 if rows:
                     cur.executemany(_INSERT_BLOCK_SQL, rows)
+                if waypoint_rows:
+                    # Idempotent reparse: unique (map_id, parser_version,
+                    # waypoint_index) would collide on re-run with the
+                    # same parser_version. Delete then insert keeps the
+                    # common case simple; multi-parser-version coexistence
+                    # survives because we scope the delete.
+                    cur.execute(
+                        "DELETE FROM map_checkpoints "
+                        "WHERE map_id = %s AND parser_version = %s",
+                        (row.id, self._parser_version),
+                    )
+                    cur.executemany(_INSERT_WAYPOINT_SQL, waypoint_rows)
                 cur.execute(
                     _UPDATE_MAP_SUCCESS_SQL,
                     (
@@ -539,6 +602,7 @@ class ReplayParseStats:
     replays_failed_transient: int = 0
     replays_failed_permanent: int = 0
     sidecars_written: int = 0
+    breadcrumbs_written: int = 0
     errors: list[str] = field(default_factory=list)
     completed_at: datetime | None = None
 
@@ -549,6 +613,7 @@ class ReplayParseStats:
             "replays_failed_transient": self.replays_failed_transient,
             "replays_failed_permanent": self.replays_failed_permanent,
             "sidecars_written": self.sidecars_written,
+            "breadcrumbs_written": self.breadcrumbs_written,
             "error_count": len(self.errors),
         }
 
@@ -597,7 +662,9 @@ UPDATE replays SET
     parse_error_code = NULL,
     parse_error_detail = NULL,
     finish_time_ms = COALESCE(finish_time_ms, %s),
-    player_login = COALESCE(player_login, %s)
+    player_login = COALESCE(player_login, %s),
+    breadcrumbs_path = %s,
+    breadcrumbs_hash = %s
 WHERE id = %s
 """
 
@@ -609,6 +676,28 @@ UPDATE replays SET
     parse_error_detail = %s
 WHERE id = %s
 """
+
+
+def _write_breadcrumbs_sidecar(
+    raw_artifact_path: str, breadcrumbs: Mapping[str, Any]
+) -> tuple[Path, str]:
+    """Write `.breadcrumbs.json` next to the raw replay artifact. Returns
+    (path, sha256_hex) so the caller can persist lineage. Atomic via
+    tmp + replace. Bytes are hashed *before* the replace to avoid a
+    race with concurrent parsers.
+    """
+    import os
+    dest = Path(raw_artifact_path + ".breadcrumbs.json")
+    payload = json.dumps(breadcrumbs, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tmp.open("wb") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp.replace(dest)
+    return dest, digest
 
 
 class ReplayParsePipeline:
@@ -714,17 +803,31 @@ class ReplayParsePipeline:
         output: Mapping[str, Any],
         stats: ReplayParseStats,
     ) -> None:
+        # Split breadcrumbs off before writing the telemetry sidecar so
+        # the telemetry schema (ReplayTelemetry: samples non-empty)
+        # isn't polluted with a field it doesn't model.
+        output_mutable = dict(output)
+        breadcrumbs = output_mutable.pop("breadcrumbs", None)
+
         sidecar_path = Path(row.raw_artifact_path + ".telemetry.json")
+        breadcrumbs_path: Path | None = None
+        breadcrumbs_hash: str | None = None
         try:
             import os
             tmp = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
             sidecar_path.parent.mkdir(parents=True, exist_ok=True)
             with tmp.open("w", encoding="utf-8") as fh:
-                json.dump(output, fh, separators=(",", ":"))
+                json.dump(output_mutable, fh, separators=(",", ":"))
                 fh.flush()
                 os.fsync(fh.fileno())
             tmp.replace(sidecar_path)
             stats.sidecars_written += 1
+
+            if isinstance(breadcrumbs, Mapping):
+                breadcrumbs_path, breadcrumbs_hash = _write_breadcrumbs_sidecar(
+                    row.raw_artifact_path, breadcrumbs
+                )
+                stats.breadcrumbs_written += 1
         except Exception as exc:  # noqa: BLE001
             stats.replays_failed_transient += 1
             stats.errors.append(
@@ -747,6 +850,8 @@ class ReplayParsePipeline:
                     (
                         _as_int(finish_time_ms),
                         player_login,
+                        str(breadcrumbs_path) if breadcrumbs_path else None,
+                        breadcrumbs_hash,
                         row.id,
                     ),
                 )

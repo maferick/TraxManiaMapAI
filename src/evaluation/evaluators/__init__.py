@@ -10,11 +10,13 @@ placeholders built to demonstrate the wiring end-to-end. Real tuning
 lands after real data passes through PRs 3–6.
 """
 from src.evaluation.evaluators.adjacency import AdjacencyGraphEvaluator
+from src.evaluation.evaluators.behavior_profile import BehaviorProfileEvaluator
 from src.evaluation.evaluators.route_coverage import RouteCoverageEvaluator
 from src.evaluation.evaluators.structural import StructuralEvaluator
 
 __all__ = [
     "AdjacencyGraphEvaluator",
+    "BehaviorProfileEvaluator",
     "RouteCoverageEvaluator",
     "StructuralEvaluator",
 ]

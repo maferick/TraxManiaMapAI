@@ -21,8 +21,10 @@ from src.ingestion import (
 from src.replay import (
     CohortAssignmentConfig,
     CohortAssignmentPipeline,
+    FileBreadcrumbLoader,
     FileTelemetryLoader,
     ReplayCleanPipeline,
+    default_breadcrumb_rules,
     default_rules,
 )
 from src.benchmarks.manifest import load as load_benchmark
@@ -30,6 +32,7 @@ from src.constraints import ConstraintGraphPipeline
 from src.parsers import MapParsePipeline, ReplayParsePipeline, SubprocessParser
 from src.evaluation import (
     AdjacencyGraphEvaluator,
+    BehaviorProfileEvaluator,
     Evaluator,
     RouteCoverageEvaluator,
     StructuralEvaluator,
@@ -316,6 +319,7 @@ def _cmd_ingest_maps(args: argparse.Namespace) -> int:
     artifacts_root = Path(artifacts_cfg.get("root", "./data/artifacts"))
     retry_cfg = tmx_cfg.get("retry", {}) or {}
     backoff = tuple(float(s) for s in retry_cfg.get("backoff_seconds", (2, 4, 8, 16)))
+    max_total_retry = float(retry_cfg.get("max_total_retry_seconds", 120.0))
     timeout = float(tmx_cfg.get("timeout_seconds", 30.0))
 
     config_hash = resolve_config_hash(config)
@@ -328,6 +332,7 @@ def _cmd_ingest_maps(args: argparse.Namespace) -> int:
         cache=ResponseCache(cache_dir),
         backoff_seconds=backoff,
         timeout_seconds=timeout,
+        max_total_retry_seconds=max_total_retry,
     )
     tmx_client = TmxClient(http)
     store = ArtifactStore(artifacts_root)
@@ -455,6 +460,7 @@ def _cmd_ingest_replays(args: argparse.Namespace) -> int:
     artifacts_root = Path(artifacts_cfg.get("root", "./data/artifacts"))
     retry_cfg = tmx_cfg.get("retry", {}) or {}
     backoff = tuple(float(s) for s in retry_cfg.get("backoff_seconds", (2, 4, 8, 16)))
+    max_total_retry = float(retry_cfg.get("max_total_retry_seconds", 120.0))
     timeout = float(tmx_cfg.get("timeout_seconds", 30.0))
 
     config_hash = resolve_config_hash(config)
@@ -467,6 +473,7 @@ def _cmd_ingest_replays(args: argparse.Namespace) -> int:
         cache=ResponseCache(cache_dir),
         backoff_seconds=backoff,
         timeout_seconds=timeout,
+        max_total_retry_seconds=max_total_retry,
     )
     tmx_client = TmxClient(http)
     store = ArtifactStore(artifacts_root)
@@ -574,6 +581,8 @@ def _cmd_replay_clean(args: argparse.Namespace) -> int:
             rules=default_rules(),
             thresholds_by_rule=thresholds,
             clean_version=clean_version,
+            breadcrumb_loader=FileBreadcrumbLoader(),
+            breadcrumb_rules=default_breadcrumb_rules(),
         )
         try:
             stats = pipeline.run(
@@ -597,13 +606,15 @@ def _cmd_replay_clean(args: argparse.Namespace) -> int:
             conn, stage_run_id, status=status, output_summary=stats.to_summary_json()
         )
         _LOG.info(
-            "replay-clean %s: seen=%d clean=%d warn=%d rejected=%d load_fail=%d",
+            "replay-clean %s: seen=%d clean=%d warn=%d rejected=%d "
+            "load_fail=%d breadcrumb_path_used=%d",
             status,
             stats.replays_seen,
             stats.replays_clean,
             stats.replays_usable_with_warnings,
             stats.replays_rejected,
             stats.load_failures,
+            stats.breadcrumb_path_used,
         )
         return 0 if status == "success" else 1
     finally:
@@ -627,6 +638,8 @@ def _build_evaluator_stack(
             )
         elif name == "route_coverage":
             stack.append(RouteCoverageEvaluator(conn))
+        elif name == "behavior_profile":
+            stack.append(BehaviorProfileEvaluator(conn))
         else:
             raise ValueError(f"unknown evaluator name: {name!r}")
     return stack

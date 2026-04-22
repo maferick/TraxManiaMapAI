@@ -44,6 +44,41 @@ Phase 1 roadmap. Scope = substrate (data + evaluation), not generation.
 - clustering abstraction (DBSCAN, HDBSCAN, per-segment pluggable)
 - sample outputs on fixture maps
 
+**Status: BLOCKED for TM2020 on position-telemetry route inference.**
+
+GBX.NET 2.4.x cannot decode TM2020 ghost position/velocity samples —
+`CPlugEntRecordData.EntList[i].Samples` is raw `byte[]` deltas with no
+high-level decoder. The telemetry sidecar emits `samples: []` and the
+replay cleaner correctly routes such replays to `telemetry_unavailable`
+rejection. Full centerline inference requires real (x, y, z) samples
+and is parked until one of these unlocks:
+
+1. **OpenPlanet in-game exporter workstream** — authoritative per-tick
+   motion telemetry captured at play-time via an AngelScript plugin
+   and handed back through a distinct ingestion path. See
+   `docs/workstreams/openplanet-telemetry.md`.
+2. **GBX.NET upstream contribution** — reverse-engineer
+   `CPlugEntRecordData`'s entity-record byte format and land a
+   position-sample decoder on the library side. Multi-week effort;
+   outcome uncertain.
+
+What **is** unblocked today: the wrapper emits a breadcrumbs sidecar
+(`.breadcrumbs.json`) alongside the telemetry sidecar, carrying the
+decoded `IInput` timeline (SteerTM2020 / Accelerate / Brake / Respawn
+/ ...) plus the exact `checkpoint_times_ms`. These let us build:
+
+- per-replay driving-behavior features (input density, brake/steer
+  counts, checkpoint pacing)
+- breadcrumb-cohort classification (can replace cleaning rules that
+  currently need samples)
+- coarse race-phase segmentation via checkpoint timing
+
+Breadcrumb-only artifacts are a different surrogate input than a full
+centerline and should not be claimed as one. The PR 5 **scaffold**
+(artifact schema, clustering abstraction, pipeline plumbing) can still
+land on fixture/test data; scale-1k route extraction waits on the
+unlock paths above.
+
 ### PR 6 — Constraint graph
 
 - Neo4j schema

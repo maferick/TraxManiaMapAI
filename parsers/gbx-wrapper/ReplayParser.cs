@@ -15,12 +15,18 @@
 //   checkpoint_times_ms: [...]  — exact checkpoint + finish times
 //   record_data: {...}          — Start/End + entity list counts
 //   inputs_count                — total input events (proxy for driving activity)
+//   breadcrumbs: {...}          — the decoded IInput timeline + checkpoint
+//                                 times as a separate offline signal
+//                                 (see docs/reverse-engineering/
+//                                 tm2020-replay-telemetry-spike.md).
 //
 // Downstream: replay-cleaning rules that operate on metadata alone
 // (restart, spectator, invalid_timing) still work. Rules that need
 // samples (teleport, outlier_speed, zero_motion) will classify these
 // as FAILED_TRANSIENT via incomplete, which is correct — we don't
-// have enough data to judge them.
+// have enough data to judge them. The Python side splits `breadcrumbs`
+// off into a separate `.breadcrumbs.json` sidecar so the telemetry
+// schema stays strict.
 
 using GBX.NET;
 using GBX.NET.Engines.Game;
@@ -30,6 +36,7 @@ namespace TraxMania.GbxWrapper;
 internal static class ReplayParser
 {
     private const int TelemetrySchemaVersion = 1;
+    private const int BreadcrumbsSchemaVersion = 1;
     private const int DefaultSampleRateHz = 50;
 
     public static Dictionary<string, object?> Parse(string path)
@@ -43,6 +50,7 @@ internal static class ReplayParser
         var checkpointTimesMs = new List<int>();
         Dictionary<string, object?>? recordMeta = null;
         int? inputsCount = null;
+        var inputsTimeline = new List<Dictionary<string, object?>>();
 
         var firstGhost = replay.Ghosts?.Count > 0 ? replay.Ghosts[0] : null;
         if (firstGhost is not null)
@@ -62,9 +70,22 @@ internal static class ReplayParser
                     }
                 }
             }
-            if (firstGhost.Inputs is { IsDefaultOrEmpty: false } inputs)
+            // TM2020 inputs live in PlayerInputs[n].Inputs, not in the
+            // flat ghost.Inputs view (which is empty on TM2020 replays in
+            // GBX.NET 2.4.x). See
+            // docs/reverse-engineering/repo-notes/clip-input.md — the
+            // clip-input tool uses the same PlayerInputs path and falls
+            // back to ghost.Inputs only for older games.
+            var firstBlock = firstGhost.PlayerInputs?.FirstOrDefault();
+            if (firstBlock?.Inputs is { Count: > 0 } blockInputs)
             {
-                inputsCount = inputs.Length;
+                inputsCount = blockInputs.Count;
+                AppendInputs(blockInputs, inputsTimeline);
+            }
+            else if (firstGhost.Inputs is { IsDefaultOrEmpty: false } flatInputs)
+            {
+                inputsCount = flatInputs.Length;
+                AppendInputs(flatInputs, inputsTimeline);
             }
             if (firstGhost.RecordData is { } rd)
             {
@@ -81,6 +102,21 @@ internal static class ReplayParser
             AppendGhostSamples(firstGhost, samples);
         }
 
+        // Breadcrumbs are a standalone offline-telemetry signal: checkpoints
+        // give race-phase anchors; inputs give per-event driving actions.
+        // The Python pipeline splits this out into `.breadcrumbs.json` so
+        // the telemetry schema (samples: non-empty) stays strict.
+        var breadcrumbs = new Dictionary<string, object?>
+        {
+            ["schema_version"] = BreadcrumbsSchemaVersion,
+            ["source_replay_id"] = Path.GetFileNameWithoutExtension(path),
+            ["player_login"] = playerLogin,
+            ["finish_time_ms"] = finishTimeMs,
+            ["checkpoint_times_ms"] = checkpointTimesMs,
+            ["inputs"] = inputsTimeline,
+            ["inputs_count"] = inputsCount ?? 0,
+        };
+
         return new Dictionary<string, object?>
         {
             ["schema_version"] = TelemetrySchemaVersion,
@@ -94,7 +130,40 @@ internal static class ReplayParser
             ["checkpoint_times_ms"] = checkpointTimesMs,
             ["record_data"] = recordMeta,
             ["inputs_count"] = inputsCount,
+            ["breadcrumbs"] = breadcrumbs,
         };
+    }
+
+    // Reflection-based input serialization. GBX.NET's IInput hierarchy
+    // evolves between versions (SteerTM2020, AccelerateTM2020, Respawn,
+    // ...); pinning concrete types would rot. For each event we emit:
+    //   time_ms  — from the input's Time property
+    //   kind     — short type name (e.g. "SteerTM2020")
+    //   repr     — ToString() — human-readable "{Time} {Kind} {Value}"
+    // Downstream can parse `repr` further if needed without the wrapper
+    // having to know every input subtype.
+    private static void AppendInputs(
+        IEnumerable<GBX.NET.Inputs.IInput> inputs,
+        List<Dictionary<string, object?>> into)
+    {
+        foreach (var input in inputs)
+        {
+            int? timeMs = null;
+            try
+            {
+                timeMs = (int)input.Time.TotalMilliseconds;
+            }
+            catch
+            {
+                // Some input types might not expose Time cleanly; skip silently.
+            }
+            into.Add(new Dictionary<string, object?>
+            {
+                ["time_ms"] = timeMs,
+                ["kind"] = input.GetType().Name,
+                ["repr"] = input.ToString(),
+            });
+        }
     }
 
     private static void AppendGhostSamples(
