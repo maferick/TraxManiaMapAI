@@ -21,16 +21,37 @@ For each map in :data:`VALIDATION_MAP_IDS`:
    cell in the set. The map *passes* reachability if all non-Spawn
    anchor sets are reachable.
 
+**Inductive reachability** (``use_observations=True``). Grid-adjacency
+alone underestimates real TM2020 connectivity — tracks cross gaps via
+ramps, loops, airborne sections. Replay breadcrumbs observe race-end
+connectivity directly: a clean replay with finish_time_ms set proves
+that spawn→goal IS traversable, regardless of whether the adjacency
+graph captures the path. When observations are enabled, each clean
+replay on the map contributes a connectivity assertion: spawn + all
+observed checkpoints + goal are pairwise-connected. These assertions
+are applied as union-find merges on top of the seed_valid BFS result.
+
+The observations go INTO the traversability-reachability computation;
+they do NOT bump constraint-graph validity (see
+``src/constraints/evidence.py`` — "frequency is NOT validity"). Per
+the design note §6.3, only explicit replay-crossing evidence on a
+*specific edge* bumps ``replay_supported_count``. Observation-based
+reachability is a different artifact — a connectivity assertion over
+an anchor set, not an edge assertion.
+
 This is connectivity, not path enumeration — Step 4 does enumeration.
-Step 3's job is to answer "given the classification, CAN the race be
-completed at all on the traversability subgraph?" If not, Step 4 is
-moot and we go back to classification.
+Step 3's job is to answer "given the classification (optionally plus
+replay-observed connectivity), CAN the race be completed at all on the
+traversability subgraph?" If not, Step 4 is moot and we go back to
+classification or to adjacency-model upgrades.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pymysql.connections import Connection
@@ -58,10 +79,36 @@ _LOG = logging.getLogger(__name__)
 # Block counts span 176–19,524 grid blocks; waypoint counts span 5–78.
 # The set is intentionally STABLE across runs — swapping members
 # silently would undermine the Phase-1 gate.
-VALIDATION_MAP_IDS: tuple[int, ...] = (
+VALIDATION_MAP_IDS_V1: tuple[int, ...] = (
     1212, 624, 912, 950, 403,
     901, 676, 736, 418, 229,
 )
+# V2: data-coverage-aware validation set. Selected from maps that have
+# ≥3 clean breadcrumb replays in the 2026-04-scale-1k corpus so the
+# inductive observation layer has something to work with. V1 stays
+# frozen as the historical first-gate record; V2 is what the Phase 3
+# mechanism is validated against going forward.
+#
+# Structural composition:
+#   9 plain-Checkpoint maps (diverse block counts 93 to 7151)
+#   1 LinkedCheckpoint map (1212 — only multilap map with ≥3 replays)
+# Replay counts across V2: 3–15 per map.
+VALIDATION_MAP_IDS_V2: tuple[int, ...] = (
+    491, 1156, 298, 990, 1046,
+    336, 803, 1177, 787, 1212,
+)
+# Current default — callers can pin to V1 explicitly for historical runs.
+VALIDATION_MAP_IDS: tuple[int, ...] = VALIDATION_MAP_IDS_V2
+
+# Approximate block dimensions in absolute coords. TM2020 grid cells
+# are 32m × 8m × 32m (X × Y × Z); the center of the cell at grid
+# coord (x, y, z) sits at approximately (x*32 + 16, y*8 + 4, z*32 + 16).
+# Used only for snapping free-placed waypoint triggers to the nearest
+# grid block; approximate because per-block-type anchor offsets vary
+# slightly and we don't model them.
+_BLOCK_SIZE_X: float = 32.0
+_BLOCK_SIZE_Y: float = 8.0
+_BLOCK_SIZE_Z: float = 32.0
 
 # Waypoint tags that start a race (used as the BFS source set).
 # ``StartFinish`` is a combined start+finish marker on some looping
@@ -77,6 +124,20 @@ class AnchorSet:
     cells: frozenset[tuple[int, int, int]]
 
 
+@dataclass(frozen=True)
+class ReplayObservation:
+    """One clean replay's assertion that a set of anchor cells is
+    pairwise-connected in the actual game. The cells come from the
+    map's ``map_checkpoints`` rows filtered to waypoints the replay is
+    known to have crossed (always spawn + goal when finish_time_ms is
+    set; intermediate CPs included when the map's waypoint count
+    matches the replay's ``checkpoint_times_ms`` length).
+    """
+    replay_id: int
+    kind: str  # "spawn_goal_only" | "linked_ordered" | "checkpoint_matched"
+    cells: frozenset[tuple[int, int, int]]
+
+
 @dataclass
 class MapReachability:
     """Per-map reachability + suppression numbers."""
@@ -89,6 +150,10 @@ class MapReachability:
     anchor_sets_total: int = 0
     anchor_sets_reachable: int = 0
     spawn_anchor_cells: int = 0
+    # Inductive fields — populated when observations are applied.
+    observations_available: int = 0
+    observations_applied: int = 0
+    anchor_sets_reachable_seed_only: int = 0   # before observation merges
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -129,6 +194,9 @@ class MapReachability:
             "unknown_edges": self.unknown_edges,
             "anchor_sets_total": self.anchor_sets_total,
             "anchor_sets_reachable": self.anchor_sets_reachable,
+            "anchor_sets_reachable_seed_only": self.anchor_sets_reachable_seed_only,
+            "observations_available": self.observations_available,
+            "observations_applied": self.observations_applied,
             "spawn_anchor_cells": self.spawn_anchor_cells,
             "suppression_fraction": round(self.suppression_fraction, 4),
             "unsupported_fraction": round(self.unsupported_fraction, 4),
@@ -337,6 +405,9 @@ def _fetch_map_grid_blocks(
 def _fetch_map_waypoints(
     conn: Connection, *, map_id: int
 ) -> list[tuple[str, int, int, int, int]]:
+    """Grid-placed waypoints only; free-placed waypoints are fetched
+    separately via :func:`_fetch_free_map_waypoints` so the caller can
+    decide whether to snap them to the grid."""
     with cursor(conn) as cur:
         cur.execute(
             "SELECT tag, waypoint_order, x, y, z "
@@ -348,12 +419,222 @@ def _fetch_map_waypoints(
         return list(cur.fetchall())
 
 
+def _fetch_free_map_waypoints(
+    conn: Connection, *, map_id: int
+) -> list[tuple[str, int, float, float, float]]:
+    """Return ``(tag, waypoint_order, abs_x, abs_y, abs_z)`` for free-
+    placed waypoints with populated absolute coords."""
+    with cursor(conn) as cur:
+        cur.execute(
+            "SELECT tag, waypoint_order, abs_x, abs_y, abs_z "
+            "FROM map_checkpoints "
+            "WHERE map_id = %s AND placement = 'free' "
+            "AND abs_x IS NOT NULL AND abs_y IS NOT NULL AND abs_z IS NOT NULL",
+            (map_id,),
+        )
+        return [
+            (str(r[0]), int(r[1]), float(r[2]), float(r[3]), float(r[4]))
+            for r in cur.fetchall()
+        ]
+
+
+def _snap_free_waypoints_to_grid(
+    free_waypoints: list[tuple[str, int, float, float, float]],
+    grid_cells: list[tuple[int, int, int]],
+) -> list[tuple[str, int, int, int, int]]:
+    """For each free-placed waypoint, pick the grid cell whose estimated
+    absolute center is nearest (Euclidean). Returns a list in the same
+    shape as :func:`_fetch_map_waypoints` so downstream code handles
+    snapped free and native grid waypoints uniformly.
+
+    Skip-silently policy: a free waypoint with no grid blocks in the
+    map returns nothing (the caller will log 'no_grid_waypoints' if
+    that leaves the map without any anchors). Conservative to avoid
+    inventing anchors where there's no block to snap to.
+    """
+    if not grid_cells:
+        return []
+    # Precompute grid-cell absolute centers once.
+    grid_abs: list[tuple[int, int, int, float, float, float]] = [
+        (
+            gx, gy, gz,
+            gx * _BLOCK_SIZE_X + _BLOCK_SIZE_X / 2,
+            gy * _BLOCK_SIZE_Y + _BLOCK_SIZE_Y / 2,
+            gz * _BLOCK_SIZE_Z + _BLOCK_SIZE_Z / 2,
+        )
+        for gx, gy, gz in grid_cells
+    ]
+    snapped: list[tuple[str, int, int, int, int]] = []
+    for tag, order, ax, ay, az in free_waypoints:
+        best_dist = float("inf")
+        best_cell: tuple[int, int, int] | None = None
+        for gx, gy, gz, cx, cy, cz in grid_abs:
+            dx = ax - cx
+            dy = ay - cy
+            dz = az - cz
+            dist = dx * dx + dy * dy + dz * dz  # squared distance is fine for argmin
+            if dist < best_dist:
+                best_dist = dist
+                best_cell = (gx, gy, gz)
+        if best_cell is not None:
+            snapped.append((tag, order, best_cell[0], best_cell[1], best_cell[2]))
+    return snapped
+
+
+def _fetch_clean_replays(
+    conn: Connection, *, map_id: int
+) -> list[tuple[int, str]]:
+    """Return ``(replay_id, breadcrumbs_path)`` for clean or
+    usable-with-warnings replays that have a breadcrumb sidecar on disk."""
+    with cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, breadcrumbs_path FROM replays "
+            "WHERE map_id = %s AND clean_status IN ('clean','usable_with_warnings') "
+            "AND breadcrumbs_path IS NOT NULL",
+            (map_id,),
+        )
+        return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
+
+
+def _load_breadcrumbs_cp_count(path: str) -> int | None:
+    """Peek at a breadcrumbs sidecar to get the length of
+    ``checkpoint_times_ms`` (number of timed checkpoint crossings,
+    including the finish if present). Returns None if the file is
+    missing or malformed — observations silently degrade to
+    spawn-only when that happens."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    cps = payload.get("checkpoint_times_ms")
+    if not isinstance(cps, list):
+        return None
+    return len(cps)
+
+
+def _build_observations(
+    anchor_sets: list[AnchorSet],
+    replays: list[tuple[int, str]],
+) -> list[ReplayObservation]:
+    """For each replay, classify what connectivity we can assert.
+
+    The assertion is: *every cell in* ``cells`` *is pairwise-connected
+    to every other cell in* ``cells`` *because this replay was driven
+    cleanly*.
+
+    Decision rules:
+
+    - If the replay's ``checkpoint_times_ms`` length matches the number
+      of intermediate-plus-finish anchor sets AND the map has
+      ``LinkedCheckpoint`` or plain ``Checkpoint`` waypoints (not a mix
+      that'd require heuristic disambiguation), include ALL waypoint
+      cells (spawn + every CP + every goal cell).
+    - Otherwise fall back to ``spawn_goal_only``: spawn cells + goal
+      cells are the only asserted pairwise-connected anchors.
+    """
+    spawn_cells: set[tuple[int, int, int]] = set()
+    goal_cells: set[tuple[int, int, int]] = set()
+    linked_cells: set[tuple[int, int, int]] = set()
+    checkpoint_cells: set[tuple[int, int, int]] = set()
+    has_linked = False
+    has_plain_cp = False
+    for aset in anchor_sets:
+        if aset.tag in _SPAWN_TAGS:
+            spawn_cells.update(aset.cells)
+        if aset.tag in ("Goal", "StartFinish"):
+            goal_cells.update(aset.cells)
+        if aset.tag == "LinkedCheckpoint":
+            linked_cells.update(aset.cells)
+            has_linked = True
+        if aset.tag == "Checkpoint":
+            checkpoint_cells.update(aset.cells)
+            has_plain_cp = True
+
+    # Count of distinct intermediate-CP logical anchors. LinkedCheckpoint
+    # anchors each have a unique waypoint_order so the anchor_set count
+    # equals the logical-CP count. Plain Checkpoint anchors all share
+    # order=0 (TM2020 resolves order at run time from the player's
+    # trajectory), so they collapse into a single anchor_set — the real
+    # count we want to match against a replay's checkpoint_times_ms
+    # length is the number of distinct Checkpoint *cells*.
+    linked_anchor_count = sum(
+        1 for a in anchor_sets if a.tag == "LinkedCheckpoint"
+    )
+    plain_cp_anchor_count = len(checkpoint_cells)
+
+    out: list[ReplayObservation] = []
+    for replay_id, bc_path in replays:
+        cp_count = _load_breadcrumbs_cp_count(bc_path)
+        # The sidecar's checkpoint_times_ms typically includes intermediate
+        # CPs AND the finish — so a map with N intermediate CPs + a finish
+        # gate matches replay cp_count == N + 1. Allow exact match or
+        # match-off-by-one (some maps emit a StartFinish with no explicit
+        # goal anchor, and the breadcrumb may omit the start time).
+        asserted = spawn_cells | goal_cells
+        kind = "spawn_goal_only"
+        if cp_count is not None and not (has_linked and has_plain_cp):
+            if has_linked and cp_count in (linked_anchor_count, linked_anchor_count + 1):
+                asserted = asserted | linked_cells
+                kind = "linked_ordered"
+            elif has_plain_cp and cp_count in (plain_cp_anchor_count, plain_cp_anchor_count + 1):
+                asserted = asserted | checkpoint_cells
+                kind = "checkpoint_matched"
+        if not asserted or len(asserted) < 2:
+            # Nothing useful to assert — skip silently.
+            continue
+        out.append(ReplayObservation(
+            replay_id=replay_id,
+            kind=kind,
+            cells=frozenset(asserted),
+        ))
+    return out
+
+
+class _UnionFind:
+    """Tiny union-find over arbitrary hashables. Path compression +
+    union by size. Used to merge seed_valid edges and replay
+    observations into a single connectivity relation per map."""
+
+    def __init__(self) -> None:
+        self._parent: dict[Any, Any] = {}
+        self._size: dict[Any, int] = {}
+
+    def _ensure(self, x: Any) -> None:
+        if x not in self._parent:
+            self._parent[x] = x
+            self._size[x] = 1
+
+    def find(self, x: Any) -> Any:
+        self._ensure(x)
+        while self._parent[x] != x:
+            self._parent[x] = self._parent[self._parent[x]]
+            x = self._parent[x]
+        return x
+
+    def union(self, a: Any, b: Any) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self._size[ra] < self._size[rb]:
+            ra, rb = rb, ra
+        self._parent[rb] = ra
+        self._size[ra] += self._size[rb]
+
+    def same(self, a: Any, b: Any) -> bool:
+        return self.find(a) == self.find(b)
+
+
 # -----------------------------------------------------------------------------
 # Orchestration
 # -----------------------------------------------------------------------------
 
 
-def validate_map(conn: Connection, map_id: int) -> MapReachability:
+def validate_map(
+    conn: Connection,
+    map_id: int,
+    *,
+    use_observations: bool = False,
+) -> MapReachability:
     result = MapReachability(map_id=map_id)
 
     grid_rows = _fetch_map_grid_blocks(conn, map_id=map_id)
@@ -371,6 +652,12 @@ def validate_map(conn: Connection, map_id: int) -> MapReachability:
     )
 
     wp_rows = _fetch_map_waypoints(conn, map_id=map_id)
+    free_wp_rows = _fetch_free_map_waypoints(conn, map_id=map_id)
+    if free_wp_rows:
+        snapped = _snap_free_waypoints_to_grid(
+            free_wp_rows, list(cell_to_family.keys())
+        )
+        wp_rows = list(wp_rows) + snapped
     anchor_sets = _build_anchor_sets(wp_rows)
     if not anchor_sets:
         result.errors.append("no_grid_waypoints")
@@ -390,24 +677,77 @@ def validate_map(conn: Connection, map_id: int) -> MapReachability:
         result.errors.append("no_spawn_anchor")
         return result
     if not non_spawn_sets:
-        # Trivially "reachable" — nothing to reach. Rare but possible on
-        # a map that has only a combined StartFinish waypoint.
+        # Trivially "reachable" — nothing to reach.
         return result
 
-    reachable = _bfs_reachable(neighbors, frozenset(spawn_cells))
+    # Seed-only reachability always runs first; the seed-only count is
+    # preserved for before/after comparison even when observations are
+    # applied on top.
+    seed_reachable = _bfs_reachable(neighbors, frozenset(spawn_cells))
+    result.anchor_sets_reachable_seed_only = sum(
+        1 for aset in non_spawn_sets
+        if any(cell in seed_reachable for cell in aset.cells)
+    )
+
+    if not use_observations:
+        result.anchor_sets_reachable = result.anchor_sets_reachable_seed_only
+        return result
+
+    # Inductive path: union-find the seed_valid neighbor relation with
+    # replay observation sets, then reachability = "anchor cell in the
+    # same component as any spawn cell."
+    replays = _fetch_clean_replays(conn, map_id=map_id)
+    observations = _build_observations(anchor_sets, replays)
+    result.observations_available = len(replays)
+    result.observations_applied = len(observations)
+
+    uf: _UnionFind = _UnionFind()
+    # Seed edges → union merges.
+    for cell, nbs in neighbors.items():
+        for nb in nbs:
+            uf.union(cell, nb)
+    # Observations → union every pair in the observed set with an anchor
+    # cell from the set (chain-merging all of them into one component).
+    for obs in observations:
+        cells_iter = iter(obs.cells)
+        try:
+            head = next(cells_iter)
+        except StopIteration:
+            continue
+        for cell in cells_iter:
+            uf.union(head, cell)
+
+    # Pick any spawn cell as the race's origin component representative.
+    spawn_rep = uf.find(next(iter(spawn_cells)))
+    # Union all spawn cells together (they may be in different components
+    # before observations; after observations they're typically merged
+    # via the spawn→goal assertion from any finishing replay).
+    for sc in spawn_cells:
+        uf.union(sc, spawn_rep)
+    spawn_rep = uf.find(spawn_rep)
+
+    reachable_count = 0
     for aset in non_spawn_sets:
-        if any(cell in reachable for cell in aset.cells):
-            result.anchor_sets_reachable += 1
+        for cell in aset.cells:
+            if uf.find(cell) == spawn_rep:
+                reachable_count += 1
+                break
+    result.anchor_sets_reachable = reachable_count
     return result
 
 
 def validate_set(
-    conn: Connection, map_ids: tuple[int, ...] = VALIDATION_MAP_IDS
+    conn: Connection,
+    map_ids: tuple[int, ...] = VALIDATION_MAP_IDS,
+    *,
+    use_observations: bool = False,
 ) -> ValidationReport:
     report = ValidationReport()
     for mid in map_ids:
         try:
-            report.per_map.append(validate_map(conn, mid))
+            report.per_map.append(
+                validate_map(conn, mid, use_observations=use_observations)
+            )
         except Exception as exc:  # noqa: BLE001
             _LOG.exception("validation failed on map %d", mid)
             report.per_map.append(
