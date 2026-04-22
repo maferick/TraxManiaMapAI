@@ -21,8 +21,10 @@ from src.ingestion import (
 from src.replay import (
     CohortAssignmentConfig,
     CohortAssignmentPipeline,
+    FileBreadcrumbLoader,
     FileTelemetryLoader,
     ReplayCleanPipeline,
+    default_breadcrumb_rules,
     default_rules,
 )
 from src.benchmarks.manifest import load as load_benchmark
@@ -578,6 +580,8 @@ def _cmd_replay_clean(args: argparse.Namespace) -> int:
             rules=default_rules(),
             thresholds_by_rule=thresholds,
             clean_version=clean_version,
+            breadcrumb_loader=FileBreadcrumbLoader(),
+            breadcrumb_rules=default_breadcrumb_rules(),
         )
         try:
             stats = pipeline.run(
@@ -601,13 +605,15 @@ def _cmd_replay_clean(args: argparse.Namespace) -> int:
             conn, stage_run_id, status=status, output_summary=stats.to_summary_json()
         )
         _LOG.info(
-            "replay-clean %s: seen=%d clean=%d warn=%d rejected=%d load_fail=%d",
+            "replay-clean %s: seen=%d clean=%d warn=%d rejected=%d "
+            "load_fail=%d breadcrumb_path_used=%d",
             status,
             stats.replays_seen,
             stats.replays_clean,
             stats.replays_usable_with_warnings,
             stats.replays_rejected,
             stats.load_failures,
+            stats.breadcrumb_path_used,
         )
         return 0 if status == "success" else 1
     finally:

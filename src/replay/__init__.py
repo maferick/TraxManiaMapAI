@@ -35,6 +35,23 @@ from src.replay.rules import (
     default_rules,
     run_rules,
 )
+from src.replay.breadcrumbs import (
+    BREADCRUMBS_SCHEMA_VERSION,
+    BreadcrumbsFormatError,
+    BreadcrumbsLoadError,
+    FileBreadcrumbLoader,
+    InputEvent,
+    ReplayBreadcrumbs,
+)
+from src.replay.rules.breadcrumb import (
+    BreadcrumbIncompleteRule,
+    BreadcrumbInvalidTimingRule,
+    BreadcrumbRestartRule,
+    BreadcrumbRule,
+    BreadcrumbSpectatorRule,
+    default_breadcrumb_rules,
+    run_breadcrumb_rules,
+)
 from src.replay.telemetry import (
     TELEMETRY_SCHEMA_VERSION,
     ReplayTelemetry,
@@ -44,17 +61,28 @@ from src.replay.telemetry import (
 )
 
 __all__ = [
+    "BREADCRUMBS_SCHEMA_VERSION",
+    "BreadcrumbIncompleteRule",
+    "BreadcrumbInvalidTimingRule",
+    "BreadcrumbRestartRule",
+    "BreadcrumbRule",
+    "BreadcrumbSpectatorRule",
+    "BreadcrumbsFormatError",
+    "BreadcrumbsLoadError",
     "CleanStats",
     "ClassificationOutcome",
     "CohortAssignment",
     "CohortAssignmentConfig",
     "CohortAssignmentPipeline",
     "CohortStats",
+    "FileBreadcrumbLoader",
     "FileTelemetryLoader",
     "IncompleteRule",
+    "InputEvent",
     "InvalidTimingRule",
     "MapCohortStats",
     "OutlierSpeedRule",
+    "ReplayBreadcrumbs",
     "ReplayCleanPipeline",
     "ReplayRow",
     "ReplayTelemetry",
@@ -72,8 +100,10 @@ __all__ = [
     "ZeroMotionRule",
     "assign_cohorts_for_map",
     "classify",
+    "default_breadcrumb_rules",
     "default_rules",
     "from_dict",
+    "run_breadcrumb_rules",
     "run_rules",
     "summarize",
 ]
