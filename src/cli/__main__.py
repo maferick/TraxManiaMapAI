@@ -367,6 +367,54 @@ def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_diagnose_corridor_ranking(args: argparse.Namespace) -> int:
+    from src.corridor.ranking.diagnose import (
+        DEFAULT_ALPHAS, run_diagnostics, write_report,
+    )
+    config = load_config(args.config)
+    alphas: tuple[float, ...]
+    if args.alphas:
+        alphas = tuple(float(a) for a in args.alphas.split(","))
+    else:
+        alphas = DEFAULT_ALPHAS
+
+    conn = open_connection(config)
+    try:
+        report = run_diagnostics(
+            conn,
+            alphas=alphas,
+            production_alpha=args.production_alpha,
+        )
+    finally:
+        conn.close()
+
+    _LOG.info(
+        "diagnose-corridor-ranking: corridors=%d maps_with_mean_interval=%d "
+        "schemes=%s",
+        report.total_corridors, report.maps_with_mean_interval,
+        ",".join(s.label_scheme for s in report.schemes),
+    )
+    for scheme in report.schemes:
+        if scheme.label_summary is not None:
+            s = scheme.label_summary
+            _LOG.info(
+                "  [%s] label stdev=%.4f (N=%d, range=%.4f–%.4f)",
+                scheme.label_scheme, s.stdev, s.count, s.minimum, s.maximum,
+            )
+        for row in scheme.sweep:
+            _LOG.info(
+                "  [%s] α=%g pred_stdev_all=%.4f test_rank_corr=%+.4f "
+                "weight_l2=%.4f",
+                scheme.label_scheme, row.alpha, row.pred_stdev_all,
+                row.test_rank_corr, row.weight_l2_norm,
+            )
+
+    if args.output:
+        write_report(report, Path(args.output))
+        _LOG.info("wrote diagnostics report: %s", args.output)
+    return 0
+
+
 def _cmd_score_corridors_learned(args: argparse.Namespace) -> int:
     from src.corridor.ranking.scoring_pipeline import (
         load_model_from_report,
@@ -1554,6 +1602,29 @@ def _build_parser() -> argparse.ArgumentParser:
     train_corridor_ranking_cmd.add_argument("--verbose", action="store_true",
         help="log learned per-feature weights")
     train_corridor_ranking_cmd.set_defaults(func=_cmd_train_corridor_ranking)
+
+    diagnose_corridor_ranking_cmd = sub.add_parser(
+        "diagnose-corridor-ranking",
+        help="Phase 4 diagnostic: label-spread + regularization-sweep + "
+             "feature-ablation to explain learned-score compression.",
+    )
+    diagnose_corridor_ranking_cmd.add_argument(
+        "--alphas", type=str, default=None,
+        help="comma-separated alphas for the regularization sweep "
+             "(default 0.001,0.01,0.1,1.0,10.0,100.0)",
+    )
+    diagnose_corridor_ranking_cmd.add_argument(
+        "--production-alpha", type=float, default=1.0,
+        help="alpha for the feature-ablation pass (default 1.0 — matches "
+             "current training default)",
+    )
+    diagnose_corridor_ranking_cmd.add_argument(
+        "--output", type=str, default=None,
+        help="write the diagnostics markdown report to this path",
+    )
+    diagnose_corridor_ranking_cmd.set_defaults(
+        func=_cmd_diagnose_corridor_ranking,
+    )
 
     score_corridors_learned_cmd = sub.add_parser(
         "score-corridors-learned",
