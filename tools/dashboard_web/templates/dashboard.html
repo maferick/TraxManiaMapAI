@@ -37,6 +37,90 @@
       </table>
     </section>
 
+    <!-- Learning state (A5) -->
+    <section class="panel panel-learning">
+      <h2>Learning state</h2>
+      {% if state.learning is none or state.learning.scored_corridors == 0 %}
+        <p class="muted">No learned scores yet — run <code>score-corridors-learned</code>.</p>
+      {% else %}
+        <table>
+          <tr class="status-{{ state.learning.status | lower }}">
+            <td class="status-cell"><span class="badge">{{ state.learning.status }}</span></td>
+            <td class="label">scheme</td>
+            <td class="num">{{ state.learning.scheme_tag or '—' }}</td>
+          </tr>
+          <tr>
+            <td></td>
+            <td class="label">model</td>
+            <td class="num">{{ state.learning.model_hash_short or '—' }}</td>
+          </tr>
+          <tr>
+            <td></td>
+            <td class="label">scored</td>
+            <td class="num">{{ state.learning.scored_corridors }} corridors</td>
+          </tr>
+          <tr>
+            <td></td>
+            <td class="label">pred range</td>
+            <td class="num">[{{ '%+.4f' | format(state.learning.pred_min) }}, {{ '%+.4f' | format(state.learning.pred_max) }}]</td>
+          </tr>
+          <tr>
+            <td></td>
+            <td class="label">pred stdev</td>
+            <td class="num">
+              <b>{{ '%.4f' | format(state.learning.pred_stdev) }}</b>
+              {% if state.learning.heuristic_stdev is not none %}
+                · heuristic {{ '%.4f' | format(state.learning.heuristic_stdev) }}
+                · <b>ratio {{ '%.2f' | format(state.learning.stdev_ratio) }}</b>
+              {% endif %}
+            </td>
+          </tr>
+        </table>
+      {% endif %}
+    </section>
+
+    <!-- Diversity watchdog (A5) -->
+    <section class="panel panel-diversity">
+      <h2>Diversity watchdog</h2>
+      <div class="status-line status-{{ state.diversity.status | lower }}">
+        <span class="badge">{{ state.diversity.status }}</span>
+        <span class="reason">{{ state.diversity.reason }}</span>
+      </div>
+      {% if state.diversity.delta_median is not none %}
+        <table>
+          <tr><td class="label">intervals</td><td class="num">{{ state.diversity.intervals_compared }}</td></tr>
+          <tr><td class="label">heuristic div (median)</td><td class="num">{{ '%.4f' | format(state.diversity.heuristic_diversity_median) }}</td></tr>
+          <tr><td class="label">learned div (median)</td><td class="num">{{ '%.4f' | format(state.diversity.learned_diversity_median) }}</td></tr>
+          <tr><td class="label">Δ median</td><td class="num">{{ '%+.4f' | format(state.diversity.delta_median) }}</td></tr>
+          <tr><td class="label">Δ mean</td><td class="num">{{ '%+.4f' | format(state.diversity.delta_mean) }}</td></tr>
+        </table>
+      {% endif %}
+    </section>
+
+    <!-- Next best action (A5) -->
+    <section class="panel panel-next-action">
+      <h2>Next best action</h2>
+      {% if state.next_actions %}
+        {% set head = state.next_actions[0] %}
+        <div class="next-action-head {% if head.priority >= 6 %}is-healthy{% endif %}">
+          <div class="next-action-title">▶ {{ head.title }}</div>
+          <div class="next-action-reason">{{ head.reason }}</div>
+          {% if head.command %}
+            <pre class="next-action-cmd">{{ head.command }}</pre>
+          {% endif %}
+        </div>
+        {% if state.next_actions | length > 1 %}
+          <ul class="next-action-rest">
+            {% for a in state.next_actions[1:] %}
+              <li>{{ a.title }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      {% else %}
+        <p class="muted">nothing suggested</p>
+      {% endif %}
+    </section>
+
     <!-- Coverage -->
     <section class="panel panel-coverage">
       <h2>Data coverage</h2>

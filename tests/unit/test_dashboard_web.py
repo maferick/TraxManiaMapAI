@@ -15,7 +15,10 @@ from tools.dashboard.state import (
     Bottleneck,
     Coverage,
     DashboardState,
+    DiversityState,
     Health,
+    LearningState,
+    NextAction,
     StageFreshness,
 )
 from tools.dashboard_web.app import create_app
@@ -54,6 +57,34 @@ def _mk_state(*, error: str | None = None) -> DashboardState:
             "corridors_top_rank": 252,
             "corridors_with_learned_score": 252,
         },
+        learning=LearningState(
+            scheme_tag="time_envelope_v2_weighted@0.1.0",
+            model_hash_short="12cc0e58c19a",
+            scored_corridors=898,
+            pred_min=0.0255, pred_median=0.5549,
+            pred_max=0.7182, pred_mean=0.5452,
+            pred_stdev=0.1050,
+            heuristic_stdev=0.1731,
+            stdev_ratio=0.60,
+            status="GREEN",
+        ),
+        diversity=DiversityState(
+            intervals_compared=124,
+            heuristic_diversity_median=0.5795,
+            learned_diversity_median=0.5401,
+            delta_median=-0.0394,
+            delta_mean=-0.0038,
+            status="GREEN",
+            reason="learned and heuristic diversity within tolerance",
+        ),
+        next_actions=[
+            NextAction(
+                priority=1,
+                title="Assign cohorts to clean replays",
+                reason="728 clean replays unlabeled",
+                command="python -m src.cli assign-cohorts",
+            ),
+        ],
     )
 
 
@@ -102,6 +133,26 @@ class TestRoutes:
         assert "replay_clean" in body
         assert "partial" in body
 
+    def test_dashboard_renders_learning_panel(self, client) -> None:
+        body = client.get("/").data.decode()
+        assert "Learning state" in body
+        assert "time_envelope_v2_weighted" in body
+        assert "12cc0e58c19a" in body        # model hash short
+        assert "0.60" in body                # stdev ratio
+
+    def test_dashboard_renders_diversity_panel(self, client) -> None:
+        body = client.get("/").data.decode()
+        assert "Diversity watchdog" in body
+        assert "within tolerance" in body
+        # delta formatted with sign
+        assert "-0.0394" in body or "−0.0394" in body
+
+    def test_dashboard_renders_next_action(self, client) -> None:
+        body = client.get("/").data.decode()
+        assert "Next best action" in body
+        assert "Assign cohorts to clean replays" in body
+        assert "python -m src.cli assign-cohorts" in body
+
     def test_dashboard_renders_error_panel(self, client_error) -> None:
         r = client_error.get("/")
         assert r.status_code == 200
@@ -122,6 +173,10 @@ class TestRoutes:
         assert "T" in payload["collected_at"]
         # Nested datetime in freshness also serialized
         assert isinstance(payload["freshness"][0]["completed_at"], str)
+        # A5 fields also in JSON
+        assert payload["learning"]["scheme_tag"] == "time_envelope_v2_weighted@0.1.0"
+        assert payload["diversity"]["status"] == "GREEN"
+        assert payload["next_actions"][0]["title"] == "Assign cohorts to clean replays"
 
     def test_api_state_on_error_still_json(self, client_error) -> None:
         r = client_error.get("/api/state")
