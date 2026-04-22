@@ -415,6 +415,44 @@ def _cmd_diagnose_corridor_ranking(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_report_replay_coverage(args: argparse.Namespace) -> int:
+    from src.coverage.replay_value import (
+        CohortThresholdConfig,
+        build_report,
+        fetch_coverage,
+    )
+    from src.coverage.report import render_markdown
+    config = load_config(args.config)
+    thresholds = CohortThresholdConfig.from_config(config)
+    conn = open_connection(config)
+    try:
+        maps = fetch_coverage(
+            conn,
+            thresholds=thresholds,
+            snapshot_id=args.snapshot,
+        )
+    finally:
+        conn.close()
+    report = build_report(maps, top_n=args.top_n)
+    _LOG.info(
+        "report-replay-coverage: maps=%d corridor_owning=%d saturated=%d "
+        "zero_replay_corridor=%d near_boundary=%d backfill_candidates=%d",
+        report.total_maps,
+        report.corridor_owning_maps,
+        len(report.saturated_maps),
+        len(report.zero_replay_corridor_maps),
+        len(report.near_cohort_boundary_maps),
+        len(report.backfill_recommendation),
+    )
+    if args.output:
+        md = render_markdown(report)
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(md, encoding="utf-8")
+        _LOG.info("wrote coverage report: %s", args.output)
+    return 0
+
+
 def _cmd_score_corridors_learned(args: argparse.Namespace) -> int:
     from src.corridor.ranking.scoring_pipeline import (
         load_model_from_report,
@@ -1625,6 +1663,25 @@ def _build_parser() -> argparse.ArgumentParser:
     diagnose_corridor_ranking_cmd.set_defaults(
         func=_cmd_diagnose_corridor_ranking,
     )
+
+    report_replay_coverage_cmd = sub.add_parser(
+        "report-replay-coverage",
+        help="A1: rank maps by expected value-to-learning from one "
+             "more replay. Emits a backfill recommendation + buckets.",
+    )
+    report_replay_coverage_cmd.add_argument(
+        "--snapshot", type=str, default=None,
+        help="restrict to one ingestion_snapshot (e.g. 2026-04-scale-1k)",
+    )
+    report_replay_coverage_cmd.add_argument(
+        "--top-n", type=int, default=200,
+        help="number of backfill candidates to list (default 200)",
+    )
+    report_replay_coverage_cmd.add_argument(
+        "--output", type=str, default=None,
+        help="write the report (markdown) to this path",
+    )
+    report_replay_coverage_cmd.set_defaults(func=_cmd_report_replay_coverage)
 
     score_corridors_learned_cmd = sub.add_parser(
         "score-corridors-learned",
