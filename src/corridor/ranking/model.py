@@ -39,20 +39,52 @@ class RidgeRegression:
     weights: np.ndarray | None = None
     feature_names: tuple[str, ...] = ()
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "RidgeRegression":
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        *,
+        sample_weights: np.ndarray | None = None,
+    ) -> "RidgeRegression":
+        """Closed-form ridge fit. Optional per-sample weights.
+
+        Unweighted (default):     w* = (XᵀX + λI)⁻¹ Xᵀy
+        Weighted (sample_weights): w* = (XᵀWX + λI)⁻¹ XᵀWy
+
+        Weighted path uses the row-scaling trick — multiply each row
+        of X and each y by ``√s_i``. Algebraically identical to the
+        diag-matrix form; numerically cleaner and avoids building a
+        dense diagonal at our scale.
+
+        Sample weights must be non-negative. Zero weights are valid
+        (sample ignored); negative weights raise.
+        """
         if X.shape[0] != y.shape[0]:
             raise ValueError(f"X has {X.shape[0]} rows but y has {y.shape[0]}")
         if X.shape[1] == 0:
             raise ValueError("X has zero columns")
-        # Closed-form: w = (X'X + λI)^-1 X'y
         # λ set on all features including the bias; penalizing the
         # bias slightly isn't standard practice but on this small
         # feature set it doesn't meaningfully distort results and
         # keeps the code simpler. Could split later if needed.
-        XtX = X.T @ X
+        if sample_weights is None:
+            XtX = X.T @ X
+            Xty = X.T @ y
+        else:
+            if sample_weights.shape != (X.shape[0],):
+                raise ValueError(
+                    f"sample_weights shape {sample_weights.shape} "
+                    f"doesn't match X rows {X.shape[0]}"
+                )
+            if np.any(sample_weights < 0):
+                raise ValueError("sample_weights must be non-negative")
+            sqrt_w = np.sqrt(sample_weights)
+            Xw = X * sqrt_w[:, None]
+            yw = y * sqrt_w
+            XtX = Xw.T @ Xw
+            Xty = Xw.T @ yw
         reg = self.alpha * np.eye(X.shape[1])
-        w = np.linalg.solve(XtX + reg, X.T @ y)
-        self.weights = w
+        self.weights = np.linalg.solve(XtX + reg, Xty)
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:

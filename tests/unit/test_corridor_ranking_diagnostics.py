@@ -149,3 +149,46 @@ class TestFeatureAblation:
         )
         assert len(rows) == 3
         assert [r.feature_name for r in rows] == ["bias", "a", "b"]
+
+
+class TestSampleWeightsThreadedThroughDiagnostics:
+    """A4: sample_weights propagate through regularization_sweep and
+    feature_ablation into the underlying RidgeRegression.fit."""
+
+    def test_uniform_weights_match_unweighted_sweep(self) -> None:
+        rng = np.random.default_rng(11)
+        X = np.column_stack([np.ones(60), rng.standard_normal((60, 2))])
+        y = X[:, 1] * 2.0 + 0.05 * rng.standard_normal(60)
+        vectors = _mk_vectors(60)
+        unw = regularization_sweep(
+            vectors=vectors, X=X, y=y,
+            alphas=[1.0], feature_names=("bias", "a", "b"),
+        )
+        with_unit_w = regularization_sweep(
+            vectors=vectors, X=X, y=y,
+            alphas=[1.0], feature_names=("bias", "a", "b"),
+            sample_weights=np.ones(60),
+        )
+        assert unw[0].pred_stdev_all == pytest.approx(
+            with_unit_w[0].pred_stdev_all, rel=1e-10,
+        )
+
+    def test_non_uniform_weights_change_fit(self) -> None:
+        rng = np.random.default_rng(12)
+        X = np.column_stack([np.ones(60), rng.standard_normal((60, 2))])
+        y = X[:, 1] * 2.0 + 0.05 * rng.standard_normal(60)
+        vectors = _mk_vectors(60)
+        unw = regularization_sweep(
+            vectors=vectors, X=X, y=y,
+            alphas=[1.0], feature_names=("bias", "a", "b"),
+        )
+        weights = np.concatenate([np.full(30, 10.0), np.ones(30)])
+        weighted = regularization_sweep(
+            vectors=vectors, X=X, y=y,
+            alphas=[1.0], feature_names=("bias", "a", "b"),
+            sample_weights=weights,
+        )
+        # Fit differs → predictions differ → stdev differs.
+        assert unw[0].pred_stdev_all != pytest.approx(
+            weighted[0].pred_stdev_all, rel=1e-6,
+        )
