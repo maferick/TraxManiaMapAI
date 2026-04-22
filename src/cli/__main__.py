@@ -252,6 +252,79 @@ def _cmd_label_traversability(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_validate_traversability(args: argparse.Namespace) -> int:
+    import json as _json
+    from src.corridor.traversability import (
+        VALIDATION_MAP_IDS,
+        validate_set,
+    )
+    config = load_config(args.config)
+    ids: tuple[int, ...]
+    if args.map_ids:
+        ids = tuple(int(m) for m in args.map_ids)
+    else:
+        ids = VALIDATION_MAP_IDS
+    conn = open_connection(config)
+    try:
+        report = validate_set(conn, map_ids=ids)
+    finally:
+        conn.close()
+
+    # Per-map lines first so the full picture is visible even when the
+    # overall fails. Overall summary last.
+    for m in report.per_map:
+        _LOG.info(
+            "  map=%5d cells=%6d edges=%6d (sv=%d us=%d uk=%d) "
+            "anchors=%d/%d reach=%.3f unsup=%.3f%s",
+            m.map_id,
+            m.total_cells,
+            m.total_edges,
+            m.seed_valid_edges,
+            m.unsupported_edges,
+            m.unknown_edges,
+            m.anchor_sets_reachable,
+            m.anchor_sets_total,
+            m.reachability_fraction,
+            m.unsupported_fraction,
+            f" errors={','.join(m.errors)}" if m.errors else "",
+        )
+    _LOG.info(
+        "validate-traversability: maps=%d maps_passing=%d "
+        "intervals=%d/%d (%.3f) "
+        "weighted_unsupported=%.3f weighted_suppression=%.3f",
+        report.maps_total,
+        report.maps_passing_reachability,
+        report.intervals_reachable,
+        report.intervals_total,
+        report.interval_reachability_fraction,
+        report.weighted_unsupported_fraction,
+        report.weighted_suppression_fraction,
+    )
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(
+            _json.dumps(report.to_summary_json(), indent=2), encoding="utf-8"
+        )
+        _LOG.info("wrote JSON report: %s", args.json)
+
+    # §8 commit-bar exit-code signal — 0 on pass, 1 on fail. Lets
+    # CI/CD or manual runners treat this as a gate without re-parsing
+    # the log line.
+    passes_reachability = report.interval_reachability_fraction >= args.min_reachability
+    passes_suppression = report.weighted_unsupported_fraction >= args.min_unsupported
+    if not passes_reachability:
+        _LOG.warning(
+            "GATE FAIL: interval reachability %.3f below threshold %.3f",
+            report.interval_reachability_fraction, args.min_reachability,
+        )
+    if not passes_suppression:
+        _LOG.warning(
+            "GATE FAIL: unsupported fraction %.3f below threshold %.3f",
+            report.weighted_unsupported_fraction, args.min_unsupported,
+        )
+    return 0 if (passes_reachability and passes_suppression) else 1
+
+
 def _cmd_build_graph(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     constraints_cfg = config.get("constraints", {}) or {}
@@ -1068,6 +1141,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="UNWIND batch size for the per-edge property update (default 2000)",
     )
     label_traversability_cmd.set_defaults(func=_cmd_label_traversability)
+
+    validate_traversability_cmd = sub.add_parser(
+        "validate-traversability",
+        help="Step 3 / §8 commit-bar: measure suppression + reachability "
+             "on the fixed 10-map validation set. Exit 0 on pass, 1 on fail.",
+    )
+    validate_traversability_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+        help="override the default 10-map validation set (repeatable)",
+    )
+    validate_traversability_cmd.add_argument(
+        "--min-reachability", type=float, default=0.90,
+        help="§8.1 gate: min interval reachability fraction (default 0.90)",
+    )
+    validate_traversability_cmd.add_argument(
+        "--min-unsupported", type=float, default=0.80,
+        help="§8.2 gate: min weighted unsupported fraction (default 0.80)",
+    )
+    validate_traversability_cmd.add_argument(
+        "--json", type=str, default=None,
+        help="write machine-readable JSON report to this path",
+    )
+    validate_traversability_cmd.set_defaults(func=_cmd_validate_traversability)
 
     extract_route_cmd = sub.add_parser(
         "extract-route", help="Infer route artifacts from cohort-assigned replays"

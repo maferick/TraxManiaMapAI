@@ -20,19 +20,33 @@ from src.corridor.traversability.labeling import (
     TraversabilityLabeler,
     label_edge,
 )
+from src.corridor.traversability.reachability import (
+    VALIDATION_MAP_IDS,
+    AnchorSet,
+    MapReachability,
+    ValidationReport,
+    validate_map,
+    validate_set,
+)
 
 __all__ = [
     "AMBIGUOUS_FAMILIES",
+    "AnchorSet",
     "CLASSIFICATION_VERSION",
     "DRIVABLE_FAMILIES",
     "EdgeLabel",
     "FamilyBucket",
     "LabelingStats",
+    "MapReachability",
     "NON_DRIVABLE_FAMILIES",
     "STATE_SEED_VALID",
     "STATE_UNKNOWN",
     "STATE_UNSUPPORTED",
     "TraversabilityLabeler",
+    "VALIDATION_MAP_IDS",
+    "ValidationReport",
     "classify_family",
     "label_edge",
+    "validate_map",
+    "validate_set",
 ]
