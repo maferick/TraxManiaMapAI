@@ -33,6 +33,7 @@ from src.parsers import MapParsePipeline, ReplayParsePipeline, SubprocessParser
 from src.evaluation import (
     AdjacencyGraphEvaluator,
     BehaviorProfileEvaluator,
+    CorridorConfidenceEvaluator,
     Evaluator,
     RouteCoverageEvaluator,
     StructuralEvaluator,
@@ -945,6 +946,8 @@ def _build_evaluator_stack(
             stack.append(RouteCoverageEvaluator(conn))
         elif name == "behavior_profile":
             stack.append(BehaviorProfileEvaluator(conn))
+        elif name == "route_corridor":
+            stack.append(CorridorConfidenceEvaluator(conn))
         else:
             raise ValueError(f"unknown evaluator name: {name!r}")
     return stack
