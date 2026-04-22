@@ -296,6 +296,22 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
     return 0 if not stats.errors else 1
 
 
+def _cmd_update_pattern_weights(args: argparse.Namespace) -> int:
+    from src.corridor.traversability import update_pattern_weights
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        stats = update_pattern_weights(conn)
+    finally:
+        conn.close()
+    _LOG.info(
+        "update-pattern-weights: pairs=%d edges_updated=%d max_count=%d errors=%d",
+        stats.family_pairs_seen, stats.edges_updated,
+        stats.max_pair_count, len(stats.errors),
+    )
+    return 0 if not stats.errors else 1
+
+
 def _cmd_update_negative_evidence(args: argparse.Namespace) -> int:
     from src.corridor.traversability import update_negative_evidence
     config = load_config(args.config)
@@ -1339,6 +1355,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="min combined NON_DRIVABLE neighbor count to flag (default 6 of 12)",
     )
     update_negative_evidence_cmd.set_defaults(func=_cmd_update_negative_evidence)
+
+    update_pattern_weights_cmd = sub.add_parser(
+        "update-pattern-weights",
+        help="Phase 3 Signal 3: aggregate family-pair frequencies across "
+             "the evidence table and write log-normalized pattern_weight "
+             "to every row. Cross-map single-shot operation.",
+    )
+    update_pattern_weights_cmd.set_defaults(func=_cmd_update_pattern_weights)
 
     validate_traversability_cmd = sub.add_parser(
         "validate-traversability",

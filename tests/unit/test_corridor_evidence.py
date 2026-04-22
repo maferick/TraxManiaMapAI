@@ -18,6 +18,7 @@ from src.corridor.traversability.evidence import (
     _build_rows_for_map,
     _cell_to_placement_map,
     _count_non_drivable_neighbors,
+    _normalize_pattern_weight,
 )
 
 
@@ -236,3 +237,43 @@ class TestDecoClusterThreshold:
         # 12 total possible axis-neighbors across both endpoints;
         # 6 = 50% of surrounding cells = "in a deco cluster."
         assert DECO_CLUSTER_NEIGHBOR_THRESHOLD == 6
+
+
+class TestNormalizePatternWeight:
+    """Signal-3 log-normalization rules."""
+
+    def test_max_count_returns_one(self) -> None:
+        assert _normalize_pattern_weight(100, 100) == pytest.approx(1.0, abs=1e-6)
+
+    def test_zero_count_returns_zero(self) -> None:
+        # log(0 + 1) = 0
+        assert _normalize_pattern_weight(0, 100) == 0.0
+
+    def test_max_count_zero_returns_zero(self) -> None:
+        # Empty corpus fallback — no div-by-zero on log(1)
+        assert _normalize_pattern_weight(0, 0) == 0.0
+        assert _normalize_pattern_weight(0, -5) == 0.0
+
+    def test_monotonic_in_count(self) -> None:
+        # Higher count → higher weight for a fixed max
+        w1 = _normalize_pattern_weight(10, 1_000_000)
+        w2 = _normalize_pattern_weight(100, 1_000_000)
+        w3 = _normalize_pattern_weight(1000, 1_000_000)
+        assert w1 < w2 < w3
+        assert 0 < w1 < 1
+        assert 0 < w3 < 1
+
+    def test_log_scale_differentiates_long_tail(self) -> None:
+        # Count=10 vs count=1 should be meaningfully different even
+        # when max_count is huge — that's the whole point of log scale.
+        w1 = _normalize_pattern_weight(1, 5_000_000)
+        w10 = _normalize_pattern_weight(10, 5_000_000)
+        # log(2)/log(5M) ≈ 0.045; log(11)/log(5M) ≈ 0.156
+        # Ratio should be meaningful, not near 1:1 like linear scale would give.
+        assert w10 / w1 > 3
+
+    def test_never_exceeds_one(self) -> None:
+        # count == max_count → exactly 1.0; larger-than-max would go
+        # above but is never the real input (we compute max from the
+        # same distribution). Still check the math doesn't blow up.
+        assert _normalize_pattern_weight(100, 100) <= 1.0 + 1e-9
