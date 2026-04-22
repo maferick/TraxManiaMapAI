@@ -217,6 +217,45 @@ def _block_row(
     )
 
 
+_INSERT_WAYPOINT_SQL = """
+INSERT INTO map_checkpoints (
+    map_id, parser_version, waypoint_index, tag, waypoint_order,
+    block_name, placement, x, y, z, abs_x, abs_y, abs_z
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+
+def _waypoint_row(
+    *,
+    map_id: int,
+    parser_version: str,
+    waypoint_index: int,
+    waypoint: Mapping[str, Any],
+) -> tuple[Any, ...]:
+    placement = "free" if waypoint.get("placement") == "free" else "grid"
+    x = y = z = None
+    abs_x = abs_y = abs_z = None
+    if placement == "free":
+        abs_x = _as_float(waypoint.get("abs_x"))
+        abs_y = _as_float(waypoint.get("abs_y"))
+        abs_z = _as_float(waypoint.get("abs_z"))
+    else:
+        x = _as_int(waypoint.get("x"))
+        y = _as_int(waypoint.get("y"))
+        z = _as_int(waypoint.get("z"))
+    return (
+        map_id,
+        parser_version,
+        waypoint_index,
+        str(waypoint.get("tag") or ""),
+        _as_int(waypoint.get("order")) or 0,
+        str(waypoint.get("block_name") or ""),
+        placement,
+        x, y, z,
+        abs_x, abs_y, abs_z,
+    )
+
+
 def _as_int(v: Any) -> int | None:
     if v is None or isinstance(v, bool):
         return None
@@ -409,6 +448,7 @@ class MapParsePipeline:
         output = result.output or {}
         blocks = output.get("blocks") or []
         scenery = output.get("scenery") or {}
+        waypoints = output.get("waypoints") or []
         source_ids = {
             "map": str(row.id),
             "raw_artifact_hash": row.raw_artifact_hash or "",
@@ -425,11 +465,33 @@ class MapParsePipeline:
             for i, block in enumerate(blocks)
             if isinstance(block, Mapping)
         ]
+        waypoint_rows = [
+            _waypoint_row(
+                map_id=row.id,
+                parser_version=self._parser_version,
+                waypoint_index=i,
+                waypoint=wp,
+            )
+            for i, wp in enumerate(waypoints)
+            if isinstance(wp, Mapping)
+        ]
 
         try:
             with cursor(self._conn) as cur:
                 if rows:
                     cur.executemany(_INSERT_BLOCK_SQL, rows)
+                if waypoint_rows:
+                    # Idempotent reparse: unique (map_id, parser_version,
+                    # waypoint_index) would collide on re-run with the
+                    # same parser_version. Delete then insert keeps the
+                    # common case simple; multi-parser-version coexistence
+                    # survives because we scope the delete.
+                    cur.execute(
+                        "DELETE FROM map_checkpoints "
+                        "WHERE map_id = %s AND parser_version = %s",
+                        (row.id, self._parser_version),
+                    )
+                    cur.executemany(_INSERT_WAYPOINT_SQL, waypoint_rows)
                 cur.execute(
                     _UPDATE_MAP_SUCCESS_SQL,
                     (

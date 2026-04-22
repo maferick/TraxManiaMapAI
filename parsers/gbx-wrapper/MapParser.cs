@@ -10,8 +10,16 @@
 //     "has_items":          bool,
 //     "is_block_mode":      bool,
 //     "baked_block_count":  int,
-//     "blocks": [ <block>, ... ]
+//     "blocks": [ <block>, ... ],
+//     "waypoints": [ <waypoint>, ... ],
 //   }
+//
+// <waypoint> reflects CGameCtnBlock.WaypointSpecialProperty for any
+// block (grid or free) that has one — start gates, finish lines,
+// regular checkpoints, linked checkpoints. Shape:
+//   { "tag": s, "order": i, "block_name": s, "placement": "grid" | "free",
+//     (grid only)  "x": i, "y": i, "z": i,
+//     (free only)  "abs_x": f, "abs_y": f, "abs_z": f }
 //
 // <block> is either a grid-placed block or a free block; the
 // "placement" field distinguishes them:
@@ -50,11 +58,14 @@ internal static class MapParser
                   ?? throw new InvalidDataException("file parses but is not a CGameCtnChallenge");
 
         var blocks = new List<Dictionary<string, object?>>();
+        var waypoints = new List<Dictionary<string, object?>>();
         if (map.Blocks is not null)
         {
             foreach (var b in map.Blocks)
             {
                 blocks.Add(BlockToDict(b));
+                var wp = WaypointToDict(b);
+                if (wp is not null) waypoints.Add(wp);
             }
         }
 
@@ -71,8 +82,47 @@ internal static class MapParser
             ["is_block_mode"] = blocks.Count > 0,
             ["baked_block_count"] = map.BakedBlocks?.Count ?? 0,
             ["blocks"] = blocks,
+            ["waypoints"] = waypoints,
             ["scenery"] = scenery,
         };
+    }
+
+    // TM2020 checkpoint/start/finish metadata lives on CGameCtnBlock via
+    // WaypointSpecialProperty (Tag ∈ {"Spawn","Goal","Checkpoint",
+    // "LinkedCheckpoint"}). Free-placed finish gates use the block's
+    // AbsolutePositionInMap; grid-placed blocks use Coord. `Order` is
+    // non-zero only on LinkedCheckpoint (multilap / ordered-sequence).
+    //
+    // Multi-cell waypoint blocks (e.g. GateExpandableFinish) emit one
+    // waypoint per occupied cell — the deduplication pass lives on the
+    // Python side so this stage stays protocol-faithful.
+    private static Dictionary<string, object?>? WaypointToDict(CGameCtnBlock b)
+    {
+        if (b.WaypointSpecialProperty is not { } wp) return null;
+        var dict = new Dictionary<string, object?>
+        {
+            ["tag"] = wp.Tag,
+            ["order"] = wp.Order,
+            ["block_name"] = b.Name,
+        };
+        if (b.IsFree)
+        {
+            dict["placement"] = "free";
+            if (b.AbsolutePositionInMap is { } p)
+            {
+                dict["abs_x"] = (double)p.X;
+                dict["abs_y"] = (double)p.Y;
+                dict["abs_z"] = (double)p.Z;
+            }
+        }
+        else
+        {
+            dict["placement"] = "grid";
+            dict["x"] = b.Coord.X;
+            dict["y"] = b.Coord.Y;
+            dict["z"] = b.Coord.Z;
+        }
+        return dict;
     }
 
     // Author id shipped with every standard Nadeo item. Anything else is

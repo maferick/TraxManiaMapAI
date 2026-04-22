@@ -40,6 +40,27 @@ internal static class Diagnose
                 sample.Add(DumpProperties(obj));
             }
             result["anchored_object_sample"] = sample;
+
+            // Explicit probe: dump all anchored objects that carry a
+            // WaypointSpecialProperty (start/checkpoint/finish/multilap
+            // markers in TM2020). This is the feeder for the corridor-
+            // inference checkpoint-block mapping prerequisite.
+            var waypoints = new List<Dictionary<string, object?>>();
+            foreach (var obj in map.AnchoredObjects)
+            {
+                if (obj.WaypointSpecialProperty is null) continue;
+                var wp = new Dictionary<string, object?>
+                {
+                    ["item_model_id"] = obj.ItemModel.Id.ToString(),
+                    ["item_model_collection"] = obj.ItemModel.Collection.ToString(),
+                    ["item_model_author"] = obj.ItemModel.Author,
+                };
+                wp["anchored_object_props"] = DumpProperties(obj);
+                wp["waypoint_props"] = DumpProperties(obj.WaypointSpecialProperty);
+                waypoints.Add(wp);
+            }
+            result["waypoints"] = waypoints;
+            result["waypoint_count"] = waypoints.Count;
         }
 
         if (map.Blocks is not null)
@@ -91,9 +112,11 @@ internal static class Diagnose
     {
         int freeCount = 0;
         int sentinelCount = 0;
+        int waypointBlockCount = 0;
         var gridSamples = new List<Dictionary<string, object?>>();
         var freeSamples = new List<Dictionary<string, object?>>();
         var sentinelSamples = new List<Dictionary<string, object?>>();
+        var waypointBlocks = new List<Dictionary<string, object?>>();
 
         foreach (var b in blocks)
         {
@@ -101,6 +124,23 @@ internal static class Diagnose
             bool isSentinel = b.Coord.X == -1 && b.Coord.Y == 0 && b.Coord.Z == -1;
             if (isFree) freeCount++;
             if (isSentinel) sentinelCount++;
+            if (b.WaypointSpecialProperty is { } wp)
+            {
+                waypointBlockCount++;
+                if (waypointBlocks.Count < 10)
+                {
+                    waypointBlocks.Add(new Dictionary<string, object?>
+                    {
+                        ["name"] = b.Name,
+                        ["is_free"] = isFree,
+                        ["coord"] = new[] { b.Coord.X, b.Coord.Y, b.Coord.Z },
+                        ["abs_position"] = b.AbsolutePositionInMap is { } ap
+                            ? new[] { ap.X, ap.Y, ap.Z } : null,
+                        ["variant"] = b.Variant,
+                        ["waypoint"] = DumpProperties(wp),
+                    });
+                }
+            }
 
             if (!isFree && !isSentinel && gridSamples.Count < 3)
             {
@@ -112,6 +152,8 @@ internal static class Diagnose
                     ["variant"] = b.Variant,
                     ["sub_variant"] = b.SubVariant,
                     ["flags"] = b.Flags,
+                    ["waypoint_special_property"] = b.WaypointSpecialProperty is { } w
+                        ? DumpProperties(w) : null,
                 });
             }
             if (isFree && freeSamples.Count < 3)
@@ -141,9 +183,11 @@ internal static class Diagnose
 
         into[$"{prefix}_free_count"] = freeCount;
         into[$"{prefix}_sentinel_count"] = sentinelCount;
+        into[$"{prefix}_waypoint_block_count"] = waypointBlockCount;
         into[$"{prefix}_sample_grid"] = gridSamples;
         into[$"{prefix}_sample_free"] = freeSamples;
         into[$"{prefix}_sample_sentinel"] = sentinelSamples;
+        into[$"{prefix}_waypoint_blocks"] = waypointBlocks;
     }
 
     public static Dictionary<string, object?> InspectReplay(string path)
