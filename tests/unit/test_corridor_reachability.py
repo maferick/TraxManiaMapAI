@@ -10,10 +10,13 @@ from __future__ import annotations
 from src.corridor.traversability.reachability import (
     AnchorSet,
     MapReachability,
+    ReplayObservation,
     ValidationReport,
     _bfs_reachable,
     _build_anchor_sets,
     _build_cell_graph,
+    _build_observations,
+    _UnionFind,
 )
 
 
@@ -201,6 +204,115 @@ class TestMapReachabilityFractions:
             map_id=1, anchor_sets_total=4, anchor_sets_reachable=4
         )
         assert m.passes_reachability
+
+
+class TestUnionFind:
+    def test_find_of_fresh_element_returns_itself(self) -> None:
+        uf = _UnionFind()
+        assert uf.find("a") == "a"
+
+    def test_union_merges_two_elements(self) -> None:
+        uf = _UnionFind()
+        uf.union("a", "b")
+        assert uf.same("a", "b")
+
+    def test_union_is_transitive(self) -> None:
+        uf = _UnionFind()
+        uf.union("a", "b")
+        uf.union("b", "c")
+        assert uf.same("a", "c")
+
+    def test_union_across_hashable_tuples(self) -> None:
+        uf = _UnionFind()
+        uf.union((0, 0, 0), (1, 0, 0))
+        uf.union((1, 0, 0), (2, 0, 0))
+        assert uf.same((0, 0, 0), (2, 0, 0))
+
+    def test_disjoint_components_stay_disjoint(self) -> None:
+        uf = _UnionFind()
+        uf.union("a", "b")
+        uf.union("c", "d")
+        assert not uf.same("a", "c")
+
+
+class TestBuildObservations:
+    def _bc_file(self, tmp_path, cp_count: int) -> str:
+        # Write a minimal breadcrumbs sidecar with the given CP count.
+        path = tmp_path / f"r{cp_count}.breadcrumbs.json"
+        path.write_text(
+            f'{{"checkpoint_times_ms": {list(range(cp_count))}}}'
+        )
+        return str(path)
+
+    def test_spawn_goal_only_when_no_cp_match(self, tmp_path) -> None:
+        anchors = [
+            AnchorSet(tag="Spawn", waypoint_order=0, cells=frozenset({(0, 0, 0)})),
+            AnchorSet(tag="Goal", waypoint_order=0, cells=frozenset({(10, 0, 0)})),
+            AnchorSet(tag="LinkedCheckpoint", waypoint_order=5,
+                      cells=frozenset({(3, 0, 0)})),
+            AnchorSet(tag="LinkedCheckpoint", waypoint_order=10,
+                      cells=frozenset({(6, 0, 0)})),
+        ]
+        # Replay has 99 CP crossings — doesn't match 2 linked anchors
+        replays = [(1, self._bc_file(tmp_path, 99))]
+        obs = _build_observations(anchors, replays)
+        assert len(obs) == 1
+        assert obs[0].kind == "spawn_goal_only"
+        assert obs[0].cells == frozenset({(0, 0, 0), (10, 0, 0)})
+
+    def test_linked_ordered_match_includes_all_cps(self, tmp_path) -> None:
+        anchors = [
+            AnchorSet(tag="Spawn", waypoint_order=0, cells=frozenset({(0, 0, 0)})),
+            AnchorSet(tag="Goal", waypoint_order=0, cells=frozenset({(10, 0, 0)})),
+            AnchorSet(tag="LinkedCheckpoint", waypoint_order=5,
+                      cells=frozenset({(3, 0, 0)})),
+            AnchorSet(tag="LinkedCheckpoint", waypoint_order=10,
+                      cells=frozenset({(6, 0, 0)})),
+        ]
+        # 2 linked + 1 finish = 3 timestamps. Or 2 linked alone. Accept both.
+        replays = [(1, self._bc_file(tmp_path, 3))]
+        obs = _build_observations(anchors, replays)
+        assert len(obs) == 1
+        assert obs[0].kind == "linked_ordered"
+        assert (3, 0, 0) in obs[0].cells
+        assert (6, 0, 0) in obs[0].cells
+
+    def test_missing_sidecar_file_falls_back_to_spawn_goal(self, tmp_path) -> None:
+        anchors = [
+            AnchorSet(tag="Spawn", waypoint_order=0, cells=frozenset({(0, 0, 0)})),
+            AnchorSet(tag="Goal", waypoint_order=0, cells=frozenset({(10, 0, 0)})),
+        ]
+        replays = [(1, str(tmp_path / "nonexistent.breadcrumbs.json"))]
+        obs = _build_observations(anchors, replays)
+        # Missing CP count → fall back to spawn+goal assertion
+        assert len(obs) == 1
+        assert obs[0].kind == "spawn_goal_only"
+
+    def test_observation_dropped_when_fewer_than_two_anchors(self, tmp_path) -> None:
+        anchors = [
+            AnchorSet(tag="Spawn", waypoint_order=0, cells=frozenset({(0, 0, 0)})),
+            # No goal
+        ]
+        replays = [(1, self._bc_file(tmp_path, 1))]
+        obs = _build_observations(anchors, replays)
+        # Only spawn cell asserted — can't be connected to anything else
+        assert len(obs) == 0
+
+    def test_no_replays_produces_no_observations(self, tmp_path) -> None:
+        anchors = [
+            AnchorSet(tag="Spawn", waypoint_order=0, cells=frozenset({(0, 0, 0)})),
+            AnchorSet(tag="Goal", waypoint_order=0, cells=frozenset({(10, 0, 0)})),
+        ]
+        obs = _build_observations(anchors, [])
+        assert obs == []
+
+
+class TestMapReachabilityObservationFields:
+    def test_observations_fields_default_to_zero(self) -> None:
+        m = MapReachability(map_id=1)
+        assert m.observations_available == 0
+        assert m.observations_applied == 0
+        assert m.anchor_sets_reachable_seed_only == 0
 
 
 class TestValidationReportAggregation:

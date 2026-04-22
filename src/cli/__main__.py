@@ -266,16 +266,23 @@ def _cmd_validate_traversability(args: argparse.Namespace) -> int:
         ids = VALIDATION_MAP_IDS
     conn = open_connection(config)
     try:
-        report = validate_set(conn, map_ids=ids)
+        report = validate_set(
+            conn, map_ids=ids, use_observations=args.use_observations
+        )
     finally:
         conn.close()
 
     # Per-map lines first so the full picture is visible even when the
     # overall fails. Overall summary last.
     for m in report.per_map:
+        obs_suffix = (
+            f" obs={m.observations_applied}/{m.observations_available} "
+            f"seed_only={m.anchor_sets_reachable_seed_only}"
+            if args.use_observations else ""
+        )
         _LOG.info(
             "  map=%5d cells=%6d edges=%6d (sv=%d us=%d uk=%d) "
-            "anchors=%d/%d reach=%.3f unsup=%.3f%s",
+            "anchors=%d/%d reach=%.3f unsup=%.3f%s%s",
             m.map_id,
             m.total_cells,
             m.total_edges,
@@ -286,6 +293,7 @@ def _cmd_validate_traversability(args: argparse.Namespace) -> int:
             m.anchor_sets_total,
             m.reachability_fraction,
             m.unsupported_fraction,
+            obs_suffix,
             f" errors={','.join(m.errors)}" if m.errors else "",
         )
     _LOG.info(
@@ -1162,6 +1170,11 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_traversability_cmd.add_argument(
         "--json", type=str, default=None,
         help="write machine-readable JSON report to this path",
+    )
+    validate_traversability_cmd.add_argument(
+        "--use-observations", action="store_true",
+        help="augment seed-valid BFS with replay-observed connectivity assertions "
+             "(Phase 3 inductive layer — observations don't bump constraint-graph validity)",
     )
     validate_traversability_cmd.set_defaults(func=_cmd_validate_traversability)
 
