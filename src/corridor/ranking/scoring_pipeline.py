@@ -95,31 +95,47 @@ def compute_model_hash(model: RidgeRegression) -> str:
 def load_model_from_report(report_path: Path) -> tuple[RidgeRegression, str]:
     """Load the learned model from a comparative training report.
 
-    Prefers the ``time_envelope`` scheme when present — that's the v0.2
-    target per the phase-4 sequencing. Falls back to ``inverse_rank``
-    with a warning so the pipeline still runs on reports that only
-    contain the baseline.
+    Preference order (reflects the phase-4 sequencing — prefer the
+    best-validated label scheme that's present):
+
+    1. ``time_envelope_v2_weighted`` (A4 — ridge fit weighted by
+       observed-time label_quality_weight)
+    2. ``time_envelope_v2`` (A2 — variance-aware, robust aggregation)
+    3. ``time_envelope`` (v1 — map-mean baseline)
+    4. ``inverse_rank`` (v0.1 synthetic, logs a warning)
 
     Returns (model, label_scheme_tag) where the tag is written to
-    ``learned_score_version`` (e.g. "time_envelope@0.1.0").
+    ``learned_score_version`` so consumers can identify which scheme
+    scored a given row.
     """
     payload = json.loads(report_path.read_text(encoding="utf-8"))
-    time_env = payload.get("time_envelope")
-    inverse = payload.get("inverse_rank")
-    if time_env is not None:
-        scheme = time_env
-        tag = "time_envelope@0.1.0"
-    elif inverse is not None:
-        scheme = inverse
-        tag = "inverse_rank@0.1.0"
-        _LOG.warning(
-            "comparative report has no time_envelope scheme — "
-            "falling back to inverse_rank. Labels are weaker.",
-        )
-    else:
+    candidates = [
+        ("time_envelope_v2_weighted", "time_envelope_v2_weighted@0.1.0"),
+        ("time_envelope_v2", "time_envelope_v2@0.1.0"),
+        ("time_envelope", "time_envelope@0.1.0"),
+    ]
+    scheme = None
+    tag = None
+    for key, tag_out in candidates:
+        entry = payload.get(key)
+        if entry is not None:
+            scheme = entry
+            tag = tag_out
+            break
+    if scheme is None:
+        inverse = payload.get("inverse_rank")
+        if inverse is not None:
+            scheme = inverse
+            tag = "inverse_rank@0.1.0"
+            _LOG.warning(
+                "comparative report has no time_envelope* scheme — "
+                "falling back to inverse_rank. Labels are weaker.",
+            )
+    if scheme is None:
         raise RuntimeError(
-            f"report at {report_path} has neither inverse_rank nor "
-            "time_envelope — is this a ComparativeTrainingReport?"
+            f"report at {report_path} has no recognized label scheme — "
+            "expected one of time_envelope_v2_weighted, time_envelope_v2, "
+            "time_envelope, inverse_rank."
         )
     model = RidgeRegression.from_dict({
         "alpha": scheme["alpha"],

@@ -73,3 +73,25 @@ class TestLoadModelFromReport:
         p = self._write_report(tmp_path, has_time=False, has_inverse=False)
         with pytest.raises(RuntimeError):
             load_model_from_report(p)
+
+    def _scheme_payload(self) -> dict:
+        return {"alpha": 1.0, "feature_names": ["bias", "x"], "weights": [0.1, 0.2]}
+
+    def test_prefers_v2_weighted_over_v2(self, tmp_path: Path) -> None:
+        p = tmp_path / "r.json"
+        p.write_text(json.dumps({
+            "time_envelope": self._scheme_payload(),
+            "time_envelope_v2": self._scheme_payload(),
+            "time_envelope_v2_weighted": self._scheme_payload(),
+        }), encoding="utf-8")
+        _, tag = load_model_from_report(p)
+        assert tag == "time_envelope_v2_weighted@0.1.0"
+
+    def test_prefers_v2_over_v1(self, tmp_path: Path) -> None:
+        p = tmp_path / "r.json"
+        p.write_text(json.dumps({
+            "time_envelope": self._scheme_payload(),
+            "time_envelope_v2": self._scheme_payload(),
+        }), encoding="utf-8")
+        _, tag = load_model_from_report(p)
+        assert tag == "time_envelope_v2@0.1.0"
