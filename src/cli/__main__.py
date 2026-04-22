@@ -390,6 +390,7 @@ def _cmd_diagnose_corridor_ranking(args: argparse.Namespace) -> int:
             v2_aggregation_method=args.v2_aggregation,
             v2_trimmed_q=args.v2_trimmed_q,
             v2_outlier_sigma=v2_outlier_sigma,
+            snapshot_id=args.snapshot,
         )
     finally:
         conn.close()
@@ -1723,6 +1724,11 @@ def _build_parser() -> argparse.ArgumentParser:
     diagnose_corridor_ranking_cmd.add_argument(
         "--v2-outlier-sigma", type=float, default=3.0,
         help="outlier rejection sigma for v2; pass 0 or negative to disable",
+    )
+    diagnose_corridor_ranking_cmd.add_argument(
+        "--snapshot", type=str, default=None,
+        help="restrict to one ingestion_snapshot so pre/post cohorts "
+             "are comparable (e.g. 2026-04-scale-1k vs 2026-04-scale-3k-expansion)",
     )
     diagnose_corridor_ranking_cmd.set_defaults(
         func=_cmd_diagnose_corridor_ranking,

@@ -88,20 +88,35 @@ def load_corridor_rows(
     *,
     map_ids: Sequence[int] | None = None,
     classification_version: str = CLASSIFICATION_VERSION,
+    snapshot_id: str | None = None,
 ) -> list[CorridorRow]:
     """Materialize corridor rows joined with per-edge evidence. One
     DB round-trip per map (the evidence JOIN would require per-edge
     lookups if batched differently). Good enough for ~900 corridors
     across ~200 maps.
+
+    ``snapshot_id`` (optional) restricts to corridors whose parent map
+    lives in the given ingestion snapshot — used for A/B comparison
+    between snapshot cohorts.
     """
     # 1. Which maps do we care about?
     with cursor(conn) as cur:
         if map_ids is None:
-            cur.execute(
-                "SELECT DISTINCT map_id FROM route_corridors "
-                "WHERE classification_version = %s ORDER BY map_id",
-                (classification_version,),
-            )
+            if snapshot_id is None:
+                cur.execute(
+                    "SELECT DISTINCT map_id FROM route_corridors "
+                    "WHERE classification_version = %s ORDER BY map_id",
+                    (classification_version,),
+                )
+            else:
+                cur.execute(
+                    "SELECT DISTINCT rc.map_id FROM route_corridors rc "
+                    "JOIN maps m ON m.id = rc.map_id "
+                    "WHERE rc.classification_version = %s "
+                    "AND m.ingestion_snapshot = %s "
+                    "ORDER BY rc.map_id",
+                    (classification_version, snapshot_id),
+                )
             target_ids = [int(r[0]) for r in cur.fetchall()]
         else:
             target_ids = [int(m) for m in map_ids]

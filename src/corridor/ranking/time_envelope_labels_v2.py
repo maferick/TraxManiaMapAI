@@ -191,19 +191,39 @@ def load_map_interval_stats(
     method: AggregationMethod = "trimmed_mean",
     trimmed_q: float = 0.1,
     outlier_sigma: float | None = 3.0,
+    snapshot_id: str | None = None,
 ) -> dict[int, MapIntervalStats]:
     """Per-map :class:`MapIntervalStats`, aggregated across all clean
-    replays. Maps with no qualifying replays are absent."""
+    replays. Maps with no qualifying replays are absent.
+
+    ``snapshot_id`` (optional) restricts to replays whose parent map
+    lives in the given ingestion snapshot — used for A/B comparison
+    between snapshot cohorts.
+    """
     with cursor(conn) as cur:
-        cur.execute(
-            """
-            SELECT r.map_id, r.breadcrumbs_path
-            FROM replays r
-            WHERE r.clean_status IN ('clean','usable_with_warnings')
-              AND r.breadcrumbs_path IS NOT NULL
-              AND EXISTS (SELECT 1 FROM route_corridors rc WHERE rc.map_id = r.map_id)
-            """
-        )
+        if snapshot_id is None:
+            cur.execute(
+                """
+                SELECT r.map_id, r.breadcrumbs_path
+                FROM replays r
+                WHERE r.clean_status IN ('clean','usable_with_warnings')
+                  AND r.breadcrumbs_path IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM route_corridors rc WHERE rc.map_id = r.map_id)
+                """
+            )
+        else:
+            cur.execute(
+                """
+                SELECT r.map_id, r.breadcrumbs_path
+                FROM replays r
+                JOIN maps m ON m.id = r.map_id
+                WHERE r.clean_status IN ('clean','usable_with_warnings')
+                  AND r.breadcrumbs_path IS NOT NULL
+                  AND m.ingestion_snapshot = %s
+                  AND EXISTS (SELECT 1 FROM route_corridors rc WHERE rc.map_id = r.map_id)
+                """,
+                (snapshot_id,),
+            )
         rows = cur.fetchall()
 
     by_map: dict[int, list[float]] = {}
