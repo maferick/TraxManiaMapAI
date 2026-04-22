@@ -252,6 +252,79 @@ def _cmd_label_traversability(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_enumerate_corridors(args: argparse.Namespace) -> int:
+    import json as _json
+    from src.corridor.traversability import (
+        DECO_ADJACENT_CONTAMINATION_CAP,
+        MEDIAN_PATH_COUNT_CAP,
+        P95_PATH_COUNT_CAP,
+        VALIDATION_MAP_IDS_V1,
+        VALIDATION_MAP_IDS_V2,
+        enumerate_set,
+    )
+    config = load_config(args.config)
+    ids: tuple[int, ...]
+    if args.map_ids:
+        ids = tuple(int(m) for m in args.map_ids)
+    elif args.set == "v1":
+        ids = VALIDATION_MAP_IDS_V1
+    else:
+        ids = VALIDATION_MAP_IDS_V2
+    conn = open_connection(config)
+    try:
+        report = enumerate_set(conn, ids, depth_cap=args.depth_cap)
+    finally:
+        conn.close()
+
+    # Per-map summary — one line per map with interval count + worst metrics.
+    for mid, intervals in sorted(report.per_map.items()):
+        if not intervals:
+            _LOG.info("  map=%5d: no enumeration (missing anchors or placements)", mid)
+            continue
+        max_paths = max(iv.path_count for iv in intervals)
+        worst_deco = max(iv.deco_adjacent_contamination for iv in intervals)
+        unsupported = sum(iv.unsupported_edges_in_corridors for iv in intervals)
+        non_drivable = sum(iv.non_drivable_cells_in_corridors for iv in intervals)
+        _LOG.info(
+            "  map=%5d intervals=%2d max_paths=%5d worst_deco=%.3f "
+            "unsupported=%d non_drivable=%d",
+            mid, len(intervals), max_paths, worst_deco, unsupported, non_drivable,
+        )
+
+    # Aggregate + gate summary.
+    _LOG.info(
+        "enumerate-corridors: maps=%d intervals=%d "
+        "median_paths=%.0f p95_paths=%d",
+        len(report.per_map),
+        len(report.all_intervals()),
+        report.median_path_count,
+        report.p95_path_count,
+    )
+    gates = [
+        ("§8.3.1 unsupported-free", report.passes_83_unsupported),
+        ("§8.3.2 non-drivable-free", report.passes_83_non_drivable),
+        (f"§8.3.3 deco-adjacent ≤ {DECO_ADJACENT_CONTAMINATION_CAP}",
+         report.passes_83_deco_adjacent),
+        ("§8.3.4 path stability", report.passes_83_stable),
+        (f"§8.4 median ≤ {MEDIAN_PATH_COUNT_CAP}", report.passes_84_median),
+        (f"§8.4 p95 ≤ {P95_PATH_COUNT_CAP}", report.passes_84_p95),
+    ]
+    all_passing = True
+    for name, ok in gates:
+        mark = "PASS" if ok else "FAIL"
+        getattr(_LOG, "info" if ok else "warning")("GATE %s: %s", mark, name)
+        if not ok:
+            all_passing = False
+
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(
+            _json.dumps(report.to_summary_json(), indent=2), encoding="utf-8"
+        )
+        _LOG.info("wrote JSON report: %s", args.json)
+    return 0 if all_passing else 1
+
+
 def _cmd_validate_traversability(args: argparse.Namespace) -> int:
     import json as _json
     from src.corridor.traversability import (
@@ -1188,6 +1261,29 @@ def _build_parser() -> argparse.ArgumentParser:
              "(Phase 3 inductive layer — observations don't bump constraint-graph validity)",
     )
     validate_traversability_cmd.set_defaults(func=_cmd_validate_traversability)
+
+    enumerate_corridors_cmd = sub.add_parser(
+        "enumerate-corridors",
+        help="Step 4 / §8.3 + §8.4 gates: enumerate corridor candidates per "
+             "interval, run automated sanity checks. Exit 0 on all-pass, 1 on fail.",
+    )
+    enumerate_corridors_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+        help="override the default validation set (repeatable)",
+    )
+    enumerate_corridors_cmd.add_argument(
+        "--set", choices=("v1", "v2"), default="v2",
+        help="which frozen validation set to run against (default v2)",
+    )
+    enumerate_corridors_cmd.add_argument(
+        "--depth-cap", type=int, default=10,
+        help="max path depth for DFS enumeration (default 10)",
+    )
+    enumerate_corridors_cmd.add_argument(
+        "--json", type=str, default=None,
+        help="write machine-readable JSON report to this path",
+    )
+    enumerate_corridors_cmd.set_defaults(func=_cmd_enumerate_corridors)
 
     extract_route_cmd = sub.add_parser(
         "extract-route", help="Infer route artifacts from cohort-assigned replays"
