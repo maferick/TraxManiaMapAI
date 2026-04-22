@@ -275,6 +275,27 @@ def _cmd_build_traversability_evidence(args: argparse.Namespace) -> int:
     return 0 if not stats.errors else 1
 
 
+def _cmd_update_path_support(args: argparse.Namespace) -> int:
+    from src.corridor.traversability import update_path_support
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        stats = update_path_support(
+            conn, map_ids=args.map_ids,
+            snapshot_id=args.snapshot, limit=args.limit,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "update-path-support: maps_seen=%d updated=%d skipped=%d "
+        "intervals=%d edges_updated=%d paths=%d errors=%d",
+        stats.maps_seen, stats.maps_updated, stats.maps_skipped_no_evidence,
+        stats.intervals_enumerated, stats.edges_updated,
+        stats.path_count_total, len(stats.errors),
+    )
+    return 0 if not stats.errors else 1
+
+
 def _cmd_enumerate_corridors(args: argparse.Namespace) -> int:
     import json as _json
     from src.corridor.traversability import (
@@ -1266,6 +1287,20 @@ def _build_parser() -> argparse.ArgumentParser:
     build_evidence_cmd.add_argument("--limit", type=int, default=None,
         help="cap on map count for smoke runs")
     build_evidence_cmd.set_defaults(func=_cmd_build_traversability_evidence)
+
+    update_path_support_cmd = sub.add_parser(
+        "update-path-support",
+        help="Phase 3 Signal 1: enumerate corridors per map, count edge "
+             "usage across paths, UPDATE traversability_edge_evidence."
+             "path_support_count.",
+    )
+    update_path_support_cmd.add_argument("--snapshot", type=str, default=None)
+    update_path_support_cmd.add_argument(
+        "--map-id", dest="map_ids", type=int, action="append", default=None,
+        help="restrict to specific maps.id values (repeatable)",
+    )
+    update_path_support_cmd.add_argument("--limit", type=int, default=None)
+    update_path_support_cmd.set_defaults(func=_cmd_update_path_support)
 
     validate_traversability_cmd = sub.add_parser(
         "validate-traversability",

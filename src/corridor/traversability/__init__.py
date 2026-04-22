@@ -32,8 +32,11 @@ from src.corridor.traversability.enumeration import (
 )
 from src.corridor.traversability.evidence import (
     EvidenceBuildStats,
+    PathSupportStats,
     build_map_evidence,
     build_set_evidence,
+    update_path_support,
+    update_path_support_for_map,
 )
 from src.corridor.traversability.reachability import (
     VALIDATION_MAP_IDS,
@@ -64,6 +67,7 @@ __all__ = [
     "MapReachability",
     "NON_DRIVABLE_FAMILIES",
     "P95_PATH_COUNT_CAP",
+    "PathSupportStats",
     "ReplayObservation",
     "STATE_SEED_VALID",
     "STATE_UNKNOWN",
@@ -79,6 +83,8 @@ __all__ = [
     "enumerate_map",
     "enumerate_set",
     "label_edge",
+    "update_path_support",
+    "update_path_support_for_map",
     "validate_map",
     "validate_set",
 ]
