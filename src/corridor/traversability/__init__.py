@@ -35,12 +35,14 @@ from src.corridor.traversability.evidence import (
     EvidenceBuildStats,
     NegativeEvidenceStats,
     PathSupportStats,
+    PatternWeightStats,
     build_map_evidence,
     build_set_evidence,
     update_negative_evidence,
     update_negative_evidence_for_map,
     update_path_support,
     update_path_support_for_map,
+    update_pattern_weights,
 )
 from src.corridor.traversability.reachability import (
     VALIDATION_MAP_IDS,
@@ -72,6 +74,7 @@ __all__ = [
     "MapReachability",
     "NON_DRIVABLE_FAMILIES",
     "NegativeEvidenceStats",
+    "PatternWeightStats",
     "P95_PATH_COUNT_CAP",
     "PathSupportStats",
     "ReplayObservation",
@@ -93,6 +96,7 @@ __all__ = [
     "update_negative_evidence_for_map",
     "update_path_support",
     "update_path_support_for_map",
+    "update_pattern_weights",
     "validate_map",
     "validate_set",
 ]

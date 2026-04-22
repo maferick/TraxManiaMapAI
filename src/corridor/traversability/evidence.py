@@ -370,6 +370,170 @@ def update_path_support_for_map(
 
 
 @dataclass
+class PatternWeightStats:
+    """Counters for a Signal-3 (cross-map family-pair frequency) update."""
+    started_at: datetime
+    classification_version: str
+    family_pairs_seen: int = 0
+    edges_updated: int = 0
+    max_pair_count: int = 0
+    errors: list[str] = field(default_factory=list)
+    completed_at: datetime | None = None
+
+    def to_summary_json(self) -> dict[str, Any]:
+        return {
+            "classification_version": self.classification_version,
+            "family_pairs_seen": self.family_pairs_seen,
+            "edges_updated": self.edges_updated,
+            "max_pair_count": self.max_pair_count,
+            "error_count": len(self.errors),
+        }
+
+
+def _normalize_pattern_weight(count: int, max_count: int) -> float:
+    """Log-scaled normalization of a raw family-pair frequency.
+
+    ``log(count + 1) / log(max_count + 1)``. Rare pairs sit near 0;
+    the single most common pair lands exactly at 1.0. Log scale
+    matters because family-pair counts are extremely long-tailed —
+    ``Deco → Deco`` has millions of instances in the corpus while
+    rare-but-valid transitions (``Platform → Technics``) have tens.
+    Linear ratio would flatten everything except Deco; log scale
+    preserves information at the low end.
+
+    Returns 0.0 when ``max_count <= 0`` (empty corpus).
+    """
+    import math
+    if max_count <= 0:
+        return 0.0
+    return math.log(count + 1) / math.log(max_count + 1)
+
+
+_UPDATE_PATTERN_WEIGHT_SQL = """
+UPDATE traversability_edge_evidence
+SET pattern_weight = %s
+WHERE id = %s
+"""
+
+
+def _compute_family_pair_counts(
+    conn: Connection, classification_version: str
+) -> list[tuple[str, str, int]]:
+    """Cross-map aggregate: one SELECT with GROUP BY on the joined
+    families. Fast because it's a scan + hash — no per-pair subquery
+    storm. Returns ``[(fam_a, fam_b, count), ...]`` where ``fam_a <=
+    fam_b`` (canonical ordering so the pair key is symmetric).
+    """
+    with cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT LEAST(bp1.block_family, bp2.block_family) AS fam_a,
+                   GREATEST(bp1.block_family, bp2.block_family) AS fam_b,
+                   COUNT(*) AS n
+            FROM traversability_edge_evidence ev
+            JOIN block_placements bp1 ON ev.src_block_id = bp1.id
+            JOIN block_placements bp2 ON ev.dst_block_id = bp2.id
+            WHERE ev.classification_version = %s
+            GROUP BY fam_a, fam_b
+            """,
+            (classification_version,),
+        )
+        return [(str(r[0]), str(r[1]), int(r[2])) for r in cur.fetchall()]
+
+
+def update_pattern_weights(
+    conn: Connection,
+    *,
+    classification_version: str = CLASSIFICATION_VERSION,
+    batch_size: int = 10_000,
+) -> PatternWeightStats:
+    """One-shot cross-map Signal-3 update.
+
+    1. Aggregate family-pair counts in a single SQL GROUP BY (fast —
+       hash aggregation on the join product).
+    2. Log-normalize the counts into weights.
+    3. Walk evidence rows in batches, look up each edge's resolved
+       (fam_a, fam_b) pair in Python, then bulk-UPDATE by row id.
+
+    The second step deliberately DOESN'T use a ``JOIN UPDATE`` on
+    ``LEAST / GREATEST`` keys — MariaDB can't use block_family
+    indexes under those functions, so each such UPDATE degenerates
+    to a full table scan on a 7M-row table. Per-id UPDATE (with the
+    PK in play) is orders of magnitude faster even with the extra
+    round-trip count.
+    """
+    stats = PatternWeightStats(
+        started_at=_utcnow(),
+        classification_version=classification_version,
+    )
+    pair_counts = _compute_family_pair_counts(conn, classification_version)
+    if not pair_counts:
+        stats.completed_at = _utcnow()
+        return stats
+
+    max_count = max(n for _, _, n in pair_counts)
+    stats.family_pairs_seen = len(pair_counts)
+    stats.max_pair_count = max_count
+
+    # Build the pair → weight lookup (keys are sorted tuples so both
+    # edge orderings resolve the same weight).
+    weights: dict[tuple[str, str], float] = {
+        (fam_a, fam_b): _normalize_pattern_weight(count, max_count)
+        for fam_a, fam_b, count in pair_counts
+    }
+
+    # Stream evidence rows in batches. Each row tells us src_family
+    # and dst_family via a JOIN — no per-pair WHERE needed.
+    fetch_sql = """
+    SELECT ev.id,
+           bp1.block_family AS fam_src, bp2.block_family AS fam_dst
+    FROM traversability_edge_evidence ev
+    JOIN block_placements bp1 ON ev.src_block_id = bp1.id
+    JOIN block_placements bp2 ON ev.dst_block_id = bp2.id
+    WHERE ev.classification_version = %s
+    """
+
+    try:
+        total_updated = 0
+        with cursor(conn) as cur:
+            cur.execute(fetch_sql, (classification_version,))
+            # fetchmany avoids pulling all 7M rows into memory at once.
+            buffer: list[tuple[float, int]] = []
+            while True:
+                rows = cur.fetchmany(batch_size)
+                if not rows:
+                    break
+                for row in rows:
+                    ev_id = int(row[0])
+                    fa = str(row[1] or "")
+                    fb = str(row[2] or "")
+                    lo, hi = (fa, fb) if fa <= fb else (fb, fa)
+                    weight = weights.get((lo, hi), 0.0)
+                    buffer.append((weight, ev_id))
+                    if len(buffer) >= batch_size:
+                        _flush_pattern_weight_batch(conn, buffer)
+                        total_updated += len(buffer)
+                        buffer.clear()
+            if buffer:
+                _flush_pattern_weight_batch(conn, buffer)
+                total_updated += len(buffer)
+        conn.commit()
+        stats.edges_updated = total_updated
+    finally:
+        stats.completed_at = _utcnow()
+    return stats
+
+
+def _flush_pattern_weight_batch(
+    conn: Connection, batch: list[tuple[float, int]]
+) -> None:
+    """Flush one executemany UPDATE. Uses a fresh cursor so we don't
+    stomp on the outer fetchmany cursor state."""
+    with cursor(conn) as cur:
+        cur.executemany(_UPDATE_PATTERN_WEIGHT_SQL, batch)
+
+
+@dataclass
 class NegativeEvidenceStats:
     """Counters for a Signal-4 update run."""
     started_at: datetime
