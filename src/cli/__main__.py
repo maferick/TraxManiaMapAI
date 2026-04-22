@@ -378,12 +378,18 @@ def _cmd_diagnose_corridor_ranking(args: argparse.Namespace) -> int:
     else:
         alphas = DEFAULT_ALPHAS
 
+    v2_outlier_sigma: float | None = (
+        args.v2_outlier_sigma if args.v2_outlier_sigma > 0 else None
+    )
     conn = open_connection(config)
     try:
         report = run_diagnostics(
             conn,
             alphas=alphas,
             production_alpha=args.production_alpha,
+            v2_aggregation_method=args.v2_aggregation,
+            v2_trimmed_q=args.v2_trimmed_q,
+            v2_outlier_sigma=v2_outlier_sigma,
         )
     finally:
         conn.close()
@@ -1659,6 +1665,19 @@ def _build_parser() -> argparse.ArgumentParser:
     diagnose_corridor_ranking_cmd.add_argument(
         "--output", type=str, default=None,
         help="write the diagnostics markdown report to this path",
+    )
+    diagnose_corridor_ranking_cmd.add_argument(
+        "--v2-aggregation", type=str, default="trimmed_mean",
+        choices=("mean", "median", "trimmed_mean"),
+        help="time_envelope v2 aggregation method (default: trimmed_mean)",
+    )
+    diagnose_corridor_ranking_cmd.add_argument(
+        "--v2-trimmed-q", type=float, default=0.1,
+        help="trimmed_mean quantile for v2 (default 0.1 → drop top/bottom 10%%)",
+    )
+    diagnose_corridor_ranking_cmd.add_argument(
+        "--v2-outlier-sigma", type=float, default=3.0,
+        help="outlier rejection sigma for v2; pass 0 or negative to disable",
     )
     diagnose_corridor_ranking_cmd.set_defaults(
         func=_cmd_diagnose_corridor_ranking,
