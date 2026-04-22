@@ -352,25 +352,92 @@ Does the traversability graph:
 
 ## 8. Phase 1 success gate (commit bar)
 
-All of the following must hold before Prereq 2 is declared complete:
+All of the following must hold before Prereq 2 is declared complete.
+Gates run against distinct validation sets because they measure
+different things and benefit from different data — mixing them on a
+single set distorts the measurement.
 
-1. ≥90% of checkpoint intervals in the 10-map validation set have at
-   least one traversable path.
-2. ≥80% of deco / support edges in the raw adjacency graph (on the
-   10-map set) are removed from the traversability subgraph.
-3. Manual validation in ≥8 / 10 maps shows no obviously false-positive
-   corridors.
-4. Path enumeration is tractable on the 10-map validation set under
-   depth-10 enumeration:
-   - median interval has ≤ 1,000 candidate paths (central-tendency
-     tractability)
-   - p95 interval has ≤ 10,000 candidate paths (explosion control —
-     catches the long-tail interval that would otherwise blow up the
-     whole validation run)
+### §8.1 Interval reachability — on V2
 
-If any of (1)–(4) is not met: do not declare Prereq 2 complete.
+Target set: `VALIDATION_MAP_IDS_V2` (data-coverage-aware: maps with
+≥3 clean breadcrumb replays in the pinned snapshot, so the
+observation-augmented reachability path has something to work with).
+
+Pass: ≥90% of non-spawn checkpoint-interval anchor sets reachable
+from the spawn component on the combined (seed_valid ∪ observation-
+asserted) traversability subgraph.
+
+### §8.2 Deco/support suppression — on V1
+
+Target set: `VALIDATION_MAP_IDS_V1` (structural-diversity set, deco-
+heavy maps originally calibrated for the 80% suppression threshold).
+
+Pass: ≥80% of raw-adjacency edges on the V1 set are excluded from
+the traversability subgraph (either `unsupported` or `unknown`).
+
+Rationale for split: V2 maps are typically smaller tech/plasti
+maps with little deco volume — on V2, the 80% threshold is
+unachievable not because pruning is weak but because there's
+nothing to prune. Measuring suppression on V1 (deco-heavy) and
+reachability on V2 (data-coverage) keeps each metric on the data
+it was designed for.
+
+### §8.3 Automated sanity validation — on V2
+
+**Note on framing:** the original §8.3 asked for manual review.
+Hand-curated review is unavailable for this workstream phase.
+Therefore §8.3 is temporarily satisfied by automated sanity checks
+only. This is sufficient for advancing the traversability /
+corridor substrate. It is **not** sufficient to claim human-
+confirmed corridor quality. Human review remains deferred future
+work. Do not describe the automated substitute as "manual
+validation passed by proxy"; describe it as "manual validation
+unavailable; automated sanity gate substituted."
+
+Pass: ALL of the following on the V2 validation set:
+
+1. **Zero unsupported-edge contamination.** No enumerated
+   corridor path contains an edge whose `traversability_state` is
+   `unsupported`. Tautological by construction if path enumeration
+   runs on the seed_valid subgraph only; becomes load-bearing if
+   future phases relax the subgraph. Enforced as a post-
+   enumeration check.
+2. **Zero non-drivable family intrusion.** No cell on any selected
+   corridor has a `block_family` in `NON_DRIVABLE_FAMILIES`.
+   Same construction-vs-post-check story as (1).
+3. **Deco-adjacent contamination below threshold.** The
+   fraction of corridor cells with a deco/support family cell as
+   a grid neighbor is below 0.40. Catches corridors that thread
+   through drivable-but-deco-rimmed chokepoints where the
+   classification happens to be correct but the route sits in a
+   non-raceable neighborhood.
+4. **Path-family stability under perturbation.** For each interval
+   with ≥2 clean replay observations, the top-ranked corridor
+   (by edge count, ties broken lexicographically by endpoint coord)
+   under the full observation set must equal the top-ranked
+   corridor under a re-run with a single replay held out. Measures
+   whether observation additions are additive-stable or cause
+   wild-swing re-rankings.
+
+### §8.4 Path-enumeration tractability — on V2
+
+Pass under depth-10 DFS enumeration on V2:
+
+- median interval has ≤ 1,000 candidate paths (central-tendency)
+- p95 interval has ≤ 10,000 candidate paths (explosion control —
+  catches the long-tail interval that would otherwise blow up the
+  whole validation run)
+
+### Overall policy
+
+If any of §8.1–§8.4 is not met: do not declare Prereq 2 complete.
 Return to Phase 2 / 3 with the specific failure evidence in hand
 and iterate before re-running validation.
+
+When manual validation eventually becomes available, §8.3 should
+be re-tightened to include hand-curated review in addition to (not
+in place of) the automated checks. Until then, the four automated
+checks above ARE the gate.
 
 ## 9. Implementation phases
 

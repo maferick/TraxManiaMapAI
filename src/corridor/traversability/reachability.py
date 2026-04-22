@@ -56,6 +56,10 @@ from typing import Any
 
 from pymysql.connections import Connection
 
+from src.corridor.traversability.classification import (
+    FamilyBucket,
+    classify_family,
+)
 from src.corridor.traversability.labeling import (
     STATE_SEED_VALID,
     STATE_UNSUPPORTED,
@@ -290,9 +294,31 @@ def _build_cell_graph(
     Returns the neighbors dict as an undirected adjacency view (both
     directions added) to keep BFS symmetric.
     """
+    # Priority-first placement: when multiple blocks share a cell
+    # (TM2020 allows layered placements — e.g. a checkpoint block on
+    # top of a structural base), prefer the most-drivable family. A
+    # non-drivable Structure block + a drivable RoadCheckpoint at the
+    # same cell should resolve to Road, not Structure, because the
+    # drivable one is what the car traverses. Tie-break by first
+    # placement (mirrors the original first-wins semantics for the
+    # common single-block case).
     cell_to_family: dict[tuple[int, int, int], str] = {}
     for x, y, z, family in rows:
-        cell_to_family.setdefault((x, y, z), family)
+        cell = (x, y, z)
+        existing = cell_to_family.get(cell)
+        if existing is None:
+            cell_to_family[cell] = family
+            continue
+        # Promote only if the new family is a better bucket than the
+        # existing one. Ordering: DRIVABLE > AMBIGUOUS > NON_DRIVABLE.
+        existing_bucket = classify_family(existing)
+        new_bucket = classify_family(family)
+        if (existing_bucket is FamilyBucket.NON_DRIVABLE
+                and new_bucket is not FamilyBucket.NON_DRIVABLE):
+            cell_to_family[cell] = family
+        elif (existing_bucket is FamilyBucket.AMBIGUOUS
+              and new_bucket is FamilyBucket.DRIVABLE):
+            cell_to_family[cell] = family
 
     counts = {
         STATE_SEED_VALID: 0,
@@ -441,20 +467,29 @@ def _fetch_free_map_waypoints(
 def _snap_free_waypoints_to_grid(
     free_waypoints: list[tuple[str, int, float, float, float]],
     grid_cells: list[tuple[int, int, int]],
+    cell_to_family: dict[tuple[int, int, int], str] | None = None,
 ) -> list[tuple[str, int, int, int, int]]:
-    """For each free-placed waypoint, pick the grid cell whose estimated
-    absolute center is nearest (Euclidean). Returns a list in the same
-    shape as :func:`_fetch_map_waypoints` so downstream code handles
-    snapped free and native grid waypoints uniformly.
+    """Snap free-placed waypoints to the nearest grid cell.
 
-    Skip-silently policy: a free waypoint with no grid blocks in the
-    map returns nothing (the caller will log 'no_grid_waypoints' if
-    that leaves the map without any anchors). Conservative to avoid
-    inventing anchors where there's no block to snap to.
+    When ``cell_to_family`` is supplied, prefer the nearest cell whose
+    family is DRIVABLE. A waypoint block is always drivable by
+    construction — it's a Road/Platform/Gate block the car crosses —
+    so the nearest grid cell SHOULD be drivable. Snapping to the
+    absolute-nearest cell without the preference can land on an
+    adjacent Structure pillar or Deco base that happens to sit closer
+    in absolute coords.
+
+    Fallback: if no drivable cell is within the map (rare), snap to
+    the absolute nearest cell — the caller's downstream classification
+    will still flag the mismatch.
+
+    Skip-silently policy: a free waypoint with zero grid blocks in
+    the map produces nothing (the caller logs 'no_grid_waypoints'
+    if that leaves the map without any anchors). Conservative to
+    avoid inventing anchors where there's no block to snap to.
     """
     if not grid_cells:
         return []
-    # Precompute grid-cell absolute centers once.
     grid_abs: list[tuple[int, int, int, float, float, float]] = [
         (
             gx, gy, gz,
@@ -466,18 +501,27 @@ def _snap_free_waypoints_to_grid(
     ]
     snapped: list[tuple[str, int, int, int, int]] = []
     for tag, order, ax, ay, az in free_waypoints:
-        best_dist = float("inf")
-        best_cell: tuple[int, int, int] | None = None
+        best_drivable_dist = float("inf")
+        best_drivable_cell: tuple[int, int, int] | None = None
+        best_any_dist = float("inf")
+        best_any_cell: tuple[int, int, int] | None = None
         for gx, gy, gz, cx, cy, cz in grid_abs:
             dx = ax - cx
             dy = ay - cy
             dz = az - cz
-            dist = dx * dx + dy * dy + dz * dz  # squared distance is fine for argmin
-            if dist < best_dist:
-                best_dist = dist
-                best_cell = (gx, gy, gz)
-        if best_cell is not None:
-            snapped.append((tag, order, best_cell[0], best_cell[1], best_cell[2]))
+            dist = dx * dx + dy * dy + dz * dz
+            if dist < best_any_dist:
+                best_any_dist = dist
+                best_any_cell = (gx, gy, gz)
+            if cell_to_family is not None:
+                fam = cell_to_family.get((gx, gy, gz), "")
+                if classify_family(fam) is FamilyBucket.DRIVABLE:
+                    if dist < best_drivable_dist:
+                        best_drivable_dist = dist
+                        best_drivable_cell = (gx, gy, gz)
+        chosen = best_drivable_cell if best_drivable_cell is not None else best_any_cell
+        if chosen is not None:
+            snapped.append((tag, order, chosen[0], chosen[1], chosen[2]))
     return snapped
 
 
@@ -655,7 +699,7 @@ def validate_map(
     free_wp_rows = _fetch_free_map_waypoints(conn, map_id=map_id)
     if free_wp_rows:
         snapped = _snap_free_waypoints_to_grid(
-            free_wp_rows, list(cell_to_family.keys())
+            free_wp_rows, list(cell_to_family.keys()), cell_to_family
         )
         wp_rows = list(wp_rows) + snapped
     anchor_sets = _build_anchor_sets(wp_rows)
