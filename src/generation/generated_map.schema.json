@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trackmania-ai/schemas/generated-map-v0.json",
+  "title": "Generated map — v0",
+  "description": "Authoritative schema for generator output. Mirrors docs/generation/generation-scope-v0.md. Readers reject documents whose schema_version != 'generation-v0'.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "generated_at",
+    "inputs",
+    "provenance",
+    "map",
+    "route",
+    "finishability"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "generation-v0" },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "Deterministic 16-hex sha over the inputs block."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "inputs": {
+      "type": "object",
+      "required": ["random_seed"],
+      "additionalProperties": false,
+      "properties": {
+        "base_map_id":         { "type": ["integer", "null"] },
+        "base_map_source_id":  { "type": ["string", "null"] },
+        "style_tag_filter":    { "type": ["string", "null"], "enum": ["Tech", "FullSpeed", null] },
+        "difficulty":          { "type": "string", "enum": ["easy", "medium", "hard"] },
+        "random_seed":         { "type": "integer" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "model_hash",
+        "learned_score_version",
+        "config_hash",
+        "code_version",
+        "classification_version"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "model_hash":             { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "learned_score_version":  { "type": "string" },
+        "config_hash":            { "type": "string" },
+        "code_version":           { "type": "string" },
+        "classification_version": { "type": "string" }
+      }
+    },
+    "map": {
+      "type": "object",
+      "required": ["waypoint_order_style", "interval_count", "blocks", "checkpoints"],
+      "additionalProperties": false,
+      "properties": {
+        "waypoint_order_style": { "const": "linked" },
+        "interval_count": { "type": "integer", "minimum": 1 },
+        "blocks": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/Block" }
+        },
+        "checkpoints": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/Checkpoint" }
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "required": ["intervals", "cells_total", "corridors_used"],
+      "additionalProperties": false,
+      "properties": {
+        "intervals": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/IntervalEntry" }
+        },
+        "cells_total":    { "type": "integer", "minimum": 0 },
+        "corridors_used": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/CorridorUsed" }
+        }
+      }
+    },
+    "finishability": {
+      "type": "object",
+      "required": ["route_verified", "estimated_time_ms", "ai_confidence", "reject_reason", "gate_version"],
+      "additionalProperties": false,
+      "properties": {
+        "route_verified":     { "type": "boolean" },
+        "estimated_time_ms":  { "type": ["integer", "null"], "minimum": 0 },
+        "ai_confidence":      { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "reject_reason": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "plain_cp_not_supported_v0",
+            "missing_corridor_in_interval",
+            "chain_broken",
+            "empty_corridors",
+            "confidence_below_floor",
+            "unknown_block",
+            "invalid_schema"
+          ]
+        },
+        "gate_version":       { "const": "finishability-v0" },
+        "detail":             { "type": ["string", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "Block": {
+      "type": "object",
+      "required": ["block_family", "block_name", "x", "y", "z", "rotation"],
+      "additionalProperties": false,
+      "properties": {
+        "block_family": { "type": "string", "minLength": 1 },
+        "block_name":   { "type": "string", "minLength": 1 },
+        "x":            { "type": "integer" },
+        "y":            { "type": "integer" },
+        "z":            { "type": "integer" },
+        "rotation":     { "type": "integer", "minimum": 0, "maximum": 3 }
+      }
+    },
+    "Checkpoint": {
+      "type": "object",
+      "required": ["waypoint_index", "waypoint_order", "tag", "x", "y", "z"],
+      "additionalProperties": false,
+      "properties": {
+        "waypoint_index": { "type": "integer", "minimum": 0 },
+        "waypoint_order": { "type": "integer", "minimum": 0 },
+        "tag":            { "type": "string", "enum": ["Spawn", "Checkpoint", "Goal"] },
+        "x":              { "type": "integer" },
+        "y":              { "type": "integer" },
+        "z":              { "type": "integer" }
+      }
+    },
+    "IntervalEntry": {
+      "type": "object",
+      "required": [
+        "index", "src_tag", "src_order", "dst_tag", "dst_order",
+        "chosen_corridor_id", "chosen_corridor_score",
+        "path_length_cells", "expected_time_ms"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "index":                 { "type": "integer", "minimum": 0 },
+        "src_tag":               { "type": "string", "enum": ["Spawn", "Checkpoint"] },
+        "src_order":             { "type": "integer", "minimum": 0 },
+        "dst_tag":               { "type": "string", "enum": ["Checkpoint", "Goal"] },
+        "dst_order":             { "type": "integer", "minimum": 0 },
+        "chosen_corridor_id":    { "type": "integer", "minimum": 0 },
+        "chosen_corridor_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "path_length_cells":     { "type": "integer", "minimum": 0 },
+        "expected_time_ms":      { "type": "integer", "minimum": 0 }
+      }
+    },
+    "CorridorUsed": {
+      "type": "object",
+      "required": [
+        "corridor_id", "interval_index", "learned_corridor_score",
+        "contains_virtual_edge", "path_length_cells"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "corridor_id":             { "type": "integer", "minimum": 0 },
+        "interval_index":          { "type": "integer", "minimum": 0 },
+        "learned_corridor_score":  { "type": "number", "minimum": 0, "maximum": 1 },
+        "corridor_confidence":     { "type": ["number", "null"] },
+        "contains_virtual_edge":   { "type": "boolean" },
+        "path_length_cells":       { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
