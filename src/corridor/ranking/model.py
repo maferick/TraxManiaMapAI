@@ -169,18 +169,29 @@ class TrainingReport:
 
 @dataclass
 class ComparativeTrainingReport:
-    """Pair of TrainingReports — the inverse-rank baseline and the
-    time-envelope model, trained on the same feature matrix and split
-    but different label schemes. Enables head-to-head comparison of
-    whether a behavior-grounded label shifts model behavior.
+    """Stack of TrainingReports across the four known label schemes,
+    trained on the same feature matrix + split but different labels
+    (and different sample weights for ``time_envelope_v2_weighted``).
+    Enables head-to-head comparison and serves as the input shape
+    for ``score-corridors-learned``.
 
-    ``time_envelope`` may be None when no clean replays supply
-    checkpoint times on any corridor-owning map (the label set would be
-    empty). In that case only the baseline trains.
+    Any scheme may be ``None`` when its labels don't apply (e.g. no
+    clean replays on any corridor-owning map → time-envelope schemes
+    all None; only inverse-rank survives). ``load_model_from_report``
+    picks the best-available scheme in the documented preference
+    order.
     """
     inverse_rank: TrainingReport
     time_envelope: TrainingReport | None
     map_mean_interval_ms_count: int   # how many maps contributed a mean interval time
+    # Added 2026-04: A2 + A4 schemes persisted alongside so
+    # score-corridors-learned can pick up the best label/weighting
+    # automatically (per load_model_from_report preference order).
+    time_envelope_v2: TrainingReport | None = None
+    time_envelope_v2_weighted: TrainingReport | None = None
+    v2_map_count: int = 0             # maps with v2 aggregated interval stats
+    v2_aggregation_method: str | None = None
+    v2_label_quality_summary: dict[str, float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -188,7 +199,17 @@ class ComparativeTrainingReport:
             "time_envelope": (
                 self.time_envelope.to_dict() if self.time_envelope is not None else None
             ),
+            "time_envelope_v2": (
+                self.time_envelope_v2.to_dict() if self.time_envelope_v2 is not None else None
+            ),
+            "time_envelope_v2_weighted": (
+                self.time_envelope_v2_weighted.to_dict()
+                if self.time_envelope_v2_weighted is not None else None
+            ),
             "map_mean_interval_ms_count": self.map_mean_interval_ms_count,
+            "v2_map_count": self.v2_map_count,
+            "v2_aggregation_method": self.v2_aggregation_method,
+            "v2_label_quality_summary": self.v2_label_quality_summary,
         }
 
     def write_json(self, path: Path) -> None:
