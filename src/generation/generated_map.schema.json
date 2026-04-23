@@ -82,13 +82,11 @@
       "properties": {
         "intervals": {
           "type": "array",
-          "minItems": 1,
           "items": { "$ref": "#/$defs/IntervalEntry" }
         },
         "cells_total":    { "type": "integer", "minimum": 0 },
         "corridors_used": {
           "type": "array",
-          "minItems": 1,
           "items": { "$ref": "#/$defs/CorridorUsed" }
         }
       }

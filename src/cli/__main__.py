@@ -298,6 +298,41 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
     return 0 if not stats.errors else 1
 
 
+def _cmd_generate_map(args: argparse.Namespace) -> int:
+    import json as _json
+    from src.generation import GenerationInputs, generate_from_base
+    config = load_config(args.config)
+    inputs = GenerationInputs(
+        base_map_id=args.base_map_id,
+        base_map_source_id=None,        # generator fills from DB
+        style_tag_filter=args.style_tag_filter,
+        difficulty=args.difficulty,
+        random_seed=args.random_seed,
+    )
+    conn = open_connection(config)
+    try:
+        artifact = generate_from_base(conn, inputs=inputs, config=config)
+    finally:
+        conn.close()
+    fin = artifact["finishability"]
+    _LOG.info(
+        "generate-map: run_id=%s base=%d route_verified=%s "
+        "estimated_time_ms=%s ai_confidence=%s reject=%s",
+        artifact["run_id"],
+        inputs.base_map_id,
+        fin["route_verified"],
+        fin["estimated_time_ms"],
+        fin["ai_confidence"],
+        fin["reject_reason"],
+    )
+    if args.output:
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_json.dumps(artifact, indent=2), encoding="utf-8")
+        _LOG.info("wrote generated-map artifact: %s", args.output)
+    return 0 if fin["route_verified"] else 1
+
+
 def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
     from src.corridor.ranking import TrainingReport, train_and_evaluate
     config = load_config(args.config)
@@ -1828,6 +1863,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     score_route_corridors_cmd.add_argument("--limit", type=int, default=None)
     score_route_corridors_cmd.set_defaults(func=_cmd_score_route_corridors)
+
+    generate_map_cmd = sub.add_parser(
+        "generate-map",
+        help="Phase 2 PR E — minimal generator. Copies a base map's "
+             "blocks, runs route assembly + finishability gate, emits "
+             "a schema-validated v0 JSON artifact.",
+    )
+    generate_map_cmd.add_argument(
+        "--base-map-id", type=int, required=True,
+        help="maps.id to use as the base (must be parsed)",
+    )
+    generate_map_cmd.add_argument(
+        "--style-tag-filter", type=str, default=None,
+        choices=("Tech", "FullSpeed"),
+        help="v0 style filter (None for no filter)",
+    )
+    generate_map_cmd.add_argument(
+        "--difficulty", type=str, default="medium",
+        choices=("easy", "medium", "hard"),
+    )
+    generate_map_cmd.add_argument(
+        "--random-seed", type=int, default=42,
+    )
+    generate_map_cmd.add_argument(
+        "--output", type=str, default=None,
+        help="write the artifact JSON to this path",
+    )
+    generate_map_cmd.set_defaults(func=_cmd_generate_map)
 
     train_corridor_ranking_cmd = sub.add_parser(
         "train-corridor-ranking",
