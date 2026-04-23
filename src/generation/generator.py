@@ -63,6 +63,13 @@ _LOG = logging.getLogger(__name__)
 _ALLOWED_STYLE = {"Tech", "FullSpeed", None}
 _ALLOWED_DIFFICULTY = {"easy", "medium", "hard"}
 
+# Level-1 mutation: assembly picks deterministically from the top-K
+# tie-break-ordered candidates per interval, keyed on (random_seed,
+# interval_index). K=3 balances "meaningful variation" against
+# "quality stays near the top of the learned ranking." Bumping this
+# knob is a v0.1+ tuning exercise; for v0 it's pinned.
+_TOP_K_CANDIDATES: int = 3
+
 
 @dataclass(frozen=True)
 class GenerationInputs:
@@ -408,7 +415,11 @@ def generate_from_base(
             random_seed=inputs.random_seed,
         )
 
-    route = assemble_route(conn, inputs.base_map_id)
+    route = assemble_route(
+        conn, inputs.base_map_id,
+        random_seed=inputs.random_seed,
+        top_k_candidates=_TOP_K_CANDIDATES,
+    )
     gate = run_finishability_gate(route)
 
     artifact = _build_artifact(

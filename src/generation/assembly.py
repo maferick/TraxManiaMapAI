@@ -21,6 +21,7 @@ helpers so reviewers can diff implementations against the spec.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -75,11 +76,21 @@ class CandidateCorridor:
 @dataclass(frozen=True)
 class AssemblyInputs:
     """Pure inputs for :func:`assemble_route_from_inputs`. Keeps the
-    function signature small + testable without fake-DB plumbing."""
+    function signature small + testable without fake-DB plumbing.
+
+    ``random_seed`` + ``top_k_candidates`` drive Level-1 mutation: per
+    interval, the algorithm picks from the top-K tie-break-ordered
+    candidates instead of always the top-1. The pick is a deterministic
+    function of seed + interval index, so a given (seed, k, corpus)
+    tuple produces the same route every time. Defaults preserve
+    Phase-1 behaviour (k=1 → always rank-1).
+    """
     map_id: int
     is_linked_cp: bool
     anchors: tuple[Anchor, ...]          # Spawn → CP₁ → … → Goal
     candidates: tuple[CandidateCorridor, ...]
+    random_seed: int = 0
+    top_k_candidates: int = 1
 
 
 # ---------------------------------------------------------------------
@@ -116,6 +127,26 @@ def _tie_break_key(c: CandidateCorridor) -> tuple:
         c.path_length,
         c.corridor_id,
     )
+
+
+def _pick_within_top_k(
+    *, random_seed: int, interval_index: int, pool_size: int, top_k: int,
+) -> int:
+    """Pick an index in ``[0, min(top_k, pool_size))`` deterministically
+    from ``(random_seed, interval_index)``. Used by Level-1 mutation to
+    select among the top-K tie-break-ordered candidates per interval.
+
+    Determinism matters — two different Python processes must produce
+    the same pick for the same (seed, index, pool, k) tuple, or the
+    artifact's ``run_id`` becomes a lie. ``hash()`` is per-process
+    salted, so we use ``blake2b`` over a short deterministic string.
+    """
+    k = min(max(1, top_k), max(1, pool_size))
+    if k <= 1:
+        return 0
+    payload = f"{random_seed}:{interval_index}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, "big") % k
 
 
 def _cells_continuous(end_cell: Cell, start_cell: Cell) -> bool:
@@ -207,7 +238,13 @@ def assemble_route_from_inputs(
                 interval_index=idx,
             )
         scored_pool.sort(key=_tie_break_key)
-        top = scored_pool[0]
+        pick_index = _pick_within_top_k(
+            random_seed=inputs.random_seed,
+            interval_index=idx,
+            pool_size=len(scored_pool),
+            top_k=inputs.top_k_candidates,
+        )
+        top = scored_pool[pick_index]
         assert top.learned_corridor_score is not None  # narrowed by filter
         chosen = ChosenCorridor(
             corridor_id=top.corridor_id,
@@ -226,10 +263,17 @@ def assemble_route_from_inputs(
             index=idx, src=src, dst=dst, chosen=chosen,
         ))
 
-    # 3. Chain continuity. The scope doc allows "adjacent OR shared
-    #    anchor block" — the `_cells_continuous` helper treats equality
-    #    as a valid case (distance 0). An empty path_cells on either
-    #    side is a schema error (invalid_schema) not a chain break.
+    # 3. Chain continuity. scope-v0: "adjacent OR share an anchor
+    #    block." A multi-cell CP (common — parser emits one row per
+    #    cell of a multi-cell gate) lets corridor i end at one cell of
+    #    the anchor and corridor i+1 start at a different cell of the
+    #    same anchor; Chebyshev distance can exceed 1 in that case but
+    #    the anchor is still shared by construction (both corridors
+    #    point at the same (tag, waypoint_order)). Check shared-anchor
+    #    first — it's the scope-doc clause — then fall back to cell
+    #    adjacency for the degenerate case where the anchor identity
+    #    is absent (shouldn't happen in Linked-CP assembly but kept
+    #    as a belt-and-braces check).
     for idx in range(len(chosen_corridors) - 1):
         this_c = chosen_corridors[idx]
         next_c = chosen_corridors[idx + 1]
@@ -241,6 +285,12 @@ def assemble_route_from_inputs(
                 ),
                 interval_index=idx,
             )
+        shares_anchor = (
+            this_c.dst.tag == next_c.src.tag
+            and this_c.dst.order == next_c.src.order
+        )
+        if shares_anchor:
+            continue
         end_cell = this_c.path_cells[-1]
         start_cell = next_c.path_cells[0]
         if not _cells_continuous(end_cell, start_cell):
@@ -376,9 +426,15 @@ def assemble_route(
     map_id: int,
     *,
     classification_version: str = CLASSIFICATION_VERSION,
+    random_seed: int = 0,
+    top_k_candidates: int = 1,
 ) -> AssembledRoute | AssemblyError:
     """DB-facing wrapper. Fetches anchors + candidate corridors, then
-    delegates to :func:`assemble_route_from_inputs`."""
+    delegates to :func:`assemble_route_from_inputs`.
+
+    ``random_seed`` + ``top_k_candidates`` enable Level-1 mutation; see
+    :class:`AssemblyInputs`.
+    """
     with cursor(conn) as cur:
         cur.execute(_ANCHOR_QUERY, (map_id,))
         anchor_rows = cur.fetchall()
@@ -415,4 +471,6 @@ def assemble_route(
         is_linked_cp=linked,
         anchors=anchors,
         candidates=tuple(candidates),
+        random_seed=random_seed,
+        top_k_candidates=top_k_candidates,
     ))

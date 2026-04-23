@@ -249,9 +249,19 @@ implementations consistent across future refactors.
           dst_tag=A_{i+1}.tag, dst_order=A_{i+1}.order
         for this map_id and the current classification_version.
      b. Filter to rows with learned_corridor_score NOT NULL.
-     c. Pick the corridor with the highest learned_corridor_score.
-        Tie-break: lower path_length, then lower corridor_id.
-     d. If no rows survive (b), reject with reason
+     c. Sort survivors by (learned_corridor_score DESC, path_length
+        ASC, corridor_id ASC) — the scope-pinned tie-break.
+     d. Pick one corridor from the top K of that ordering. Which one
+        is deterministic from (random_seed, interval_index):
+           k       = min(TOP_K_CANDIDATES, len(survivors))
+           payload = f"{random_seed}:{interval_index}".encode()
+           pick    = int.from_bytes(
+                         blake2b(payload, digest_size=8).digest(),
+                         "big",
+                     ) % k
+        TOP_K_CANDIDATES is pinned at 3 for v0 (pool of 1 ⇒ rank-1
+        always; pool of 2 ⇒ rank-1 or rank-2; pool of 3+ ⇒ rank-1..3).
+     e. If no rows survive (b), reject with reason
         `missing_corridor_in_interval` + interval index.
 
 3. Validate chain continuity:
@@ -270,11 +280,20 @@ implementations consistent across future refactors.
 
 ### Determinism rules
 
-- Same map + same corridors + same model_hash → same chosen route.
-- Random seed is **not** used in assembly — only in the generator's
-  block-selection phase (upstream of assembly).
-- Tie-break is explicit (path_length ASC, corridor_id ASC) so
-  implementations don't drift.
+- Same (map, corridors, model_hash, random_seed, TOP_K_CANDIDATES)
+  tuple → same chosen route. The tuple is the full assembly-input
+  fingerprint; run_id's sha covers it via the inputs block.
+- Random seed **is** used in assembly (step 2d) for Level-1 mutation
+  — within the top-K tie-break-ordered candidates per interval. Two
+  seeds on the same corpus produce deterministically different routes
+  when any interval has ≥2 scored candidates.
+- TOP_K_CANDIDATES is pinned at 3 for v0; bumping it is a v0.1+
+  decision with its own scope-revision.
+- Tie-break within a rank is explicit (path_length ASC, corridor_id
+  ASC) so different implementations can't drift on near-ties.
+- Block-selection mutations (Level-2 strip-to-route, Level-3 corridor
+  substitution) are out of v0 scope; they ship under their own
+  scope-revision.
 
 ## Finishability semantics
 
@@ -432,8 +451,9 @@ design-doc revisions will resolve them:
 When reviewing a generation implementation PR, verify:
 
 - [ ] Output JSON includes every field this doc lists.
-- [ ] Route assembly follows the algorithm above, including
-      deterministic tie-breaks.
+- [ ] Route assembly follows the algorithm above, including the
+      seed-driven pick-within-top-K rule (step 2d) and deterministic
+      tie-breaks within each rank.
 - [ ] Finishability gate returns one of the documented
       `reject_reason` values; no free-form strings.
 - [ ] `estimated_time_ms` constants are imported from
