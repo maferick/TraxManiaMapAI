@@ -444,6 +444,118 @@ def _assess_path_stability(
     return True
 
 
+@dataclass(frozen=True)
+class _IntervalPlan:
+    """One interval the enumerator intends to explore: metadata
+    (``src_tag/src_order/dst_tag/dst_order``) plus the concrete source /
+    target cell sets for BFS. Extracted as a pure value so the interval-
+    shaping rule is unit-testable without a DB.
+    """
+    src_tag: str
+    src_order: int
+    dst_tag: str
+    dst_order: int
+    sources: frozenset[tuple[int, int, int]]
+    targets: frozenset[tuple[int, int, int]]
+
+
+def _plan_intervals(anchor_sets: list[AnchorSet]) -> list[_IntervalPlan]:
+    """Decide which intervals to enumerate based on the map's waypoint
+    shape. The enumerator walks the returned list in order.
+
+    Two shapes:
+
+    - **Plain-CP** — every non-Spawn anchor has ``waypoint_order == 0``.
+      Emits ``Spawn → <each non-Spawn anchor>``. This is Phase 1's
+      original behaviour; it's what the 514 plain-CP corpus maps were
+      scored under, and changing it would invalidate corridor-ranking
+      training data.
+
+    - **Linked-CP** — the map carries one or more ``LinkedCheckpoint``
+      anchors (distinct tag from plain ``Checkpoint``; the parser
+      assigns it when the GBX waypoint declares an explicit chain
+      order). Emits ``Spawn → LCP#1 → LCP#2 → … → LCP#N → Goal``,
+      the interval-key shape ``src.generation.assembly`` looks up
+      when assembling routes (scope-v0 §Route assembly).
+
+    Mixed shapes (both ``Checkpoint`` and ``LinkedCheckpoint`` on one
+    map) fall back to plain-CP here so Phase 1 training invariants are
+    preserved — the generator's own assembler will correctly reject
+    such maps with ``plain_cp_not_supported_v0`` downstream.
+    """
+    spawn_cells: set[tuple[int, int, int]] = set()
+    plain_cps: list[AnchorSet] = []
+    linked_cps: list[AnchorSet] = []
+    goal: AnchorSet | None = None
+    others: list[AnchorSet] = []
+    for aset in anchor_sets:
+        if aset.tag in _SPAWN_TAGS:
+            spawn_cells.update(aset.cells)
+        elif aset.tag == "Checkpoint":
+            plain_cps.append(aset)
+        elif aset.tag == "LinkedCheckpoint":
+            linked_cps.append(aset)
+        elif aset.tag == "Goal":
+            # First Goal wins; scope-v0 doesn't model multi-Goal stunt
+            # maps (twin-finish is a corpus oddity surfaced in PR E).
+            if goal is None:
+                goal = aset
+        else:
+            others.append(aset)
+
+    if not spawn_cells:
+        return []
+
+    # Linked-CP iff the map uses the dedicated LinkedCheckpoint tag
+    # exclusively (no mixed-shape maps). Goal is required — without it
+    # we can't close Spawn→Goal and the generator rejects anyway.
+    linked = (
+        bool(linked_cps)
+        and not plain_cps
+        and goal is not None
+    )
+
+    if linked:
+        # Chain ordering by waypoint_order is authoritative in Linked-CP.
+        assert goal is not None  # narrowed by `linked` predicate
+        chain: list[AnchorSet] = sorted(
+            linked_cps, key=lambda a: a.waypoint_order,
+        )
+        plans: list[_IntervalPlan] = []
+        # Spawn → CP#1
+        plans.append(_IntervalPlan(
+            src_tag="Spawn", src_order=0,
+            dst_tag=chain[0].tag, dst_order=chain[0].waypoint_order,
+            sources=frozenset(spawn_cells), targets=chain[0].cells,
+        ))
+        # CP#i → CP#i+1
+        for i in range(len(chain) - 1):
+            a, b = chain[i], chain[i + 1]
+            plans.append(_IntervalPlan(
+                src_tag=a.tag, src_order=a.waypoint_order,
+                dst_tag=b.tag, dst_order=b.waypoint_order,
+                sources=a.cells, targets=b.cells,
+            ))
+        # CP#N → Goal
+        last_cp = chain[-1]
+        plans.append(_IntervalPlan(
+            src_tag=last_cp.tag, src_order=last_cp.waypoint_order,
+            dst_tag=goal.tag, dst_order=goal.waypoint_order,
+            sources=last_cp.cells, targets=goal.cells,
+        ))
+        return plans
+
+    # Plain-CP path (preserves Phase 1 behaviour).
+    plans = []
+    for aset in plain_cps + linked_cps + ([goal] if goal is not None else []) + others:
+        plans.append(_IntervalPlan(
+            src_tag="Spawn", src_order=0,
+            dst_tag=aset.tag, dst_order=aset.waypoint_order,
+            sources=frozenset(spawn_cells), targets=aset.cells,
+        ))
+    return plans
+
+
 def enumerate_map(
     conn: Connection,
     map_id: int,
@@ -451,9 +563,12 @@ def enumerate_map(
     depth_cap: int = DEFAULT_DEPTH_CAP,
     keep_paths: bool = False,
 ) -> list[IntervalEnumeration]:
-    """Enumerate corridor candidates for every (spawn → non-spawn)
-    interval on one map. Returns an empty list if the map can't be
-    evaluated (no grid placements, no spawn, etc.)."""
+    """Enumerate corridor candidates for every interval on one map.
+
+    Interval shape is shape-aware (see :func:`_plan_intervals`):
+    plain-CP maps emit ``Spawn → <each non-Spawn anchor>``; Linked-CP
+    maps emit the Spawn→CP→…→Goal chain. Returns an empty list if the
+    map can't be evaluated (no grid placements, no spawn, etc.)."""
     grid_rows = _fetch_map_grid_blocks(conn, map_id=map_id)
     if not grid_rows:
         return []
@@ -470,14 +585,8 @@ def enumerate_map(
     if not anchor_sets:
         return []
 
-    spawn_cells: set[tuple[int, int, int]] = set()
-    non_spawn: list[AnchorSet] = []
-    for aset in anchor_sets:
-        if aset.tag in _SPAWN_TAGS:
-            spawn_cells.update(aset.cells)
-        else:
-            non_spawn.append(aset)
-    if not spawn_cells or not non_spawn:
+    plans = _plan_intervals(anchor_sets)
+    if not plans:
         return []
 
     replays = _fetch_clean_replays(conn, map_id=map_id)
@@ -493,18 +602,18 @@ def enumerate_map(
     )
 
     out: list[IntervalEnumeration] = []
-    for aset in non_spawn:
+    for plan in plans:
         iv = IntervalEnumeration(
             map_id=map_id,
-            src_tag="Spawn",
-            src_order=0,
-            dst_tag=aset.tag,
-            dst_order=aset.waypoint_order,
+            src_tag=plan.src_tag,
+            src_order=plan.src_order,
+            dst_tag=plan.dst_tag,
+            dst_order=plan.dst_order,
         )
         paths = _enumerate_simple_paths(
             combined,
-            frozenset(spawn_cells),
-            aset.cells,
+            plan.sources,
+            plan.targets,
             depth_cap=depth_cap,
         )
         iv.path_count = len(paths)
@@ -517,7 +626,7 @@ def enumerate_map(
         # to make it meaningful.
         iv.top_corridor_stable = _assess_path_stability(
             neighbors, observation_sets,
-            frozenset(spawn_cells), aset.cells,
+            plan.sources, plan.targets,
             depth_cap, _top_ranked_path(paths),
         )
         out.append(iv)
