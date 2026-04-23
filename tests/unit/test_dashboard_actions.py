@@ -85,6 +85,94 @@ class TestParamValidation:
         with pytest.raises(ValueError, match="snapshot id"):
             spec.validate_params({"snapshot": "bad; rm -rf /"})
 
+    # generate-map — required base_map_id, optional style/difficulty/seed.
+
+    def test_generate_map_requires_base_map_id(self) -> None:
+        spec = ACTIONS["generate-map"]
+        with pytest.raises(ValueError, match="base_map_id is required"):
+            spec.validate_params({})
+
+    def test_generate_map_coerces_string_base_map_id(self) -> None:
+        spec = ACTIONS["generate-map"]
+        result = spec.validate_params({"base_map_id": "1212"})
+        assert result["base_map_id"] == 1212
+        assert result["difficulty"] == "medium"   # default
+        assert result["random_seed"] == 42        # default
+        assert "style_tag_filter" not in result   # default omitted
+
+    def test_generate_map_rejects_nonnumeric_base_map_id(self) -> None:
+        spec = ACTIONS["generate-map"]
+        with pytest.raises(ValueError, match="integer"):
+            spec.validate_params({"base_map_id": "abc"})
+
+    def test_generate_map_rejects_nonpositive_base_map_id(self) -> None:
+        spec = ACTIONS["generate-map"]
+        with pytest.raises(ValueError, match=">= 1"):
+            spec.validate_params({"base_map_id": 0})
+
+    def test_generate_map_accepts_valid_style(self) -> None:
+        spec = ACTIONS["generate-map"]
+        result = spec.validate_params(
+            {"base_map_id": 1, "style_tag_filter": "Tech"},
+        )
+        assert result["style_tag_filter"] == "Tech"
+
+    def test_generate_map_rejects_unknown_style(self) -> None:
+        spec = ACTIONS["generate-map"]
+        with pytest.raises(ValueError, match="style_tag_filter"):
+            spec.validate_params(
+                {"base_map_id": 1, "style_tag_filter": "SpeedDrift"},
+            )
+
+    def test_generate_map_accepts_valid_difficulty(self) -> None:
+        spec = ACTIONS["generate-map"]
+        result = spec.validate_params(
+            {"base_map_id": 1, "difficulty": "hard"},
+        )
+        assert result["difficulty"] == "hard"
+
+    def test_generate_map_rejects_unknown_difficulty(self) -> None:
+        spec = ACTIONS["generate-map"]
+        with pytest.raises(ValueError, match="difficulty"):
+            spec.validate_params(
+                {"base_map_id": 1, "difficulty": "legendary"},
+            )
+
+    def test_generate_map_coerces_seed(self) -> None:
+        spec = ACTIONS["generate-map"]
+        result = spec.validate_params(
+            {"base_map_id": 1, "random_seed": "7"},
+        )
+        assert result["random_seed"] == 7
+
+    def test_generate_map_argv_wires_all_params(self) -> None:
+        # The CLI invocation must carry every validated param and a
+        # predictable output path. Bad argv = silently-ignored UI input.
+        spec = ACTIONS["generate-map"]
+        validated = spec.validate_params({
+            "base_map_id": 1212,
+            "style_tag_filter": "Tech",
+            "difficulty": "hard",
+            "random_seed": 7,
+        })
+        argv = spec.cli_args(validated)
+        assert argv[0] == "generate-map"
+        assert "--base-map-id" in argv and "1212" in argv
+        assert "--difficulty" in argv and "hard" in argv
+        assert "--random-seed" in argv and "7" in argv
+        assert "--style-tag-filter" in argv and "Tech" in argv
+        # --output path is under reports/generated-maps/ and embeds
+        # base map + seed so re-runs don't clobber each other.
+        out_idx = argv.index("--output") + 1
+        assert argv[out_idx].startswith("reports/generated-maps/base1212-")
+        assert argv[out_idx].endswith("-seed7.json")
+
+    def test_generate_map_argv_omits_style_when_unset(self) -> None:
+        spec = ACTIONS["generate-map"]
+        validated = spec.validate_params({"base_map_id": 1})
+        argv = spec.cli_args(validated)
+        assert "--style-tag-filter" not in argv
+
 
 # ---------------------------------------------------------------------
 # ActionWorker state machine
@@ -140,9 +228,20 @@ class TestActionWorker:
         release.set()
 
     def test_noop_action_marks_success(self) -> None:
+        # Uses a test-only ActionSpec whose cli_args returns a `_noop`
+        # sentinel. Before PR F the `generate-map` catalogue entry was
+        # this sentinel; now it spawns a real subprocess, so we exercise
+        # the noop branch explicitly instead of piggy-backing on it.
         w = ActionWorker()
-        run = w.start(ACTIONS["generate-map"], {})
-        # Wait up to 2s for the worker thread to finish.
+        spec = ActionSpec(
+            name="noop-test",
+            title="Noop test",
+            hint="worker noop branch",
+            cli_args=lambda p: ["_noop", "worker-noop-test"],
+            validate_params=lambda p: p,
+            expected_minutes=0,
+        )
+        run = w.start(spec, {})
         for _ in range(40):
             if w.current is None:
                 break
@@ -153,13 +252,27 @@ class TestActionWorker:
         assert last.id == run.id
         assert last.status == "success"
         assert last.exit_code == 0
-        # The "stub" log line is present.
-        assert any("generation stub" in ln for ln in last.log_tail)
+        assert any("worker-noop-test" in ln for ln in last.log_tail)
 
 
 # ---------------------------------------------------------------------
 # Flask routes
 # ---------------------------------------------------------------------
+
+def _stubbed_worker() -> ActionWorker:
+    """ActionWorker whose default runner succeeds immediately without
+    spawning a subprocess. Lets us exercise Flask routes for real-argv
+    actions (generate-map, ingest-maps-random, train-ai, …) without
+    pulling the CLI / DB into unit tests."""
+    w = ActionWorker()
+
+    def _stub(argv, run):
+        run.append_log(f"[test-stub] {' '.join(argv)}")
+        w._finish(run, 0)   # noqa: SLF001 — test-only access
+
+    w._default_runner = _stub   # noqa: SLF001 — test-only override
+    return w
+
 
 def _make_client(worker=None):
     # State fetcher stubbed out — action endpoints don't need DB.
@@ -193,16 +306,33 @@ class TestActionRoutes:
         assert r.status_code == 400
         assert r.get_json()["error"] == "invalid params"
 
-    def test_post_noop_action_returns_202(self) -> None:
-        _, client = _make_client()
-        r = client.post("/api/actions/generate-map", json={})
+    def test_post_generate_map_returns_202(self) -> None:
+        # generate-map now spawns a real subprocess. To avoid that in a
+        # unit test we inject a worker whose runner short-circuits to
+        # success without touching subprocess.Popen / the CLI / the DB.
+        w = _stubbed_worker()
+        _, client = _make_client(worker=w)
+        r = client.post(
+            "/api/actions/generate-map",
+            json={"base_map_id": 1212},
+        )
         assert r.status_code == 202
         started = r.get_json()["started"]
         assert started["action"] == "generate-map"
         assert "id" in started
 
+    def test_post_generate_map_requires_base_map_id(self) -> None:
+        _, client = _make_client()
+        r = client.post("/api/actions/generate-map", json={})
+        assert r.status_code == 400
+        assert r.get_json()["error"] == "invalid params"
+
     def test_second_post_while_busy_returns_409(self) -> None:
-        # Use a stub spec whose runner blocks until released.
+        # Use a stub spec whose runner blocks until released. We reuse
+        # the generate-map catalogue name so the route accepts the POST,
+        # but the first "run" is driven by a pass-through validator so
+        # the spec's real validator (which now requires base_map_id)
+        # doesn't interfere with the blocking setup.
         w = ActionWorker()
         ready = threading.Event()
         release = threading.Event()
@@ -216,17 +346,20 @@ class TestActionRoutes:
             run.completed_at = datetime.now(tz=timezone.utc)
 
         blocking_spec = ActionSpec(
-            name="generate-map",  # reuse catalogue name so the route accepts it
+            name="generate-map",  # matches catalogue key so the route accepts it
             title=ACTIONS["generate-map"].title,
             hint=ACTIONS["generate-map"].hint,
             cli_args=lambda p: ["_noop", "blocking"],
             validate_params=lambda p: p,
             expected_minutes=0,
         )
-        first = w.start(blocking_spec, {}, runner=_blocking)
+        w.start(blocking_spec, {}, runner=_blocking)
         assert ready.wait(timeout=2.0)
         _, client = _make_client(worker=w)
-        r = client.post("/api/actions/generate-map", json={})
+        r = client.post(
+            "/api/actions/generate-map",
+            json={"base_map_id": 1212},
+        )
         assert r.status_code == 409
         assert r.get_json()["error"] == "busy"
         release.set()
@@ -237,9 +370,8 @@ class TestActionRoutes:
         assert r.status_code == 404
 
     def test_status_route_reports_last_run(self) -> None:
-        w = ActionWorker()
-        w.start(ACTIONS["generate-map"], {})
-        # Spin until done
+        w = _stubbed_worker()
+        w.start(ACTIONS["generate-map"], {"base_map_id": 1212})
         for _ in range(40):
             if w.current is None:
                 break

@@ -87,7 +87,7 @@
       '<span class="running-title">' + escapeHtml(title) + '</span>'
     );
     let body = {};
-    // Dead-simple parameter prompt for the one action that needs input.
+    // Dead-simple parameter prompts for the actions that need input.
     // Real params dialog = future work; this keeps v0 viable.
     if (name === 'ingest-maps-random') {
       const count = window.prompt(
@@ -97,6 +97,16 @@
         return;
       }
       body.count = parseInt(count, 10);
+    } else if (name === 'generate-map') {
+      const baseMapId = window.prompt(
+        'Base map_id to generate from?\n' +
+        '(v0 only succeeds on Linked-CP maps — see scope-v0)',
+        '1212');
+      if (baseMapId === null) {
+        setStatus('<span class="idle-label">cancelled</span>');
+        return;
+      }
+      body.base_map_id = parseInt(baseMapId, 10);
     }
     let resp;
     try {
