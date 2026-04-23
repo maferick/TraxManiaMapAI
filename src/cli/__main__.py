@@ -333,6 +333,53 @@ def _cmd_generate_map(args: argparse.Namespace) -> int:
     return 0 if fin["route_verified"] else 1
 
 
+def _cmd_emit_gbx(args: argparse.Namespace) -> int:
+    from src.generation.gbx_writer import (
+        DEFAULT_GBX_OUTPUT_DIR,
+        GbxEmitError,
+        emit_gbx_from_artifact_file,
+    )
+    config = load_config(args.config)
+    gbx_cfg = (config.get("parsers") or {}).get("gbx") or {}
+    executable = Path(
+        args.parser_executable
+        or gbx_cfg.get("executable")
+        or "./parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper"
+    )
+    timeout = float(gbx_cfg.get("timeout_seconds", 30.0))
+    parser_version = gbx_cfg.get("parser_version", "0.1.0")
+    parser = SubprocessParser(
+        executable=executable,
+        parser_version=parser_version,
+        timeout_seconds=timeout,
+    )
+    output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_GBX_OUTPUT_DIR
+    conn = open_connection(config)
+    try:
+        try:
+            result = emit_gbx_from_artifact_file(
+                conn,
+                artifact_path=Path(args.artifact),
+                parser=parser,
+                output_dir=output_dir,
+            )
+        except GbxEmitError as exc:
+            _LOG.error("emit-gbx failed: %s", exc)
+            return 1
+    finally:
+        conn.close()
+    _LOG.info(
+        "emit-gbx: base_path=%s output_path=%s new_map_uid=%s "
+        "block_count=%d baked_block_count=%d duration_ms=%d",
+        result.base_path, result.output_path, result.new_map_uid,
+        result.block_count, result.baked_block_count,
+        result.subprocess_duration_ms,
+    )
+    # Also print the final path so shell chains can capture it.
+    print(str(result.output_path))
+    return 0
+
+
 def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
     from src.corridor.ranking import TrainingReport, train_and_evaluate
     config = load_config(args.config)
@@ -1891,6 +1938,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="write the artifact JSON to this path",
     )
     generate_map_cmd.set_defaults(func=_cmd_generate_map)
+
+    emit_gbx_cmd = sub.add_parser(
+        "emit-gbx",
+        help="Phase 2 PR H — convert a generation-v0 JSON artifact to a "
+             ".Map.Gbx file loadable in Trackmania. v0 copies the base "
+             "map's original GBX and rewrites its identity fields; "
+             "Level-2 block mutation ships separately.",
+    )
+    emit_gbx_cmd.add_argument(
+        "--artifact", type=str, required=True,
+        help="path to a generation-v0 JSON artifact",
+    )
+    emit_gbx_cmd.add_argument(
+        "--output-dir", type=str, default=None,
+        help="directory to write the .Map.Gbx into "
+             "(default: reports/generated-gbx/)",
+    )
+    emit_gbx_cmd.add_argument(
+        "--parser-executable", type=str, default=None,
+        help="override path to the GBX wrapper binary "
+             "(default from config.parsers.gbx.executable)",
+    )
+    emit_gbx_cmd.set_defaults(func=_cmd_emit_gbx)
 
     train_corridor_ranking_cmd = sub.add_parser(
         "train-corridor-ranking",

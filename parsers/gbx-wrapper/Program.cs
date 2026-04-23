@@ -1,8 +1,11 @@
 // Entry point for the GBX wrapper subprocess.
 //
 // Contract (must match src/parsers/README.md v1):
-//   argv:           "map" | "replay"
-//   stdin:          single line — absolute path to the artifact file
+//   argv:           "map" | "replay" | "diagnose-map" | "diagnose-replay"
+//                   | "emit-map"
+//   stdin:          single line —
+//                     • parse / diagnose commands: absolute path to artifact
+//                     • "emit-map":                JSON object, see MapEmitter
 //   stdout:         a single JSON object (success or structured error)
 //   exit code:      0 for any structured outcome (including reported errors)
 //                   non-zero only for process-level failure before reporting
@@ -28,9 +31,11 @@ public static class Program
     {
         if (args.Length != 1 ||
             (args[0] != "map" && args[0] != "replay"
-             && args[0] != "diagnose-map" && args[0] != "diagnose-replay"))
+             && args[0] != "diagnose-map" && args[0] != "diagnose-replay"
+             && args[0] != "emit-map"))
         {
-            Console.Error.WriteLine("usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay>");
+            Console.Error.WriteLine(
+                "usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay|emit-map>");
             return 2;
         }
 
@@ -41,10 +46,10 @@ public static class Program
         // the wrapper protocol shape stable regardless of artifact kind.
         Gbx.ZLib = new GBX.NET.ZLib.ZLib();
 
-        string? path;
+        string? stdinLine;
         try
         {
-            path = Console.In.ReadLine()?.Trim();
+            stdinLine = Console.In.ReadLine()?.Trim();
         }
         catch (IOException ex)
         {
@@ -52,14 +57,17 @@ public static class Program
             return 0;
         }
 
-        if (string.IsNullOrWhiteSpace(path))
+        if (string.IsNullOrWhiteSpace(stdinLine))
         {
-            EmitError(ErrorCodes.IoError, "no path on stdin");
+            EmitError(ErrorCodes.IoError, "no input on stdin");
             return 0;
         }
-        if (!File.Exists(path))
+
+        // emit-map takes JSON on stdin; every other command takes a
+        // single path and must validate existence before dispatching.
+        if (args[0] != "emit-map" && !File.Exists(stdinLine))
         {
-            EmitError(ErrorCodes.IoError, $"file not found: {path}");
+            EmitError(ErrorCodes.IoError, $"file not found: {stdinLine}");
             return 0;
         }
 
@@ -67,10 +75,11 @@ public static class Program
         {
             object payload = args[0] switch
             {
-                "map" => MapParser.Parse(path),
-                "replay" => ReplayParser.Parse(path),
-                "diagnose-map" => Diagnose.Inspect(path),
-                "diagnose-replay" => Diagnose.InspectReplay(path),
+                "map" => MapParser.Parse(stdinLine),
+                "replay" => ReplayParser.Parse(stdinLine),
+                "diagnose-map" => Diagnose.Inspect(stdinLine),
+                "diagnose-replay" => Diagnose.InspectReplay(stdinLine),
+                "emit-map" => MapEmitter.EmitFromStdinJson(stdinLine),
                 _ => throw new InvalidOperationException("unreachable"),
             };
             EmitSuccess(payload);
