@@ -26,6 +26,7 @@ from src.generation.finishability import (
     AI_CONFIDENCE_FLOOR,
     run_finishability_gate,
 )
+from src.generation.generator import GenerationInputs, generate_from_base
 from src.generation.schema import load_schema, validate_generated_map
 from src.generation.types import (
     Anchor,
@@ -47,10 +48,12 @@ __all__ = [
     "ChosenCorridor",
     "FinishabilityResult",
     "GATE_VERSION",
+    "GenerationInputs",
     "IntervalAssembly",
     "RejectReason",
     "assemble_route",
     "assemble_route_from_inputs",
+    "generate_from_base",
     "load_schema",
     "run_finishability_gate",
     "validate_generated_map",
