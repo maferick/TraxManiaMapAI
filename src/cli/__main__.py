@@ -301,6 +301,9 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
 def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
     from src.corridor.ranking import TrainingReport, train_and_evaluate
     config = load_config(args.config)
+    v2_outlier_sigma: float | None = (
+        args.v2_outlier_sigma if args.v2_outlier_sigma > 0 else None
+    )
     conn = open_connection(config)
     try:
         report = train_and_evaluate(
@@ -308,6 +311,10 @@ def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
             alpha=args.alpha,
             test_frac=args.test_frac,
             random_seed=args.random_seed,
+            v2_aggregation_method=args.v2_aggregation,
+            v2_trimmed_q=args.v2_trimmed_q,
+            v2_outlier_sigma=v2_outlier_sigma,
+            snapshot_id=args.snapshot,
         )
     finally:
         conn.close()
@@ -344,22 +351,39 @@ def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
     _log_scheme(report.inverse_rank)
     if report.time_envelope is not None:
         _log_scheme(report.time_envelope)
-        # Side-by-side delta line so the "did the better label move
-        # the signal?" question is answered in one glance.
-        ir = report.inverse_rank
-        te = report.time_envelope
+    if report.time_envelope_v2 is not None:
+        _log_scheme(report.time_envelope_v2)
+    if report.time_envelope_v2_weighted is not None:
+        _log_scheme(report.time_envelope_v2_weighted)
+
+    # Side-by-side deltas tracing the A1→A4 ladder, so the output at
+    # a glance shows whether each refinement moved the signal.
+    def _delta_line(
+        baseline_name: str, scheme_name: str,
+        baseline: TrainingReport | None, scheme: TrainingReport | None,
+    ) -> None:
+        if baseline is None or scheme is None:
+            return
         _LOG.info(
-            "delta (time_envelope - inverse_rank): "
-            "test_rank_corr=%+.4f  AUC_learned=%s",
-            te.test_rank_corr - ir.test_rank_corr,
-            (f"{(te.auc_learned - ir.auc_learned):+.4f}"
-             if (te.auc_learned is not None and ir.auc_learned is not None) else "n/a"),
+            "delta (%s − %s): test_rank_corr=%+.4f  AUC=%s",
+            scheme_name, baseline_name,
+            scheme.test_rank_corr - baseline.test_rank_corr,
+            (f"{(scheme.auc_learned - baseline.auc_learned):+.4f}"
+             if (scheme.auc_learned is not None and baseline.auc_learned is not None)
+             else "n/a"),
         )
-    else:
-        _LOG.warning(
-            "time_envelope scheme skipped — no maps had mean inter-CP "
-            "times (need clean replays with checkpoint_times_ms sidecars)",
-        )
+    _delta_line(
+        "inverse_rank", "time_envelope",
+        report.inverse_rank, report.time_envelope,
+    )
+    _delta_line(
+        "time_envelope", "time_envelope_v2",
+        report.time_envelope, report.time_envelope_v2,
+    )
+    _delta_line(
+        "time_envelope_v2", "time_envelope_v2_weighted",
+        report.time_envelope_v2, report.time_envelope_v2_weighted,
+    )
 
     if args.output:
         report.write_json(Path(args.output))
@@ -1725,6 +1749,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="write the training report (JSON) to this path")
     train_corridor_ranking_cmd.add_argument("--verbose", action="store_true",
         help="log learned per-feature weights")
+    train_corridor_ranking_cmd.add_argument(
+        "--snapshot", type=str, default=None,
+        help="restrict training to corridors from one ingestion snapshot "
+             "(default: union across all snapshots)",
+    )
+    train_corridor_ranking_cmd.add_argument(
+        "--v2-aggregation", type=str, default="trimmed_mean",
+        choices=("mean", "median", "trimmed_mean"),
+        help="v2 time-envelope aggregation method (default trimmed_mean)",
+    )
+    train_corridor_ranking_cmd.add_argument(
+        "--v2-trimmed-q", type=float, default=0.1,
+        help="trimmed_mean quantile for v2 (default 0.1)",
+    )
+    train_corridor_ranking_cmd.add_argument(
+        "--v2-outlier-sigma", type=float, default=3.0,
+        help="v2 outlier-rejection sigma; 0 or negative disables",
+    )
     train_corridor_ranking_cmd.set_defaults(func=_cmd_train_corridor_ranking)
 
     diagnose_corridor_ranking_cmd = sub.add_parser(
