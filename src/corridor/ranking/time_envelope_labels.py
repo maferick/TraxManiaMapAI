@@ -89,23 +89,43 @@ def plausibility(
     return math.exp(-rel_err)
 
 
-def _load_map_mean_interval_ms(conn: Connection) -> dict[int, float]:
+def _load_map_mean_interval_ms(
+    conn: Connection, *, snapshot_id: str | None = None,
+) -> dict[int, float]:
     """Per-map mean inter-checkpoint elapsed time, aggregated across
     all clean replays on that map. Map ids with no qualifying replays
     are absent from the result — callers must handle missing keys.
+
+    ``snapshot_id`` (optional) restricts to replays whose parent map
+    lives in the given ingestion snapshot — used for A/B comparison
+    between snapshot cohorts.
     """
     # Pull breadcrumb paths for all clean replays across all maps that
     # have corridors. One shot, then process sidecar files in Python.
     with cursor(conn) as cur:
-        cur.execute(
-            """
-            SELECT r.map_id, r.breadcrumbs_path
-            FROM replays r
-            WHERE r.clean_status IN ('clean','usable_with_warnings')
-              AND r.breadcrumbs_path IS NOT NULL
-              AND EXISTS (SELECT 1 FROM route_corridors rc WHERE rc.map_id = r.map_id)
-            """
-        )
+        if snapshot_id is None:
+            cur.execute(
+                """
+                SELECT r.map_id, r.breadcrumbs_path
+                FROM replays r
+                WHERE r.clean_status IN ('clean','usable_with_warnings')
+                  AND r.breadcrumbs_path IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM route_corridors rc WHERE rc.map_id = r.map_id)
+                """
+            )
+        else:
+            cur.execute(
+                """
+                SELECT r.map_id, r.breadcrumbs_path
+                FROM replays r
+                JOIN maps m ON m.id = r.map_id
+                WHERE r.clean_status IN ('clean','usable_with_warnings')
+                  AND r.breadcrumbs_path IS NOT NULL
+                  AND m.ingestion_snapshot = %s
+                  AND EXISTS (SELECT 1 FROM route_corridors rc WHERE rc.map_id = r.map_id)
+                """,
+                (snapshot_id,),
+            )
         rows = cur.fetchall()
 
     by_map: dict[int, list[float]] = {}

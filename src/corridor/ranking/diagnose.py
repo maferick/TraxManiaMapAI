@@ -77,6 +77,8 @@ class DiagnosticReport:
     v2_aggregation_method: str | None = None
     v2_map_count: int = 0
     v2_label_quality_summary: dict[str, float] | None = None
+    # Snapshot filter applied to the diagnostic, if any.
+    snapshot_id: str | None = None
 
 
 def _utcnow() -> datetime:
@@ -154,6 +156,7 @@ def run_diagnostics(
     v2_aggregation_method: str = "trimmed_mean",
     v2_trimmed_q: float = 0.1,
     v2_outlier_sigma: float | None = 3.0,
+    snapshot_id: str | None = None,
 ) -> DiagnosticReport:
     """End-to-end: materialize features + labels, run the three
     diagnostics per label scheme (inverse_rank, time_envelope,
@@ -161,26 +164,38 @@ def run_diagnostics(
 
     v2 parameters control the label refinement pass (see
     docs/learning/time-envelope-label-v2.md). Defaults match the
-    A2 design note."""
+    A2 design note.
+
+    ``snapshot_id`` (optional) restricts the corridor + label inputs
+    to a single ingestion snapshot, so the diagnostic compares
+    snapshot cohorts cleanly."""
     import statistics as _stats
     rows = load_corridor_rows(
-        conn, classification_version=classification_version,
+        conn,
+        classification_version=classification_version,
+        snapshot_id=snapshot_id,
     )
     if not rows:
-        raise RuntimeError("no corridor rows — run build-route-corridors first")
+        raise RuntimeError(
+            "no corridor rows — "
+            + (f"no corridors for snapshot={snapshot_id!r}. "
+               if snapshot_id else "")
+            + "run build-route-corridors first"
+        )
     vectors, X = build_feature_matrix(rows)
 
     pos_ids = _fetch_cohort_map_ids(conn, ("tech-strong-proxy",))
     neg_ids = _fetch_cohort_map_ids(conn, ("tech-mediocre-proxy",))
 
     # v1 time-envelope inputs.
-    mean_intervals = _load_map_mean_interval_ms(conn)
+    mean_intervals = _load_map_mean_interval_ms(conn, snapshot_id=snapshot_id)
     # v2 time-envelope inputs — refined aggregation + variance/quality.
     v2_stats = load_map_interval_stats(
         conn,
         method=v2_aggregation_method,    # type: ignore[arg-type]
         trimmed_q=v2_trimmed_q,
         outlier_sigma=v2_outlier_sigma,
+        snapshot_id=snapshot_id,
     )
     v2_labels, v2_quality = synthesize_time_envelope_v2_labels(rows, v2_stats)
 
@@ -243,6 +258,7 @@ def run_diagnostics(
         v2_aggregation_method=v2_aggregation_method,
         v2_map_count=len(v2_stats),
         v2_label_quality_summary=quality_summary,
+        snapshot_id=snapshot_id,
     )
 
 
@@ -259,6 +275,8 @@ def _fmt_float(v: float | None, places: int = 4) -> str:
 def _write_header(buf: io.StringIO, report: DiagnosticReport) -> None:
     buf.write("# Corridor Ranking — Score Spread Diagnostic\n\n")
     buf.write(f"- **Generated at**: `{report.started_at.isoformat()}`\n")
+    if report.snapshot_id is not None:
+        buf.write(f"- **Snapshot filter**: `{report.snapshot_id}`\n")
     buf.write(f"- **Total corridors**: {report.total_corridors}\n")
     buf.write(
         f"- **Maps with mean inter-CP time**: {report.maps_with_mean_interval}\n"
