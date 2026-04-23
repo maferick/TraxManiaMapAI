@@ -467,6 +467,40 @@ def _cmd_diagnose_corridor_diversity(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_compare_snapshots(args: argparse.Namespace) -> int:
+    from src.learning.compare_snapshots import build_comparison, render_markdown
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        comparison = build_comparison(
+            conn,
+            snapshot_a=args.snapshot_a,
+            snapshot_b=args.snapshot_b,
+            production_alpha=args.production_alpha,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "compare-snapshots: A=%s (corridors=%d) B=%s (corridors=%d)",
+        comparison.a.snapshot_id, comparison.a.total_corridors,
+        comparison.b.snapshot_id, comparison.b.total_corridors,
+    )
+    # Surface the top-line diversity delta for at-a-glance scanning.
+    a_d = comparison.a.diversity_delta_median
+    b_d = comparison.b.diversity_delta_median
+    if a_d is not None and b_d is not None:
+        _LOG.info(
+            "  diversity delta (learned − heuristic) median: A=%+.4f B=%+.4f (Δ=%+.4f)",
+            a_d, b_d, b_d - a_d,
+        )
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(render_markdown(comparison), encoding="utf-8")
+        _LOG.info("wrote comparison report: %s", args.output)
+    return 0
+
+
 def _cmd_report_replay_coverage(args: argparse.Namespace) -> int:
     from src.coverage.replay_value import (
         CohortThresholdConfig,
@@ -1774,6 +1808,29 @@ def _build_parser() -> argparse.ArgumentParser:
     diagnose_corridor_diversity_cmd.set_defaults(
         func=_cmd_diagnose_corridor_diversity,
     )
+
+    compare_snapshots_cmd = sub.add_parser(
+        "compare-snapshots",
+        help="A/B comparison: run ranking + diversity diagnostics on "
+             "two snapshots, emit one side-by-side markdown.",
+    )
+    compare_snapshots_cmd.add_argument(
+        "--snapshot-a", type=str, required=True,
+        help="ingestion_snapshot id for the A side (baseline)",
+    )
+    compare_snapshots_cmd.add_argument(
+        "--snapshot-b", type=str, required=True,
+        help="ingestion_snapshot id for the B side (new cohort)",
+    )
+    compare_snapshots_cmd.add_argument(
+        "--production-alpha", type=float, default=1.0,
+        help="alpha at which to report per-scheme metrics (default 1.0)",
+    )
+    compare_snapshots_cmd.add_argument(
+        "--output", type=str, default=None,
+        help="write the comparison report (markdown) to this path",
+    )
+    compare_snapshots_cmd.set_defaults(func=_cmd_compare_snapshots)
 
     score_corridors_learned_cmd = sub.add_parser(
         "score-corridors-learned",
