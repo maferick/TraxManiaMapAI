@@ -45,17 +45,41 @@ class SubprocessParser(ParserClient):
         self._timeout_seconds = timeout_seconds
 
     def parse_map(self, artifact_path: Path) -> ParseResult:
-        return self._invoke("map", artifact_path)
+        return self._invoke("map", f"{artifact_path}\n")
 
     def parse_replay(self, artifact_path: Path) -> ParseResult:
-        return self._invoke("replay", artifact_path)
+        return self._invoke("replay", f"{artifact_path}\n")
 
-    def _invoke(self, kind: str, artifact_path: Path) -> ParseResult:
+    def emit_map(
+        self,
+        *,
+        base_path: Path,
+        output_path: Path,
+        map_uid: str,
+        map_name: str,
+    ) -> ParseResult:
+        """Invoke the wrapper's ``emit-map`` command.
+
+        PR H / copy-from-base: loads ``base_path``'s .Map.Gbx, rewrites
+        MapUid + MapName, saves to ``output_path``. Returns a
+        :class:`ParseResult` shaped the same as the parse commands so
+        callers can treat the subprocess contract uniformly — ``output``
+        dict carries ``output_path`` + ``new_map_uid`` + block counts.
+        """
+        payload = json.dumps({
+            "base_path": str(base_path),
+            "output_path": str(output_path),
+            "map_uid": map_uid,
+            "map_name": map_name,
+        })
+        return self._invoke("emit-map", payload + "\n")
+
+    def _invoke(self, kind: str, stdin: str) -> ParseResult:
         start = time.monotonic()
         try:
             proc = subprocess.run(
                 [str(self._executable), kind],
-                input=f"{artifact_path}\n",
+                input=stdin,
                 capture_output=True,
                 text=True,
                 timeout=self._timeout_seconds,

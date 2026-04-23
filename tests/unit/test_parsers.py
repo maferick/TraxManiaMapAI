@@ -185,6 +185,71 @@ class TestSubprocessParser:
                 executable=tmp_path / "x", parser_version="1.0.0", timeout_seconds=0.0
             )
 
+    def test_emit_map_payload_round_trips(self, tmp_path: Path) -> None:
+        # emit-map returns the same ParseResult shape as parse-side
+        # commands. Verify a success envelope round-trips through the
+        # Python wrapper.
+        wrapper = _write_fake_wrapper(
+            tmp_path / "emit_wrap.sh",
+            r"""
+            read line
+            cat <<'EOF'
+            {"status":"success","parser_version":"1.0.0","output":{
+              "base_path":"/b","output_path":"/o","new_map_uid":"UUU",
+              "block_count":42,"baked_block_count":13
+            }}
+            EOF
+            """,
+        )
+        parser = SubprocessParser(
+            executable=wrapper, parser_version="1.0.0", timeout_seconds=5.0,
+        )
+        r = parser.emit_map(
+            base_path=Path("/some/base.Map.Gbx"),
+            output_path=Path("/tmp/out.Map.Gbx"),
+            map_uid="UUU",
+            map_name="Test",
+        )
+        assert r.status is ParseStatus.SUCCESS
+        assert r.output["block_count"] == 42
+        assert r.output["new_map_uid"] == "UUU"
+
+    def test_emit_map_sends_json_payload(self, tmp_path: Path) -> None:
+        # Whitebox: emit_map must produce stdin = JSON line, not a
+        # path. The parse-side commands send a bare path; any
+        # confusion breaks the wrapper protocol silently.
+        import json as _json
+        captured_stdin = tmp_path / "stdin-capture"
+        wrapper = _write_fake_wrapper(
+            tmp_path / "capture.sh",
+            rf"""
+            cat > "{captured_stdin}"
+            cat <<'EOF'
+            {{"status":"success","parser_version":"1.0.0","output":{{
+              "base_path":"/b","output_path":"/o","new_map_uid":"U",
+              "block_count":0,"baked_block_count":0
+            }}}}
+            EOF
+            """,
+        )
+        parser = SubprocessParser(
+            executable=wrapper, parser_version="1.0.0", timeout_seconds=5.0,
+        )
+        parser.emit_map(
+            base_path=Path("/in.Map.Gbx"),
+            output_path=Path("/out.Map.Gbx"),
+            map_uid="DEADBEEF",
+            map_name="title bar",
+        )
+        stdin_text = captured_stdin.read_text(encoding="utf-8").strip()
+        payload = _json.loads(stdin_text)
+        assert payload == {
+            "base_path": "/in.Map.Gbx",
+            "output_path": "/out.Map.Gbx",
+            "map_uid": "DEADBEEF",
+            "map_name": "title bar",
+        }
+
     def test_timeout(self, tmp_path: Path) -> None:
         wrapper = _write_fake_wrapper(
             tmp_path / "wrap.sh",
