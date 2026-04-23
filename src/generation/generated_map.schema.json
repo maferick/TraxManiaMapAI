@@ -138,7 +138,7 @@
       "properties": {
         "waypoint_index": { "type": "integer", "minimum": 0 },
         "waypoint_order": { "type": "integer", "minimum": 0 },
-        "tag":            { "type": "string", "enum": ["Spawn", "Checkpoint", "Goal"] },
+        "tag":            { "type": "string", "enum": ["Spawn", "Checkpoint", "LinkedCheckpoint", "Goal"] },
         "x":              { "type": "integer" },
         "y":              { "type": "integer" },
         "z":              { "type": "integer" }
@@ -154,9 +154,9 @@
       "additionalProperties": false,
       "properties": {
         "index":                 { "type": "integer", "minimum": 0 },
-        "src_tag":               { "type": "string", "enum": ["Spawn", "Checkpoint"] },
+        "src_tag":               { "type": "string", "enum": ["Spawn", "Checkpoint", "LinkedCheckpoint"] },
         "src_order":             { "type": "integer", "minimum": 0 },
-        "dst_tag":               { "type": "string", "enum": ["Checkpoint", "Goal"] },
+        "dst_tag":               { "type": "string", "enum": ["Checkpoint", "LinkedCheckpoint", "Goal"] },
         "dst_order":             { "type": "integer", "minimum": 0 },
         "chosen_corridor_id":    { "type": "integer", "minimum": 0 },
         "chosen_corridor_score": { "type": "number", "minimum": 0, "maximum": 1 },

@@ -322,3 +322,81 @@ class TestAssemblyHappyPath:
         ))
         # Shared anchor → distance 0 → continuous.
         assert isinstance(result, AssembledRoute)
+
+
+# ---------------------------------------------------------------------
+# _detect_and_order_anchors — LinkedCheckpoint tag + multi-cell dedupe
+# ---------------------------------------------------------------------
+
+class TestDetectAndOrderAnchors:
+    def test_linked_checkpoint_tag_triggers_linked(self) -> None:
+        from src.generation.assembly import _detect_and_order_anchors
+        rows = [
+            (0, 0, "Spawn",            0, 0, 0),
+            (1, 1, "LinkedCheckpoint", 1, 0, 1),
+            (2, 0, "Goal",             2, 0, 2),
+        ]
+        linked, anchors = _detect_and_order_anchors(rows)
+        assert linked is True
+        assert [(a.tag, a.order) for a in anchors] == [
+            ("Spawn", 0), ("LinkedCheckpoint", 1), ("Goal", 0),
+        ]
+
+    def test_plain_checkpoint_is_never_linked(self) -> None:
+        # waypoint_order >= 1 on a plain ``Checkpoint`` row (parse
+        # oddity) must NOT trigger Linked-CP — the tag is the
+        # discriminator, not the order.
+        from src.generation.assembly import _detect_and_order_anchors
+        rows = [
+            (0, 0, "Spawn",      0, 0, 0),
+            (1, 1, "Checkpoint", 1, 0, 1),
+            (2, 2, "Checkpoint", 2, 0, 2),
+            (3, 0, "Goal",       3, 0, 3),
+        ]
+        linked, _anchors = _detect_and_order_anchors(rows)
+        assert linked is False
+
+    def test_mixed_tag_falls_back_to_plain(self) -> None:
+        from src.generation.assembly import _detect_and_order_anchors
+        rows = [
+            (0, 0, "Spawn",            0, 0, 0),
+            (1, 0, "Checkpoint",       1, 0, 1),
+            (2, 1, "LinkedCheckpoint", 2, 0, 2),
+            (3, 0, "Goal",             3, 0, 3),
+        ]
+        linked, _anchors = _detect_and_order_anchors(rows)
+        assert linked is False
+
+    def test_multi_cell_linked_cp_deduped(self) -> None:
+        # Real-corpus map 1212 shape: each LinkedCheckpoint spans 2
+        # cells, one DB row per cell, all sharing (tag, waypoint_order).
+        # Before dedup, the chain would contain (LCP,1),(LCP,1) and the
+        # assembler would look for a self-interval that doesn't exist.
+        from src.generation.assembly import _detect_and_order_anchors
+        rows = [
+            (0, 0, "Spawn",            0, 0, 0),
+            (1, 1, "LinkedCheckpoint", 1, 0, 1),   # order=1, cell A
+            (2, 1, "LinkedCheckpoint", 2, 0, 1),   # order=1, cell B (same logical CP)
+            (3, 2, "LinkedCheckpoint", 3, 0, 2),   # order=2, cell A
+            (4, 2, "LinkedCheckpoint", 4, 0, 2),   # order=2, cell B
+            (5, 0, "Goal",             5, 0, 3),
+        ]
+        linked, anchors = _detect_and_order_anchors(rows)
+        assert linked is True
+        # 4 logical anchors (Spawn + 2 LCPs + Goal), not 6.
+        assert [(a.tag, a.order) for a in anchors] == [
+            ("Spawn", 0),
+            ("LinkedCheckpoint", 1),
+            ("LinkedCheckpoint", 2),
+            ("Goal", 0),
+        ]
+
+    def test_goal_missing_stays_plain(self) -> None:
+        # No Goal row → can't close Spawn→Goal → not linked.
+        from src.generation.assembly import _detect_and_order_anchors
+        rows = [
+            (0, 0, "Spawn",            0, 0, 0),
+            (1, 1, "LinkedCheckpoint", 1, 0, 1),
+        ]
+        linked, _anchors = _detect_and_order_anchors(rows)
+        assert linked is False

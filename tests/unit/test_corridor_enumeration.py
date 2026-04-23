@@ -19,8 +19,10 @@ from src.corridor.traversability.enumeration import (
     _compute_deco_adjacent_contamination,
     _enumerate_simple_paths,
     _evaluate_corridor_sanity,
+    _plan_intervals,
     _top_ranked_path,
 )
+from src.corridor.traversability.reachability import AnchorSet
 
 
 class TestEnumerateSimplePaths:
@@ -273,3 +275,103 @@ class TestIntervalEnumerationSanityFlags:
             top_corridor_stable=False,
         )
         assert not iv.passes_sanity_4_stable
+
+
+# ---------------------------------------------------------------------
+# _plan_intervals — interval-shape rule (plain-CP vs Linked-CP)
+# ---------------------------------------------------------------------
+
+class TestPlanIntervals:
+    def _aset(self, tag: str, order: int, *cells: tuple[int, int, int]) -> AnchorSet:
+        return AnchorSet(tag=tag, waypoint_order=order, cells=frozenset(cells))
+
+    def test_plain_cp_emits_spawn_to_each(self) -> None:
+        # Two plain CPs (order=0) + Goal. Phase-1 shape: Spawn → each.
+        plans = _plan_intervals([
+            self._aset("Spawn",      0, (0, 0, 0)),
+            self._aset("Checkpoint", 0, (1, 0, 0)),
+            self._aset("Checkpoint", 0, (2, 0, 0)),
+            self._aset("Goal",       0, (3, 0, 0)),
+        ])
+        assert len(plans) == 3
+        for p in plans:
+            assert (p.src_tag, p.src_order) == ("Spawn", 0)
+            assert p.sources == frozenset({(0, 0, 0)})
+        dsts = {(p.dst_tag, p.dst_order) for p in plans}
+        assert dsts == {("Checkpoint", 0), ("Goal", 0)}
+
+    def test_linked_cp_emits_chain(self) -> None:
+        # Spawn + 3 LinkedCheckpoints + Goal → 4 chain intervals.
+        plans = _plan_intervals([
+            self._aset("Spawn",            0, (0, 0, 0)),
+            self._aset("LinkedCheckpoint", 2, (0, 0, 2)),
+            self._aset("LinkedCheckpoint", 1, (0, 0, 1)),
+            self._aset("LinkedCheckpoint", 3, (0, 0, 3)),
+            self._aset("Goal",             0, (0, 0, 4)),
+        ])
+        assert [(p.src_tag, p.src_order, p.dst_tag, p.dst_order) for p in plans] == [
+            ("Spawn",            0, "LinkedCheckpoint", 1),
+            ("LinkedCheckpoint", 1, "LinkedCheckpoint", 2),
+            ("LinkedCheckpoint", 2, "LinkedCheckpoint", 3),
+            ("LinkedCheckpoint", 3, "Goal",             0),
+        ]
+        # Every CP→CP interval's targets are the next CP's cells.
+        assert plans[1].sources == frozenset({(0, 0, 1)})
+        assert plans[1].targets == frozenset({(0, 0, 2)})
+
+    def test_plain_checkpoint_tag_is_never_linked(self) -> None:
+        # Non-zero waypoint_order on a plain ``Checkpoint`` tag (not
+        # ``LinkedCheckpoint``) does NOT trigger chain enumeration.
+        # The parser-audited corpus showed this shape on parse-defective
+        # maps (539 / 2637 / etc.) — we must not misread it as Linked-CP
+        # and clobber the plain-CP shape the 514-map training used.
+        plans = _plan_intervals([
+            self._aset("Spawn",      0, (0, 0, 0)),
+            self._aset("Checkpoint", 1, (0, 0, 1)),
+            self._aset("Checkpoint", 2, (0, 0, 2)),
+            self._aset("Goal",       0, (0, 0, 3)),
+        ])
+        assert all((p.src_tag, p.src_order) == ("Spawn", 0) for p in plans)
+
+    def test_mixed_checkpoint_and_linked_checkpoint_falls_back(self) -> None:
+        # Defensive: maps with both ``Checkpoint`` and ``LinkedCheckpoint``
+        # rows (observed in 5+ corpus maps) fall back to plain. The
+        # generator's assembler will reject them downstream anyway; we
+        # just avoid emitting a partial / nonsensical chain here.
+        plans = _plan_intervals([
+            self._aset("Spawn",            0, (0, 0, 0)),
+            self._aset("Checkpoint",       0, (0, 0, 1)),
+            self._aset("LinkedCheckpoint", 1, (0, 0, 2)),
+            self._aset("Goal",             0, (0, 0, 3)),
+        ])
+        assert all((p.src_tag, p.src_order) == ("Spawn", 0) for p in plans)
+
+    def test_linked_cp_without_goal_falls_back_to_plain(self) -> None:
+        # Goal missing — treat as plain so Phase-1 training stays
+        # invariant. The generator still rejects downstream.
+        plans = _plan_intervals([
+            self._aset("Spawn",            0, (0, 0, 0)),
+            self._aset("LinkedCheckpoint", 1, (0, 0, 1)),
+            self._aset("LinkedCheckpoint", 2, (0, 0, 2)),
+        ])
+        assert all((p.src_tag, p.src_order) == ("Spawn", 0) for p in plans)
+
+    def test_empty_when_no_spawn(self) -> None:
+        # Pathological: waypoints without a Spawn. Matches enumerate_map's
+        # historical guard (no sources → nothing to enumerate).
+        plans = _plan_intervals([
+            self._aset("LinkedCheckpoint", 1, (0, 0, 1)),
+            self._aset("Goal",             0, (0, 0, 2)),
+        ])
+        assert plans == []
+
+    def test_spawn_cells_union_across_multiple_spawn_sets(self) -> None:
+        # StartFinish + Spawn both count as spawn. Plain-CP baseline
+        # uses the union of all spawn cells as sources.
+        plans = _plan_intervals([
+            self._aset("Spawn",       0, (0, 0, 0)),
+            self._aset("StartFinish", 0, (9, 0, 0)),
+            self._aset("Goal",        0, (5, 0, 0)),
+        ])
+        assert len(plans) == 1
+        assert plans[0].sources == frozenset({(0, 0, 0), (9, 0, 0)})
