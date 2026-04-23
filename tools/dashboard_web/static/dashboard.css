@@ -211,3 +211,90 @@ footer a:hover { text-decoration: underline; }
   content: "· ";
   color: #6ec1ff;
 }
+
+/* Phase-2 control layer */
+.panel-control {
+  margin: 12px;
+}
+.control-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.action-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: #16222e;
+  border: 1px solid #2b3a4a;
+  border-radius: 4px;
+  color: #e7e9ec;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: 13px;
+  transition: background 80ms ease;
+}
+.action-btn:hover {
+  background: #1c2a38;
+  border-color: #3d5065;
+}
+.action-btn:active {
+  background: #12202e;
+}
+.action-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.action-hint {
+  color: #9199a3;
+  font-size: 12px;
+}
+.action-eta {
+  color: #7d828a;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.action-status {
+  padding: 8px 10px;
+  background: #0c0e12;
+  border-radius: 3px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #b9bec6;
+}
+.running-label, .last-label, .idle-label {
+  color: #7d828a;
+  margin-right: 6px;
+}
+.running-title, .last-title { color: #e7e9ec; font-weight: 600; }
+.running-id { color: #9199a3; margin-left: 6px; font-size: 11px; }
+.last-status { margin-left: 8px; padding: 1px 6px; border-radius: 3px; }
+.last-status.status-success { background: #1e3d24; color: #6fcf7f; }
+.last-status.status-failed { background: #3d1e24; color: #ff7a7a; }
+.last-status.status-running { background: #16222e; color: #6ec1ff; }
+.last-exit { color: #7d828a; margin-left: 6px; font-size: 11px; }
+
+.action-log {
+  background: #0c0e12;
+  color: #d7dae0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  border-radius: 3px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 6px 10px;
+}
+.action-log:empty::before {
+  content: "(no recent action output)";
+  color: #555b63;
+  font-style: italic;
+}
+.action-log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 1px 0;
+}
