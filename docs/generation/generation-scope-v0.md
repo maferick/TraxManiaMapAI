@@ -43,12 +43,13 @@ Do **not** add to v0 without a revision bump:
 
 **v0 generates and validates only Linked-CP maps.**
 
-A Linked-CP map has `map_checkpoints.waypoint_order > 0` for at
-least one checkpoint — meaning the map author ordered CPs
-explicitly and the route sequence is unambiguous. Plain-CP maps
-(all CPs at order 0) merge into a single anchor set during route
-enumeration and have no deterministic "next interval" — route
-chaining cannot be done deterministically on them in v0.
+A Linked-CP map carries one or more `map_checkpoints` rows with
+`tag='LinkedCheckpoint'` — a dedicated tag the parser assigns when
+the GBX waypoint declares an explicit chain order. Plain-CP maps
+(`tag='Checkpoint'` with no chain order) merge into a single anchor
+set during route enumeration and have no deterministic "next
+interval" — route chaining cannot be done deterministically on them
+in v0.
 
 The constraint is **temporary**. It lifts when either:
 - Per-CP alignment becomes available (e.g. matching observed
@@ -60,9 +61,24 @@ The constraint is **temporary**. It lifts when either:
 Until then, plain-CP generation returns `route_verified=False`
 with reason `plain_cp_not_supported_v0`.
 
-**How to detect**: `SELECT DISTINCT waypoint_order FROM map_checkpoints
-WHERE map_id = ? AND tag='Checkpoint'`. If the result set contains
-any value > 0, the map is treated as Linked-CP. Otherwise plain-CP.
+**How to detect**:
+
+```sql
+SELECT 1 FROM map_checkpoints
+WHERE map_id = ? AND tag = 'LinkedCheckpoint'
+LIMIT 1;
+```
+
+Any row → treat as Linked-CP. Mixed-shape maps (both `Checkpoint`
+and `LinkedCheckpoint` present on one map) fall back to plain-CP
+so downstream keys stay consistent with Phase 1 training data.
+
+**Chain anchor ordering**: sort the map's `LinkedCheckpoint` rows by
+`waypoint_order` ascending (ties broken by `waypoint_index`). One
+logical CP may span multiple cells — the parser emits one row per
+cell, all sharing the same `(tag, waypoint_order)`. Dedupe on
+`(tag, waypoint_order)` before building intervals or you'll look for
+a self-interval (`LCP#1 → LCP#1`) that doesn't exist.
 
 ## Generated map artifact: JSON schema
 
@@ -158,12 +174,15 @@ model_hash).
     {
       "waypoint_index": 0,
       "waypoint_order": 1,
-      "tag": "Checkpoint",
+      "tag": "LinkedCheckpoint",
       "x": 18, "y": 24, "z": 16
     }
     ```
-    v0 requires explicit `waypoint_order >= 1` on every
-    Checkpoint (the Linked-CP constraint).
+    v0 requires every chain checkpoint to carry
+    `tag="LinkedCheckpoint"` (the Linked-CP constraint).
+    Free-placed waypoints (NULL grid coords in `map_checkpoints`) are
+    omitted from `map.checkpoints`; their snapped cells still flow
+    through `route.intervals` and `route.corridors_used`.
 - **`route`**: the assembled route (see "Route assembly" below).
 - **`finishability`**: the gate verdict (see "Finishability" below).
 
@@ -173,7 +192,7 @@ model_hash).
 {
   "index": 0,
   "src_tag": "Spawn", "src_order": 0,
-  "dst_tag": "Checkpoint", "dst_order": 1,
+  "dst_tag": "LinkedCheckpoint", "dst_order": 1,
   "chosen_corridor_id": 12345,
   "chosen_corridor_score": 0.68,
   "path_length_cells": 14,
@@ -212,14 +231,16 @@ implementations consistent across future refactors.
 ### Algorithm
 
 ```
-1. Enumerate the anchor sequence:
+1. Enumerate the anchor sequence (dedupe by (tag, waypoint_order);
+   a multi-cell CP emits several rows, all the same logical anchor):
      A0 = (Spawn, 0)
-     A1 = (Checkpoint, 1)
-     A2 = (Checkpoint, 2)
+     A1 = (LinkedCheckpoint, 1)
+     A2 = (LinkedCheckpoint, 2)
      ...
      An = (Goal, 0)
-   Precondition: every map_checkpoints row with tag='Checkpoint'
-   has waypoint_order >= 1. Violated → reject with reason
+   Precondition: every chain checkpoint row uses
+   tag='LinkedCheckpoint'. A plain 'Checkpoint' row (or a mixed
+   Checkpoint + LinkedCheckpoint shape) → reject with reason
    `plain_cp_not_supported_v0`.
 
 2. For each interval (A_i → A_{i+1}):
@@ -420,8 +441,12 @@ When reviewing a generation implementation PR, verify:
       re-declared).
 - [ ] `ai_confidence = mean(learned_corridor_score)`, not something
       else.
-- [ ] Linked-CP detection runs before any other check; plain-CP
-      maps short-circuit with `plain_cp_not_supported_v0`.
+- [ ] Linked-CP detection uses `tag = 'LinkedCheckpoint'` (not
+      `tag = 'Checkpoint' AND waypoint_order >= 1`); plain-CP maps
+      short-circuit with `plain_cp_not_supported_v0`.
+- [ ] Multi-cell CPs are deduped by `(tag, waypoint_order)` when
+      building the anchor chain — both in the enumerator's
+      `_plan_intervals` and the assembler's `_detect_and_order_anchors`.
 - [ ] Provenance block is complete.
 - [ ] No field surfaced in the JSON artifact is computed from
       data that could drift (e.g. no "map quality" score computed

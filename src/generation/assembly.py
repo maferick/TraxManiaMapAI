@@ -280,11 +280,12 @@ _ANCHOR_QUERY = """
 SELECT waypoint_index, waypoint_order, tag, x, y, z
 FROM map_checkpoints
 WHERE map_id = %s
-  AND tag IN ('Spawn', 'Checkpoint', 'Goal')
+  AND tag IN ('Spawn', 'Checkpoint', 'LinkedCheckpoint', 'Goal')
 ORDER BY
     CASE tag
         WHEN 'Spawn' THEN 0
         WHEN 'Checkpoint' THEN 1
+        WHEN 'LinkedCheckpoint' THEN 1
         WHEN 'Goal' THEN 2
     END,
     waypoint_order
@@ -320,16 +321,26 @@ def _detect_and_order_anchors(
 ) -> tuple[bool, tuple[Anchor, ...]]:
     """Turn the map_checkpoints rows into (is_linked_cp, ordered anchors).
 
-    Linked-CP detection: at least one Checkpoint row has waypoint_order
-    >= 1. Otherwise plain-CP.
+    Linked-CP detection: the map uses the dedicated ``LinkedCheckpoint``
+    tag exclusively (no mixed shapes). This matches the parser's own
+    discriminator and the enumeration-time shape in
+    :func:`src.corridor.traversability.enumeration._plan_intervals`;
+    both sides of the assembler/enumerator contract must agree on this
+    rule or interval keys won't line up.
 
     Anchor ordering: Spawn first, then Checkpoints in ascending
-    waypoint_order, then Goal. Ties on waypoint_order are resolved
-    by waypoint_index (DB-returned secondary sort)."""
-    linked = False
+    ``waypoint_order``, then Goal. Ties on ``waypoint_order`` are
+    resolved by ``waypoint_index`` (DB-returned secondary sort)."""
+    # A single logical checkpoint can span multiple cells (multi-cell
+    # gate — the parser emits one row per cell with shared tag+order).
+    # The enumerator collapses these via AnchorSet keyed on
+    # (tag, waypoint_order); the assembler must do the same or the
+    # chain will contain duplicate (tag, order) anchors and it'll look
+    # for a self-interval "LCP#1 → LCP#1" that doesn't exist.
     spawn: Anchor | None = None
     goal: Anchor | None = None
-    cps: list[Anchor] = []
+    plain_cps: dict[int, Anchor] = {}
+    linked_cps: dict[int, Anchor] = {}
     for r in rows:
         _idx, order, tag, x, y, z = r
         cell = (int(x), int(y), int(z)) if (
@@ -337,19 +348,24 @@ def _detect_and_order_anchors(
         ) else None
         anchor = Anchor(tag=str(tag), order=int(order), cell=cell)
         if tag == "Spawn":
-            spawn = anchor
+            # First Spawn wins; a multi-cell Spawn is rare but if it
+            # happens any of its cells serves as the representative.
+            if spawn is None:
+                spawn = anchor
         elif tag == "Goal":
-            goal = anchor
+            if goal is None:
+                goal = anchor
         elif tag == "Checkpoint":
-            if int(order) >= 1:
-                linked = True
-            cps.append(anchor)
+            plain_cps.setdefault(int(order), anchor)
+        elif tag == "LinkedCheckpoint":
+            linked_cps.setdefault(int(order), anchor)
         # Other tags are ignored — route ends at Goal.
+    linked = bool(linked_cps) and not plain_cps and goal is not None
     ordered: list[Anchor] = []
     if spawn is not None:
         ordered.append(spawn)
-    # Sort CPs by order then by tag insertion order (already idx-ascending).
-    ordered.extend(sorted(cps, key=lambda a: a.order))
+    cps_source = linked_cps if linked else {**plain_cps, **linked_cps}
+    ordered.extend(cps_source[k] for k in sorted(cps_source))
     if goal is not None:
         ordered.append(goal)
     return linked, tuple(ordered)

@@ -136,11 +136,13 @@ ORDER BY placement_index ASC
 _CHECKPOINTS_SQL = """
 SELECT waypoint_index, waypoint_order, tag, x, y, z
 FROM map_checkpoints
-WHERE map_id = %s AND tag IN ('Spawn', 'Checkpoint', 'Goal')
+WHERE map_id = %s
+  AND tag IN ('Spawn', 'Checkpoint', 'LinkedCheckpoint', 'Goal')
 ORDER BY
     CASE tag
         WHEN 'Spawn' THEN 0
         WHEN 'Checkpoint' THEN 1
+        WHEN 'LinkedCheckpoint' THEN 1
         WHEN 'Goal' THEN 2
     END,
     waypoint_order,
@@ -186,15 +188,30 @@ def _fetch_base_map(conn: Connection, map_id: int) -> _BaseMapData:
         }
         for r in block_rows
     ]
-    checkpoints: list[dict[str, Any]] = [
-        {
+    # Free-placed waypoints (placement='free') store positions in
+    # abs_x/y/z rather than grid x/y/z, so the x/y/z we selected are
+    # NULL. Skip them here: scope-v0 §map.checkpoints requires integer
+    # grid coords, and the snapped grid cells used for the actual route
+    # already flow through route.intervals + route.corridors_used. Log
+    # so the operator sees why the list is shorter than the row count.
+    checkpoints: list[dict[str, Any]] = []
+    skipped_free = 0
+    for r in cp_rows:
+        if r[3] is None or r[4] is None or r[5] is None:
+            skipped_free += 1
+            continue
+        checkpoints.append({
             "waypoint_index": int(r[0]),
             "waypoint_order": int(r[1]),
             "tag": str(r[2]),
             "x": int(r[3]), "y": int(r[4]), "z": int(r[5]),
-        }
-        for r in cp_rows
-    ]
+        })
+    if skipped_free:
+        _LOG.info(
+            "base map_id=%d: %d free-placed waypoint(s) omitted from "
+            "artifact.map.checkpoints (scope-v0 grid-only constraint)",
+            map_id, skipped_free,
+        )
 
     model_hash = None
     learned_score_version = None
@@ -289,14 +306,23 @@ def _build_artifact(
     what was attempted)."""
     if route is None or isinstance(route, AssemblyError):
         cells_total = 0
+        intervals_produced: list[dict[str, Any]] = []
     else:
         cells_total = route.cells_total
+        intervals_produced = _interval_entries(route)
 
-    # interval_count in the schema is minimum=1, so on reject we
-    # fall back to 1 (the route *attempted* one interval minimum).
-    # The schema allows this because the map block itself is not tied
-    # to assembly success.
-    interval_count = max(1, len(base.checkpoints) - 1)
+    # scope-v0: interval_count matches len(route.intervals). On the
+    # happy path we mirror the actual chain length. On reject we count
+    # *logical* anchors (deduped by (tag, waypoint_order)) since
+    # multi-cell CPs emit one row per cell — counting rows would inflate
+    # the interval_count beyond what the chain actually represents.
+    if intervals_produced:
+        interval_count = len(intervals_produced)
+    else:
+        logical_anchors = {
+            (c["tag"], c["waypoint_order"]) for c in base.checkpoints
+        }
+        interval_count = max(1, len(logical_anchors) - 1)
 
     return {
         "schema_version": "generation-v0",
@@ -325,7 +351,7 @@ def _build_artifact(
             "checkpoints": base.checkpoints,
         },
         "route": {
-            "intervals": _interval_entries(route),
+            "intervals": intervals_produced,
             "cells_total": cells_total,
             "corridors_used": _corridors_used_entries(route),
         },
