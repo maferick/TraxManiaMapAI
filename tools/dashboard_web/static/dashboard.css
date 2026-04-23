@@ -298,3 +298,50 @@ footer a:hover { text-decoration: underline; }
   word-break: break-all;
   padding: 1px 0;
 }
+
+/* PR B — AI Quality trend + Readiness panel */
+.trend-improving { color: #6fcf7f; font-weight: 600; }
+.trend-worsening { color: #ff7a7a; font-weight: 600; }
+.trend-flat      { color: #ffce6a; font-weight: 600; }
+.trend-unknown   { color: #7d828a; }
+
+.readiness-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+}
+.readiness-badge.is-ready {
+  background: #1e3d24;
+  color: #6fcf7f;
+}
+.readiness-badge.not-ready {
+  background: #3d351e;
+  color: #ffce6a;
+}
+.readiness-fraction {
+  font-weight: 400;
+  color: inherit;
+  opacity: 0.8;
+  font-size: 12px;
+  margin-left: 4px;
+}
+.readiness-reasons {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.readiness-reasons li {
+  padding: 2px 0;
+}
+.readiness-reasons li::before {
+  content: "· ";
+  opacity: 0.6;
+}
+.reason-ok { color: #8ecc94; }
+.reason-fail { color: #ff9a94; }
+.reason-unknown { color: #9199a3; }

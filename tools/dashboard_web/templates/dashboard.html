@@ -119,6 +119,31 @@
               {% endif %}
             </td>
           </tr>
+          {% if state.learning.ai_quality_score is not none %}
+          <tr>
+            <td></td>
+            <td class="label">AI Quality</td>
+            <td class="num">
+              <b>{{ '%.2f' | format(state.learning.ai_quality_score) }}</b> / 1.00
+              <span class="trend-{{ state.learning.ai_quality_trend }}">
+                {% if state.learning.ai_quality_trend == 'improving' %}↑{% elif state.learning.ai_quality_trend == 'worsening' %}↓{% elif state.learning.ai_quality_trend == 'flat' %}→{% else %}·{% endif %}
+                {{ state.learning.ai_quality_trend }}
+              </span>
+            </td>
+          </tr>
+          {% endif %}
+          {% if state.learning.latest_test_rank_corr is not none %}
+          <tr>
+            <td></td>
+            <td class="label">last train</td>
+            <td class="num">
+              rank_corr {{ '%.4f' | format(state.learning.latest_test_rank_corr) }}
+              {% if state.learning.latest_auc_delta is not none %}
+                · auc_delta {{ '%+.4f' | format(state.learning.latest_auc_delta) }}
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
         </table>
       {% endif %}
     </section>
@@ -137,7 +162,28 @@
           <tr><td class="label">learned div (median)</td><td class="num">{{ '%.4f' | format(state.diversity.learned_diversity_median) }}</td></tr>
           <tr><td class="label">Δ median</td><td class="num">{{ '%+.4f' | format(state.diversity.delta_median) }}</td></tr>
           <tr><td class="label">Δ mean</td><td class="num">{{ '%+.4f' | format(state.diversity.delta_mean) }}</td></tr>
+          {% if state.diversity.variety_score is not none %}
+          <tr><td class="label">Variety</td><td class="num"><b>{{ '%.2f' | format(state.diversity.variety_score) }}</b> / 1.00</td></tr>
+          {% endif %}
         </table>
+      {% endif %}
+    </section>
+
+    <!-- Generation readiness (PR B) -->
+    <section class="panel panel-readiness">
+      <h2>Generation readiness</h2>
+      {% if state.readiness is none %}
+        <p class="muted">not computed</p>
+      {% else %}
+        <div class="readiness-badge {% if state.readiness.ready %}is-ready{% else %}not-ready{% endif %}">
+          {% if state.readiness.ready %}READY{% else %}NOT READY{% endif %}
+          <span class="readiness-fraction">({{ '%.0f' | format(state.readiness.fraction * 100) }}% of gates)</span>
+        </div>
+        <ul class="readiness-reasons">
+          {% for reason in state.readiness.reasons %}
+          <li class="{% if 'OK' in reason %}reason-ok{% elif 'below floor' in reason %}reason-fail{% else %}reason-unknown{% endif %}">{{ reason }}</li>
+          {% endfor %}
+        </ul>
       {% endif %}
     </section>
 
