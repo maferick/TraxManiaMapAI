@@ -1,0 +1,179 @@
+schema_version: 1
+benchmark_id: tech-mediocre-proxy
+version: 2
+category: mediocre_tech
+ingestion_snapshot: 2026-04-scale-3k-expansion
+released_at: '2026-04-23'
+author: gijs.vanderlaken@gmail.com
+rationale: Auto-selected proxy set (v2) drawn from the 2026-04-scale-3k-expansion
+  ingestion snapshot to extend the v1 cohort to the wider corpus. First 20 TMX Tech-tagged
+  maps with AwardCount = 0 ordered by TMX id. 'Zero awards' means low popularity,
+  not low quality. Coexists with v1 (which drew from 2026-04-scale-1k); benchmark
+  loader unions both files. The tech-mediocre-v1 slot remains reserved for a hand-curated
+  release.
+tags:
+- proxy
+- auto-generated
+- phase1-dryrun
+- expansion-snapshot
+entries:
+- map_id: '22020'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: c0312cae35f22f8950e5451cd7f312b6822cfdd4893f58edde8cb25bb581681b
+- map_id: '26696'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 90ac78b08a355ba66c6495391feeb26f8ae732e13c20685c08e732f49273e58c
+- map_id: '162084'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: ce1927d9c0ea36311eb868b586305a4fc2964fab4e31005b10a024e0413b9981
+- map_id: '261677'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 8f824c32c2247438ace941583126dcc093fb248c6d8fba4be001b7cb64c0f839
+- map_id: '45252'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 24d28723d5f65211a5a4ab01cb636e6ecc3213c9fea78adb6794bf4c5b3bb2c3
+- map_id: '44509'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: c085257452df08678c59cd924cf2cbe0763753b710ad77bc67cfcddcae1fc709
+- map_id: '71270'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 9e5222112f1b1b9d1ebb9911dddc2b4f69a38e61d348219bf2bf8e83c9070319
+- map_id: '271654'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 556b4e3a90f342ec85bb2b266a308564e94440ca1b4006370fdb32b6aa9b8f94
+- map_id: '161119'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: e5acd8a4eea1816182d459b3e04388f7c70e27d8ee18b0b42315680d1300b8ea
+- map_id: '242063'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 91dc7eb984d2e27bcecb92e85706cb0d8f9d0834341eccdf59f2f32db4609181
+- map_id: '307625'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 9970621aa9c4e17a778f54fd614e008a2785a0ead3823259a13b88ae3f9b5597
+- map_id: '92962'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: ec24a8eca9b7deba8f788502e41bc4c4c95ca561f474abb962ba06d4ee2b6c4b
+- map_id: '166248'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 6882c42639dc66dab0afc12d1f01cb5fd8de4872999143f5efbbc0f2a49bfaaa
+- map_id: '74394'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 3f969237020c13539a1d76ee06b64f616d3acfc63b276ca4fd7da06a3a216e75
+- map_id: '256529'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: a83f624b42541be948a05dbaf73660c8c21383ec4154329e143b7158a798b330
+- map_id: '83779'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 20a4a839517c0cafc583e86842cd9bebe66cea57c6b466fa0036fbe25b8f9c2d
+- map_id: '216484'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 627127ff487048e43626d1fa5f2bf3597f8231cfbd38b76c194aa4e41613da2f
+- map_id: '226299'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 7e147a5493be743568c3a6c674cda0302e84a3863dcd2f99da413ddb7e29c902
+- map_id: '147031'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 4990ea695dd8c060d86dd37e6b8f6aa0fab3ccf4452ca281b28e52ff60f6a4ca
+- map_id: '123460'
+  role: primary
+  label:
+    hand_curated: false
+    selection_signal: tmx_award_count
+    award_count: 0
+  comment: TMX AwardCount=0 at selection time (expansion snapshot).
+  content_hash: 7c79b3c5d569301c5520362fc0f16234cef655a0cd34f87a1e468780480399ba
