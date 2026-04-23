@@ -3,14 +3,103 @@
 This file is the operating mandate for Claude Code working in this repository.
 Read it before making changes.
 
-## Project purpose
+## Current phase: Phase 2 (as of 2026-04-23)
 
-Phase 1 is a **mapper-assist** system for Trackmania 2020. It is not a
-player-facing autonomous track generator. The goal of this phase is to build
-the **measurement substrate and data substrate** that makes later model work
-trustworthy — not to train a generator.
+Phase 1 delivered the measurement + data substrate. Completed deliverables:
 
-Success in Phase 1 means we can:
+- real map + replay ingestion, parsed + cleaned at scale (~3k maps, ~2k
+  replays across two snapshots)
+- versioned canonical schema + provenance on every derived artifact
+- route-corridor enumeration + persisted heuristic + learned scoring
+- learned corridor-ranking model (`time_envelope_v2_weighted`) + a
+  diversity watchdog that proved the model does not collapse variety
+- Flask + Textual dashboards surfacing health / coverage / bottlenecks /
+  last-run freshness / learning state / next-best-action
+
+**Phase 2 expands the scope to:**
+
+1. **Operator control** — Flask control layer wrapping existing CLIs as
+   one-click actions (`Add Maps`, `Run Pipeline`, `Train AI`, `Generate`).
+   The dashboard stops being read-only.
+2. **Generation scaffolding** — compose new maps from the learned corpus.
+   v0 output = JSON; GBX output is deferred behind its own phase.
+3. **Finishability validation** — every generated map is gated by a
+   start→finish route verification that uses the learned corridor scores
+   and returns `route_verified` + estimated time + AI confidence.
+4. **Replay-ground-truth learning contract** — replays are treated as
+   definitively finishable evidence; see "Replay-ground-truth learning"
+   below.
+
+### Phase 2 sequencing rule
+
+Generation code does NOT begin before a design doc
+(`docs/generation/generation-scope-v0.md`) defines:
+
+- Output format (JSON schema)
+- Route-chaining rules across checkpoint anchors
+- Finishability semantics (what "verified" means and when to reject)
+
+The current sequencing is:
+
+- PR A (this branch): operator control layer
+- PR B: formalized decision panels (AI Quality / Variety / Data Coverage /
+  Next Best Action)
+- PR C: `docs/generation/generation-scope-v0.md` design doc — *then*
+  generation implementation follows in subsequent PRs
+
+### Finishability: "best route" definition
+
+The finishability gate defines `best route` as:
+
+> Concatenate the top-ranked corridor per interval (by `learned_corridor_score`)
+> across checkpoint anchors, from Spawn to Goal.
+
+This chains per-interval winners into a full route. If any interval has no
+scored corridor, or the chain cannot close Spawn→Goal with an unbroken
+sequence, the map is rejected or flagged.
+
+### v0 generation scope constraint: Linked-CP maps only
+
+Plain-CP maps (the vast majority of our corpus) merge all Checkpoint
+anchors into one anchor set during enumeration; interval ordering within
+a plain-CP map is ambiguous. v0 generation and validation therefore
+restricts to **Linked-CP maps only**. This is a temporary constraint —
+PR C documents it explicitly. Plain-CP support waits on either explicit
+CP alignment (possibly via replay-telemetry ordering) or OpenPlanet
+per-frame position data.
+
+### Replay-ground-truth learning contract
+
+Replays are **authoritative for finishability evidence**, even when the
+learned model cannot reconstruct a valid route:
+
+- If a replay exists for a map or segment, that map/segment is treated as
+  definitively finishable. The generator's finishability check **must not
+  reject** a map whose replay-backed route closes successfully.
+- When a replay's driven path crosses block transitions currently
+  classified as `non_traversable` or `unknown`, those transitions are
+  recorded with a new `observed_traversable` evidence signal and their
+  `path_support_count` (or equivalent) is incremented.
+- `observed_traversable` evidence does NOT immediately promote the
+  transition. Only after **consistent confirmation across multiple
+  replays** (threshold TBD in PR C, expected ≥3 distinct clean replays)
+  is a transition promoted into the normal traversability classification.
+  This is the noise guard.
+- This mechanism is **strictly for learning improvement**. It must not
+  become a backdoor that bypasses the generator's safety checks — the
+  finishability gate still runs its own verification on generator output,
+  using the (possibly-updated) classification as its reference.
+- The net effect: the system learns advanced mechanics (jumps, wallrides,
+  edge cases) directly from observed driver behavior, gradually enriching
+  the traversability graph that generation builds on.
+
+## Phase 1 substrate goals (preserved — still load-bearing)
+
+The Phase 1 substrate remains load-bearing for everything Phase 2 does.
+The surrogate-is-a-subsystem principle, benchmark freezing, evaluator
+versioning, and provenance-on-every-artifact all carry forward.
+
+Success in the substrate still means we can:
 
 - ingest real maps and replays reliably
 - represent them canonically
@@ -33,19 +122,25 @@ Implications that must be honored across the codebase:
 - generated tracks are never trusted on evaluator output alone without
   benchmark validation
 
-## Non-goals for Phase 1
+## Non-goals (still off-limits)
 
-Do **not** implement any of the following in this phase:
+Do **not** implement any of the following without explicit phase bump:
 
-- RL fine-tuning
-- end-to-end generator training
-- full UI product
-- autonomous public track publishing
-- support for all styles
-- item / free-placement generation
-- live in-game plugin integration
+- RL fine-tuning of a trained generator
+- autonomous public track publishing (no pushing generated maps to TMX or
+  any player-facing channel)
+- support for all styles (v0 targets Tech / FullSpeed; style breadth comes later)
+- item / free-placement generation (grid-block first; scenery items never)
+- live in-game plugin integration that modifies gameplay
 
-If a change drifts toward these, stop and raise it.
+**Previously Phase-1 non-goals now explicitly in Phase-2 scope:**
+
+- ~~end-to-end generator training~~ → Phase 2 scaffolds generation from the
+  corpus; training-free composition + learned-score ranking is the v0 approach
+- ~~full UI product~~ → Phase 2 adds a Flask control layer; still an
+  operator tool, not a consumer product
+
+If a change drifts toward the remaining non-goals, stop and raise it.
 
 ## What Claude Code must not do
 

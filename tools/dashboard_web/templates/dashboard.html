@@ -3,8 +3,11 @@
 <head>
   <meta charset="utf-8">
   <title>TraxMania · Decision Dashboard</title>
-  <meta http-equiv="refresh" content="{{ refresh_seconds }}">
+  {% if not current_run %}
+    <meta http-equiv="refresh" content="{{ refresh_seconds }}">
+  {% endif %}
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  <script defer src="{{ url_for('static', filename='control.js') }}"></script>
 </head>
 <body>
   <header>
@@ -14,6 +17,47 @@
       · auto-refresh {{ refresh_seconds }}s
     </span>
   </header>
+
+  <!-- Control panel (Phase 2 A) — operator-facing actions over existing CLIs. -->
+  <section class="panel panel-control">
+    <h2>Control</h2>
+    <div class="control-actions">
+      {% for action in actions %}
+        <button
+          class="action-btn"
+          data-action="{{ action.name }}"
+          data-title="{{ action.title }}"
+          title="{{ action.hint }}">
+          <span class="action-title">{{ action.title }}</span>
+          <span class="action-hint">{{ action.hint }}</span>
+          {% if action.expected_minutes > 0 %}
+            <span class="action-eta">~{{ action.expected_minutes }} min</span>
+          {% endif %}
+        </button>
+      {% endfor %}
+    </div>
+    <div id="action-status" class="action-status">
+      {% if current_run %}
+        <span class="running-label">running:</span>
+        <span class="running-title">{{ current_run.title }}</span>
+        <span class="running-id">#{{ current_run.id }}</span>
+      {% elif last_run %}
+        <span class="last-label">last:</span>
+        <span class="last-title">{{ last_run.title }}</span>
+        <span class="last-status status-{{ last_run.status }}">{{ last_run.status }}</span>
+        <span class="last-exit">exit {{ last_run.exit_code }}</span>
+      {% else %}
+        <span class="idle-label">no action running</span>
+      {% endif %}
+    </div>
+    <div id="action-log" class="action-log"
+         data-run-id="{{ (current_run.id if current_run else (last_run.id if last_run else '')) }}">
+      {% set pre_lines = (current_run.log_tail if current_run else (last_run.log_tail if last_run else [])) %}
+      {% for line in pre_lines %}
+        <div class="action-log-line">{{ line }}</div>
+      {% endfor %}
+    </div>
+  </section>
 
   {% if state.error %}
     <section class="panel error">
