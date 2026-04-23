@@ -97,6 +97,16 @@
           <dd>
             <a href="/api/generated-maps/{{ g.filename }}" download>{{ g.filename }}</a>
           </dd>
+          <dt>gbx export</dt>
+          <dd>
+            <button
+              type="button"
+              class="gbx-export-btn"
+              data-artifact="{{ g.filename }}">
+              Export .Map.Gbx
+            </button>
+            <span class="gbx-export-status"></span>
+          </dd>
         </dl>
       {% else %}
         <p class="generated-empty">No generated-map artifacts yet. Click <strong>Generate map</strong> above.</p>
@@ -106,7 +116,7 @@
     <details class="generated-recent">
       <summary>Recent runs ({{ recent_generated | length }})</summary>
       <table>
-        <thead><tr><th>when</th><th>base</th><th>verified</th><th>conf</th><th>time_ms</th><th>artifact</th></tr></thead>
+        <thead><tr><th>when</th><th>base</th><th>verified</th><th>conf</th><th>time_ms</th><th>artifact</th><th>gbx</th></tr></thead>
         <tbody>
           {% for g in recent_generated %}
           <tr class="row-{{ 'verified' if g.route_verified else 'rejected' }}">
@@ -116,6 +126,15 @@
             <td>{{ '%.2f'|format(g.ai_confidence) if g.ai_confidence is not none else '—' }}</td>
             <td>{{ g.estimated_time_ms if g.estimated_time_ms is not none else '—' }}</td>
             <td><a href="/api/generated-maps/{{ g.filename }}" download>{{ g.filename }}</a></td>
+            <td>
+              <button
+                type="button"
+                class="gbx-export-btn"
+                data-artifact="{{ g.filename }}">
+                Export
+              </button>
+              <span class="gbx-export-status"></span>
+            </td>
           </tr>
           {% endfor %}
         </tbody>

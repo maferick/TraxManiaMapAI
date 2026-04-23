@@ -417,3 +417,29 @@ footer a:hover { text-decoration: underline; }
 .generated-recent td { padding: 2px 6px; }
 .generated-recent tr.row-verified td:nth-child(3) { color: #6fcf7f; }
 .generated-recent tr.row-rejected td:nth-child(3) { color: #ff7a7a; }
+
+/* Phase 2 PR I — GBX export button + inline result link. The button
+ * lives next to each generated artifact's JSON download link and
+ * triggers a synchronous emit-gbx POST; status span updates in place.
+ */
+.gbx-export-btn {
+  background: #2b2f36;
+  color: #c7cdd4;
+  border: 1px solid #3a3f48;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+.gbx-export-btn:hover:not([disabled]) { background: #343a43; }
+.gbx-export-btn[disabled] { opacity: 0.6; cursor: default; }
+.gbx-export-status {
+  margin-left: 8px;
+  color: #7d828a;
+  font-size: 0.85rem;
+  font-family: monospace;
+}
+.gbx-export-status a { color: #6fb7ff; text-decoration: none; }
+.gbx-export-status a:hover { text-decoration: underline; }
+.gbx-export-status .gbx-meta { color: #5d626a; font-size: 0.8rem; }

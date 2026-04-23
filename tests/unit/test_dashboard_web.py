@@ -411,3 +411,189 @@ class TestDashboardRendersLatest:
         app = create_app(state_fetcher=lambda: _mk_state())
         body = app.test_client().get("/").data.decode()
         assert "No generated-map artifacts yet" in body
+
+
+# ---------------------------------------------------------------------
+# PR I — GBX emit + download
+# ---------------------------------------------------------------------
+
+class TestGbxEmitRoute:
+    def _client(self, tmp_path: Path, monkeypatch):
+        maps_dir = tmp_path / "maps"
+        gbx_dir = tmp_path / "gbx"
+        maps_dir.mkdir()
+        gbx_dir.mkdir()
+        monkeypatch.setattr(app_module, "_GENERATED_MAPS_DIR", maps_dir)
+        monkeypatch.setattr(app_module, "_GENERATED_GBX_DIR", gbx_dir)
+        app = create_app(state_fetcher=lambda: _mk_state())
+        app.config.update(TESTING=True)
+        return app.test_client(), maps_dir, gbx_dir
+
+    def _stub_emit_success(
+        self, tmp_gbx_dir: Path, monkeypatch, *, filename="out.Map.Gbx",
+    ):
+        """Monkeypatch everything the emit route imports so it runs
+        without a real DB or C# binary. Returns the (empty) .Map.Gbx
+        file we faked into existence so the test can verify that the
+        follow-up download route serves it."""
+        # 1. src.utils.config.load_config → minimal config dict
+        from src.utils import config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda _=None: {
+            "parsers": {"gbx": {
+                "executable": "/bin/true",  # must exist for the wrapper-missing guard
+                "timeout_seconds": 30.0,
+                "parser_version": "0.1.0",
+            }},
+        })
+        # 2. src.storage.mariadb.open_connection → mock returning a close()-able
+        from unittest.mock import MagicMock
+        from src.storage import mariadb
+        monkeypatch.setattr(mariadb, "open_connection", lambda _c: MagicMock())
+        # 3. src.parsers.SubprocessParser → no-op constructor
+        import src.parsers as parsers_pkg
+        monkeypatch.setattr(
+            parsers_pkg, "SubprocessParser",
+            lambda **kw: MagicMock(),
+        )
+        # 4. emit_gbx_from_artifact_file → fake GbxEmitResult
+        from src.generation import gbx_writer
+        fake_gbx = tmp_gbx_dir / filename
+        fake_gbx.write_bytes(b"fake gbx body")
+        result = gbx_writer.GbxEmitResult(
+            output_path=fake_gbx,
+            new_map_uid="abcDEF0123456789abcDEFX",
+            new_map_name="Smoke Test Title",
+            base_path=Path("/tmp/base.Map.Gbx"),
+            block_count=541,
+            baked_block_count=3250,
+            subprocess_duration_ms=280,
+        )
+        monkeypatch.setattr(
+            gbx_writer, "emit_gbx_from_artifact_file",
+            lambda conn, artifact_path, parser, output_dir: result,
+        )
+        return fake_gbx
+
+    def _write_artifact(self, maps_dir: Path, name="base1212-test.json"):
+        (maps_dir / name).write_text(json.dumps({
+            "schema_version": "generation-v0",
+            "run_id": "testrunid12345",
+            "inputs": {"base_map_id": 1212, "random_seed": 42,
+                       "difficulty": "medium", "style_tag_filter": None,
+                       "base_map_source_id": "x"},
+            "finishability": {
+                "route_verified": True, "estimated_time_ms": 11732,
+                "ai_confidence": 0.68, "reject_reason": None,
+                "gate_version": "finishability-v0",
+            },
+            "route": {"intervals": [], "cells_total": 0, "corridors_used": []},
+        }), encoding="utf-8")
+        return name
+
+    def test_happy_path_returns_download_url(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client, maps_dir, gbx_dir = self._client(tmp_path, monkeypatch)
+        self._stub_emit_success(gbx_dir, monkeypatch, filename="out.Map.Gbx")
+        name = self._write_artifact(maps_dir)
+        r = client.post(f"/api/generated-maps/{name}/emit-gbx")
+        assert r.status_code == 200
+        payload = r.get_json()
+        assert payload["artifact"] == name
+        assert payload["gbx_filename"] == "out.Map.Gbx"
+        assert payload["download_url"] == "/api/generated-gbx/out.Map.Gbx"
+        assert payload["block_count"] == 541
+        assert payload["new_map_uid"] == "abcDEF0123456789abcDEFX"
+
+    def test_unknown_artifact_returns_404(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client, _, _ = self._client(tmp_path, monkeypatch)
+        r = client.post("/api/generated-maps/nope.json/emit-gbx")
+        assert r.status_code == 404
+
+    def test_bad_artifact_name_returns_404(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client, _, _ = self._client(tmp_path, monkeypatch)
+        for bad in ("../secret", "weird name.json", "no-ext"):
+            r = client.post(f"/api/generated-maps/{bad}/emit-gbx")
+            assert r.status_code == 404, bad
+
+    def test_wrapper_missing_returns_500(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client, maps_dir, _ = self._client(tmp_path, monkeypatch)
+        from src.utils import config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda _=None: {
+            "parsers": {"gbx": {
+                "executable": "/definitely/does/not/exist/gbxwrap",
+                "timeout_seconds": 30.0, "parser_version": "0.1.0",
+            }},
+        })
+        self._write_artifact(maps_dir)
+        r = client.post("/api/generated-maps/base1212-test.json/emit-gbx")
+        assert r.status_code == 500
+        payload = r.get_json()
+        assert payload["error"] == "wrapper binary missing"
+
+    def test_emit_error_surfaces_500(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client, maps_dir, gbx_dir = self._client(tmp_path, monkeypatch)
+        from src.utils import config as cfg_mod
+        from src.storage import mariadb
+        from unittest.mock import MagicMock
+        import src.parsers as parsers_pkg
+        from src.generation import gbx_writer
+        monkeypatch.setattr(cfg_mod, "load_config", lambda _=None: {
+            "parsers": {"gbx": {
+                "executable": "/bin/true", "timeout_seconds": 30.0,
+                "parser_version": "0.1.0",
+            }},
+        })
+        monkeypatch.setattr(mariadb, "open_connection", lambda _c: MagicMock())
+        monkeypatch.setattr(
+            parsers_pkg, "SubprocessParser", lambda **kw: MagicMock(),
+        )
+        def _raise(conn, artifact_path, parser, output_dir):
+            raise gbx_writer.GbxEmitError("base map gone from disk")
+        monkeypatch.setattr(gbx_writer, "emit_gbx_from_artifact_file", _raise)
+        self._write_artifact(maps_dir)
+        r = client.post("/api/generated-maps/base1212-test.json/emit-gbx")
+        assert r.status_code == 500
+        payload = r.get_json()
+        assert payload["error"] == "emit failed"
+        assert "base map gone" in payload["detail"]
+
+
+class TestGbxDownloadRoute:
+    def _client(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(app_module, "_GENERATED_GBX_DIR", tmp_path)
+        app = create_app(state_fetcher=lambda: _mk_state())
+        app.config.update(TESTING=True)
+        return app.test_client()
+
+    def test_serves_gbx(self, tmp_path: Path, monkeypatch) -> None:
+        (tmp_path / "base1212-abc.Map.Gbx").write_bytes(b"binary-content")
+        client = self._client(tmp_path, monkeypatch)
+        r = client.get("/api/generated-gbx/base1212-abc.Map.Gbx")
+        assert r.status_code == 200
+        assert r.data == b"binary-content"
+        # as_attachment → Content-Disposition: attachment
+        assert "attachment" in r.headers.get("Content-Disposition", "")
+
+    def test_rejects_non_gbx_extension(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client = self._client(tmp_path, monkeypatch)
+        for bad in ("foo.json", "foo.Map.Gbx.tmp", "../etc/passwd"):
+            r = client.get(f"/api/generated-gbx/{bad}")
+            assert r.status_code == 404, bad
+
+    def test_missing_file_returns_404(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client = self._client(tmp_path, monkeypatch)
+        r = client.get("/api/generated-gbx/base9-notthere.Map.Gbx")
+        assert r.status_code == 404

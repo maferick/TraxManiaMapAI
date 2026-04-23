@@ -91,6 +91,11 @@
           '<a href="/api/generated-maps/' + encodeURIComponent(g.filename) +
           '" download>' + escapeHtml(g.filename) + '</a>' +
         '</dd>' +
+        '<dt>gbx export</dt><dd>' +
+          '<button type="button" class="gbx-export-btn" data-artifact="' +
+          escapeHtml(g.filename) + '">Export .Map.Gbx</button>' +
+          '<span class="gbx-export-status"></span>' +
+        '</dd>' +
       '</dl>';
   }
 
@@ -205,6 +210,45 @@
     btn.addEventListener('click', function () {
       startAction(btn.dataset.action, btn.dataset.title);
     });
+  });
+
+  // GBX export — per-artifact button on the Generated maps panel.
+  // Fires a synchronous emit-gbx POST (typical wall time ~300ms) and
+  // renders a download link in the adjacent status span on success.
+  // Failures show the detail inline so the operator doesn't have to
+  // open the network tab. Event-delegated on document so it picks up
+  // rows added by refreshGeneratedPanel() without re-binding.
+  document.addEventListener('click', async function (ev) {
+    const btn = ev.target.closest('.gbx-export-btn');
+    if (!btn) return;
+    const artifact = btn.dataset.artifact;
+    if (!artifact) return;
+    const status = btn.parentElement.querySelector('.gbx-export-status');
+    btn.disabled = true;
+    if (status) status.textContent = ' exporting…';
+    try {
+      const resp = await fetch(
+        '/api/generated-maps/' + encodeURIComponent(artifact) + '/emit-gbx',
+        { method: 'POST' },
+      );
+      const payload = await resp.json().catch(function () { return {}; });
+      if (!resp.ok) {
+        const detail = payload.detail || payload.error || ('HTTP ' + resp.status);
+        if (status) status.textContent = ' failed: ' + detail;
+        return;
+      }
+      if (status) {
+        status.innerHTML =
+          ' → <a href="' + escapeHtml(payload.download_url) + '" download>' +
+          escapeHtml(payload.gbx_filename) + '</a>' +
+          ' <span class="gbx-meta">(' + escapeHtml(payload.block_count) +
+          ' blocks, uid ' + escapeHtml(payload.new_map_uid) + ')</span>';
+      }
+    } catch (err) {
+      if (status) status.textContent = ' network error: ' + err;
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // If the page rendered while a run is already in flight, auto-attach
