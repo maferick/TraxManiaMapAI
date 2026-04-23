@@ -37,6 +37,63 @@
   // Existing SSE connection, if any. Cleared on new runs / disconnect.
   let currentSource = null;
 
+  // Re-render the "latest generated map" panel from fresh server
+  // data. Called after a generate-map run completes so the operator
+  // sees the result without a full page reload.
+  async function refreshGeneratedPanel() {
+    const panel = document.getElementById('generated-latest');
+    if (!panel) return;
+    let payload;
+    try {
+      const resp = await fetch('/api/generated-maps');
+      if (!resp.ok) return;
+      payload = await resp.json();
+    } catch (err) {
+      return;
+    }
+    const g = payload.latest;
+    if (!g) {
+      panel.innerHTML =
+        '<p class="generated-empty">No generated-map artifacts yet. ' +
+        'Click <strong>Generate map</strong> above.</p>';
+      return;
+    }
+    const verified = g.route_verified === true;
+    const badge = verified ? 'verified' : 'rejected';
+    const fmt = function (v, d) {
+      if (v === null || v === undefined) return '—';
+      return typeof v === 'number' ? v.toFixed(d || 3) : String(v);
+    };
+    const styleBit = g.style_tag_filter
+      ? ', style=' + escapeHtml(g.style_tag_filter) : '';
+    const rejectBit = g.reject_reason
+      ? '<dt>reject_reason</dt><dd>' + escapeHtml(g.reject_reason) + '</dd>'
+      : '';
+    panel.innerHTML =
+      '<div class="generated-headline">' +
+        '<span class="generated-badge badge-' + badge + '">' + badge + '</span>' +
+        '<span class="generated-base">base #' + escapeHtml(g.base_map_id) + '</span>' +
+        '<span class="generated-run-id">run ' + escapeHtml(g.run_id) + '</span>' +
+        '<span class="generated-at">' + escapeHtml(g.generated_at || '') + '</span>' +
+      '</div>' +
+      '<dl class="generated-fields">' +
+        '<dt>route_verified</dt><dd>' + (verified ? 'true' : 'false') + '</dd>' +
+        '<dt>ai_confidence</dt><dd>' + escapeHtml(fmt(g.ai_confidence, 3)) + '</dd>' +
+        '<dt>estimated_time_ms</dt><dd>' + escapeHtml(fmt(g.estimated_time_ms)) + '</dd>' +
+        '<dt>intervals</dt><dd>' + escapeHtml(g.interval_count) + '</dd>' +
+        rejectBit +
+        '<dt>inputs</dt><dd>' +
+          'base_map_id=' + escapeHtml(g.base_map_id) +
+          ', difficulty=' + escapeHtml(g.difficulty) +
+          ', seed=' + escapeHtml(g.random_seed) + styleBit +
+        '</dd>' +
+        '<dt>artifact</dt><dd>' +
+          '<a href="/api/generated-maps/' + encodeURIComponent(g.filename) +
+          '" download>' + escapeHtml(g.filename) + '</a>' +
+        '</dd>' +
+      '</dl>';
+  }
+
   function streamRun(runId, title) {
     if (currentSource) {
       currentSource.close();
@@ -70,6 +127,10 @@
       );
       src.close();
       currentSource = null;
+      // The run that just finished may have been generate-map; refresh
+      // the result panel unconditionally since it's a single cheap
+      // fetch and we don't want to depend on parsing title strings.
+      refreshGeneratedPanel();
     });
     src.onerror = function () {
       appendLogLine('[stream disconnected]');

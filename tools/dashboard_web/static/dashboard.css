@@ -345,3 +345,75 @@ footer a:hover { text-decoration: underline; }
 .reason-ok { color: #8ecc94; }
 .reason-fail { color: #ff9a94; }
 .reason-unknown { color: #9199a3; }
+
+/* Phase 2 PR G — generated-map result panel. Kept stylistically
+ * adjacent to .panel-control so the two operator-facing sections
+ * read as one functional group. */
+.panel-generated {
+  grid-column: 1 / -1;
+}
+.generated-latest {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.generated-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.generated-badge {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.badge-verified { background: #1e3d24; color: #6fcf7f; }
+.badge-rejected { background: #3d1e24; color: #ff7a7a; }
+.generated-base { font-weight: 600; color: #dfe2e5; }
+.generated-run-id { color: #7d828a; font-family: monospace; font-size: 0.85rem; }
+.generated-at { color: #7d828a; font-size: 0.85rem; margin-left: auto; }
+
+.generated-fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 12px;
+  row-gap: 3px;
+  margin: 4px 0 0 0;
+}
+.generated-fields dt {
+  color: #7d828a;
+  font-size: 0.85rem;
+  text-align: right;
+}
+.generated-fields dd {
+  margin: 0;
+  font-family: monospace;
+  font-size: 0.9rem;
+}
+.generated-fields a { color: #6fb7ff; text-decoration: none; }
+.generated-fields a:hover { text-decoration: underline; }
+.generated-empty { color: #7d828a; margin: 0; }
+
+.generated-recent {
+  margin-top: 12px;
+  border-top: 1px solid #2b2f36;
+  padding-top: 10px;
+}
+.generated-recent summary {
+  cursor: pointer;
+  color: #c7cdd4;
+  font-size: 0.9rem;
+}
+.generated-recent table {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  width: 100%;
+}
+.generated-recent th { color: #7d828a; font-weight: 500; text-align: left; }
+.generated-recent td { padding: 2px 6px; }
+.generated-recent tr.row-verified td:nth-child(3) { color: #6fcf7f; }
+.generated-recent tr.row-rejected td:nth-child(3) { color: #ff7a7a; }
