@@ -482,41 +482,69 @@ def update_pattern_weights(
         for fam_a, fam_b, count in pair_counts
     }
 
-    # Stream evidence rows in batches. Each row tells us src_family
-    # and dst_family via a JOIN — no per-pair WHERE needed.
-    fetch_sql = """
+    # Walk evidence rows in id-range chunks. Rationale:
+    # - The default pymysql cursor buffers the entire SELECT result
+    #   into Python memory before fetchmany sees it. On the scale-3k
+    #   corpus (14M+ rows, ~1.5 GB Python-side) this OOMs a 4 GB host.
+    # - SSCursor would stream, but running a second cursor (the UPDATE
+    #   batcher) on the same connection mid-stream silently drops
+    #   remaining rows — observed on 2026-04-23 ingest (only 10k of
+    #   14M rows got pattern_weight set before the stream was broken).
+    # - Chunking by PK range lets each iteration execute a small,
+    #   fully-buffered SELECT (20k rows ~= 10 MB) and run the UPDATE
+    #   batch on the same connection without any concurrent streaming.
+    id_fetch_sql = (
+        "SELECT MIN(id), MAX(id) FROM traversability_edge_evidence "
+        "WHERE classification_version = %s"
+    )
+    chunk_fetch_sql = """
     SELECT ev.id,
            bp1.block_family AS fam_src, bp2.block_family AS fam_dst
     FROM traversability_edge_evidence ev
     JOIN block_placements bp1 ON ev.src_block_id = bp1.id
     JOIN block_placements bp2 ON ev.dst_block_id = bp2.id
     WHERE ev.classification_version = %s
+      AND ev.id BETWEEN %s AND %s
     """
+    chunk_size = max(1, batch_size * 2)  # rows per SELECT chunk
 
     try:
         total_updated = 0
         with cursor(conn) as cur:
-            cur.execute(fetch_sql, (classification_version,))
-            # fetchmany avoids pulling all 7M rows into memory at once.
-            buffer: list[tuple[float, int]] = []
-            while True:
-                rows = cur.fetchmany(batch_size)
-                if not rows:
-                    break
+            cur.execute(id_fetch_sql, (classification_version,))
+            bounds = cur.fetchone()
+        if bounds is None or bounds[0] is None:
+            stats.edges_updated = 0
+            return stats
+        min_id = int(bounds[0])
+        max_id = int(bounds[1])
+
+        lo_id = min_id
+        while lo_id <= max_id:
+            hi_id = lo_id + chunk_size - 1
+            with cursor(conn) as cur:
+                cur.execute(
+                    chunk_fetch_sql,
+                    (classification_version, lo_id, hi_id),
+                )
+                rows = cur.fetchall()
+            if rows:
+                buffer: list[tuple[float, int]] = []
                 for row in rows:
                     ev_id = int(row[0])
                     fa = str(row[1] or "")
                     fb = str(row[2] or "")
-                    lo, hi = (fa, fb) if fa <= fb else (fb, fa)
-                    weight = weights.get((lo, hi), 0.0)
+                    lo_fam, hi_fam = (fa, fb) if fa <= fb else (fb, fa)
+                    weight = weights.get((lo_fam, hi_fam), 0.0)
                     buffer.append((weight, ev_id))
                     if len(buffer) >= batch_size:
                         _flush_pattern_weight_batch(conn, buffer)
                         total_updated += len(buffer)
                         buffer.clear()
-            if buffer:
-                _flush_pattern_weight_batch(conn, buffer)
-                total_updated += len(buffer)
+                if buffer:
+                    _flush_pattern_weight_batch(conn, buffer)
+                    total_updated += len(buffer)
+            lo_id = hi_id + 1
         conn.commit()
         stats.edges_updated = total_updated
     finally:
