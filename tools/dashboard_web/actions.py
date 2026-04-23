@@ -135,12 +135,80 @@ def _score_args(p: dict[str, Any]) -> list[str]:
     return ["score-corridors-learned", "--model-report", out]
 
 
-def _generate_stub_args(p: dict[str, Any]) -> list[str]:
-    # Generator doesn't exist yet — PR C defines its scope before any
-    # code lands. This stub action runs a sentinel command that exits
-    # cleanly with a clear log line so operators see "not implemented
-    # yet" rather than a broken button.
-    return ["_noop", "generation stub — awaits PR C design doc"]
+# Subdir under REPO_ROOT where generate-map writes artifacts. Stable +
+# discoverable so the UI can link to them post-run and so operators
+# can rsync the directory without needing the per-run path.
+_GENERATED_MAPS_DIR = "reports/generated-maps"
+
+
+def _validate_generate_map_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Coerce + bound-check the operator's inputs for the generate-map
+    action. Raises :class:`ValueError` with a human-readable message on
+    bad input; the Flask route translates that to HTTP 400."""
+    raw = params.get("base_map_id")
+    if raw is None or raw == "":
+        raise ValueError("base_map_id is required")
+    try:
+        base_map_id = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"base_map_id must be an integer, got {raw!r}")
+    if base_map_id < 1:
+        raise ValueError(f"base_map_id must be >= 1, got {base_map_id}")
+
+    out: dict[str, Any] = {"base_map_id": base_map_id}
+
+    style = params.get("style_tag_filter")
+    if style is not None and style != "":
+        style_str = str(style).strip()
+        if style_str and style_str not in ("Tech", "FullSpeed"):
+            raise ValueError(
+                f"style_tag_filter {style_str!r} must be 'Tech', "
+                f"'FullSpeed', or null"
+            )
+        if style_str:
+            out["style_tag_filter"] = style_str
+
+    difficulty = params.get("difficulty", "medium")
+    difficulty_str = str(difficulty)
+    if difficulty_str not in ("easy", "medium", "hard"):
+        raise ValueError(
+            f"difficulty {difficulty_str!r} must be one of "
+            f"'easy' / 'medium' / 'hard'"
+        )
+    out["difficulty"] = difficulty_str
+
+    seed_raw = params.get("random_seed", 42)
+    try:
+        out["random_seed"] = int(seed_raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"random_seed must be an integer, got {seed_raw!r}"
+        )
+
+    return out
+
+
+def _generate_map_args(p: dict[str, Any]) -> list[str]:
+    """Expand validated params into a ``generate-map`` CLI invocation
+    that writes the artifact to a predictable, per-run path. The
+    filename embeds base_map_id + seed + a UTC timestamp so repeat
+    runs don't clobber each other and the operator can eyeball the
+    directory listing for provenance."""
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = (
+        f"{_GENERATED_MAPS_DIR}/"
+        f"base{p['base_map_id']}-{ts}-seed{p['random_seed']}.json"
+    )
+    args: list[str] = [
+        "generate-map",
+        "--base-map-id", str(p["base_map_id"]),
+        "--difficulty", p["difficulty"],
+        "--random-seed", str(p["random_seed"]),
+        "--output", out_path,
+    ]
+    if "style_tag_filter" in p:
+        args.extend(["--style-tag-filter", p["style_tag_filter"]])
+    return args
 
 
 ACTIONS: dict[str, ActionSpec] = {
@@ -181,10 +249,11 @@ ACTIONS: dict[str, ActionSpec] = {
     "generate-map": ActionSpec(
         name="generate-map",
         title="Generate map",
-        hint="(stub) generator lands after PR C's design doc.",
-        cli_args=_generate_stub_args,
-        validate_params=_validate_empty,
-        expected_minutes=0,
+        hint="Copy a base map's blocks, run assembly + finishability "
+             "gate, emit a v0 JSON artifact under reports/generated-maps/.",
+        cli_args=_generate_map_args,
+        validate_params=_validate_generate_map_params,
+        expected_minutes=1,
     ),
 }
 
