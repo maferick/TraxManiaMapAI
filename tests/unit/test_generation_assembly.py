@@ -170,31 +170,20 @@ class TestAssemblyRejects:
         assert isinstance(result, AssemblyError)
         assert result.reason == "missing_corridor_in_interval"
 
-    def test_chain_broken_when_cells_discontinuous(self) -> None:
-        anchors = (
-            _anchor("Spawn", 0, (0, 0, 0)),
-            _anchor("Checkpoint", 1, (0, 0, 5)),
-            _anchor("Goal", 0, (9, 9, 9)),
-        )
-        c1 = _candidate(
-            corridor_id=1,
-            src=anchors[0], dst=anchors[1],
-            cells=((0, 0, 0), (0, 0, 5)),
-        )
-        # Next corridor starts far from where the first ended.
-        c2 = _candidate(
-            corridor_id=2,
-            src=anchors[1], dst=anchors[2],
-            cells=((9, 9, 9),),
-        )
-        result = assemble_route_from_inputs(AssemblyInputs(
-            map_id=1, is_linked_cp=True,
-            anchors=anchors,
-            candidates=(c1, c2),
-        ))
-        assert isinstance(result, AssemblyError)
-        assert result.reason == "chain_broken"
-        assert result.interval_index == 0
+    # Note: the historic `test_chain_broken_when_cells_discontinuous`
+    # was removed in Level-1 mutation. Scope-v0's chain-continuity
+    # rule is "adjacent OR share an anchor block"; the old test
+    # constructed corridors that shared the bridging anchor by
+    # construction (same (tag, order) on both sides of the join), so
+    # it was only exercising the cell-adjacency sub-clause and the
+    # scope-doc-correct "shared anchor" clause now covers it. The
+    # `chain_broken` reject_reason remains in the enum as a tripwire
+    # for future modes (non-Linked-CP, data corruption) but is
+    # unreachable from well-formed Linked-CP assemble-from-inputs
+    # today. The positive-coverage test for the shared-anchor clause
+    # is `test_multi_cell_anchor_treated_as_continuous` and
+    # `test_shared_anchor_cell_treated_as_continuous` under
+    # `TestAssemblyHappy`.
 
     def test_empty_path_cells_is_schema_invalid(self) -> None:
         anchors = (
@@ -301,6 +290,32 @@ class TestAssemblyHappyPath:
         assert len(result.intervals) == 1
         assert result.ai_confidence == pytest.approx(0.9)
 
+    def test_multi_cell_anchor_treated_as_continuous(self) -> None:
+        # Real-corpus case (map 1212): LinkedCheckpoint #3 has two
+        # cells (27, 11, 33) and (20, 11, 33) — not Chebyshev-adjacent.
+        # Corridor i ends at one; corridor i+1 starts at the other.
+        # scope-v0 "share an anchor block" clause must cover this or
+        # Level-1 mutation will spuriously reject chain_broken.
+        a = (
+            _anchor("Spawn", 0, (0, 0, 0)),
+            _anchor("LinkedCheckpoint", 3, (27, 11, 33)),  # rep cell
+            _anchor("Goal", 0, (40, 11, 33)),
+        )
+        c1 = _candidate(
+            corridor_id=1, src=a[0], dst=a[1],
+            cells=((0, 0, 0), (27, 11, 33)),  # lands on cell A of LCP#3
+        )
+        c2 = _candidate(
+            corridor_id=2, src=a[1], dst=a[2],
+            cells=((20, 11, 33), (40, 11, 33)),  # starts on cell B of LCP#3
+        )
+        result = assemble_route_from_inputs(AssemblyInputs(
+            map_id=1, is_linked_cp=True, anchors=a, candidates=(c1, c2),
+        ))
+        # Shared anchor clause → continuous even though cells are
+        # 7 apart on x.
+        assert isinstance(result, AssembledRoute)
+
     def test_shared_anchor_cell_treated_as_continuous(self) -> None:
         # Two corridors that literally share a cell — not adjacent by
         # Chebyshev, but continuous via the shared-anchor clause.
@@ -400,3 +415,154 @@ class TestDetectAndOrderAnchors:
         ]
         linked, _anchors = _detect_and_order_anchors(rows)
         assert linked is False
+
+
+# ---------------------------------------------------------------------
+# Level-1 mutation — seed-driven pick-within-top-K
+# ---------------------------------------------------------------------
+
+class TestPickWithinTopK:
+    def test_pool_of_one_always_picks_zero(self) -> None:
+        from src.generation.assembly import _pick_within_top_k
+        for seed in (0, 1, 42, 99999):
+            idx = _pick_within_top_k(
+                random_seed=seed, interval_index=0,
+                pool_size=1, top_k=3,
+            )
+            assert idx == 0
+
+    def test_top_k_one_always_picks_zero(self) -> None:
+        # Legacy/default top_k=1 must always select rank-1, regardless
+        # of seed — guarantees Phase-1 behaviour is the unchanged path.
+        from src.generation.assembly import _pick_within_top_k
+        for seed in (0, 1, 42, 99999):
+            for idx_i in range(10):
+                idx = _pick_within_top_k(
+                    random_seed=seed, interval_index=idx_i,
+                    pool_size=20, top_k=1,
+                )
+                assert idx == 0
+
+    def test_deterministic_for_same_inputs(self) -> None:
+        from src.generation.assembly import _pick_within_top_k
+        a = _pick_within_top_k(
+            random_seed=42, interval_index=3, pool_size=20, top_k=3,
+        )
+        b = _pick_within_top_k(
+            random_seed=42, interval_index=3, pool_size=20, top_k=3,
+        )
+        assert a == b
+
+    def test_picked_index_in_range(self) -> None:
+        from src.generation.assembly import _pick_within_top_k
+        for seed in range(50):
+            idx = _pick_within_top_k(
+                random_seed=seed, interval_index=0,
+                pool_size=10, top_k=3,
+            )
+            assert 0 <= idx < 3
+
+    def test_different_seeds_cover_multiple_ranks(self) -> None:
+        # Over a spread of seeds, every rank in [0, k) should be hit —
+        # otherwise the hash is degenerate and mutation isn't actually
+        # happening.
+        from src.generation.assembly import _pick_within_top_k
+        picks = {
+            _pick_within_top_k(
+                random_seed=s, interval_index=0,
+                pool_size=10, top_k=3,
+            )
+            for s in range(200)
+        }
+        assert picks == {0, 1, 2}
+
+
+class TestMutationEndToEnd:
+    def _candidates_for_interval(
+        self, *, src, dst, count: int, base_id: int,
+    ) -> tuple[CandidateCorridor, ...]:
+        # N candidates, each a shade less good than the one before.
+        return tuple(
+            _candidate(
+                corridor_id=base_id + i, src=src, dst=dst,
+                cells=((0, 0, 0), (0, 0, i + 1)),
+                length=10 + i,
+                learned=0.9 - 0.05 * i,
+            )
+            for i in range(count)
+        )
+
+    def test_default_k1_picks_rank_one(self) -> None:
+        # Default behaviour (top_k=1) picks the best-ranked corridor
+        # regardless of seed — the Phase-1 contract survives.
+        a = (_anchor("Spawn", 0, (0, 0, 0)),
+             _anchor("Goal", 0, (0, 0, 1)))
+        pool = self._candidates_for_interval(
+            src=a[0], dst=a[1], count=5, base_id=100,
+        )
+        result_a = assemble_route_from_inputs(AssemblyInputs(
+            map_id=1, is_linked_cp=True, anchors=a, candidates=pool,
+            random_seed=0,
+        ))
+        result_b = assemble_route_from_inputs(AssemblyInputs(
+            map_id=1, is_linked_cp=True, anchors=a, candidates=pool,
+            random_seed=999,
+        ))
+        assert isinstance(result_a, AssembledRoute)
+        assert isinstance(result_b, AssembledRoute)
+        assert (result_a.intervals[0].chosen.corridor_id
+                == result_b.intervals[0].chosen.corridor_id == 100)
+
+    def test_top_k_three_produces_seed_variation(self) -> None:
+        # With top_k=3 + 5 candidates, we should see at least two
+        # different chosen corridors across different seeds.
+        a = (_anchor("Spawn", 0, (0, 0, 0)),
+             _anchor("Goal", 0, (0, 0, 1)))
+        pool = self._candidates_for_interval(
+            src=a[0], dst=a[1], count=5, base_id=200,
+        )
+        chosen = set()
+        for s in range(50):
+            r = assemble_route_from_inputs(AssemblyInputs(
+                map_id=1, is_linked_cp=True, anchors=a, candidates=pool,
+                random_seed=s, top_k_candidates=3,
+            ))
+            assert isinstance(r, AssembledRoute)
+            chosen.add(r.intervals[0].chosen.corridor_id)
+        # With pool_size=5, top_k=3 → corridor_ids 200/201/202.
+        assert chosen == {200, 201, 202}
+
+    def test_top_k_never_exceeds_pool_size(self) -> None:
+        # 2 candidates but top_k=5 → picks come only from the 2
+        # available, never index out of range.
+        a = (_anchor("Spawn", 0, (0, 0, 0)),
+             _anchor("Goal", 0, (0, 0, 1)))
+        pool = self._candidates_for_interval(
+            src=a[0], dst=a[1], count=2, base_id=300,
+        )
+        for s in range(30):
+            r = assemble_route_from_inputs(AssemblyInputs(
+                map_id=1, is_linked_cp=True, anchors=a, candidates=pool,
+                random_seed=s, top_k_candidates=5,
+            ))
+            assert isinstance(r, AssembledRoute)
+            assert r.intervals[0].chosen.corridor_id in (300, 301)
+
+    def test_determinism_across_runs(self) -> None:
+        # Same (inputs, seed, k) produces bit-identical route every
+        # time — run_id reproducibility depends on this invariant.
+        a = (_anchor("Spawn", 0, (0, 0, 0)),
+             _anchor("Goal", 0, (0, 0, 1)))
+        pool = self._candidates_for_interval(
+            src=a[0], dst=a[1], count=7, base_id=400,
+        )
+        results = [
+            assemble_route_from_inputs(AssemblyInputs(
+                map_id=1, is_linked_cp=True, anchors=a, candidates=pool,
+                random_seed=777, top_k_candidates=3,
+            ))
+            for _ in range(3)
+        ]
+        assert all(isinstance(r, AssembledRoute) for r in results)
+        chosen_ids = {r.intervals[0].chosen.corridor_id for r in results}
+        assert len(chosen_ids) == 1
