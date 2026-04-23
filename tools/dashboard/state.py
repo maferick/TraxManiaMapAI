@@ -83,7 +83,14 @@ class LearningState:
     metrics table: the data the dashboard cares about is *what
     model is currently deployed*, not *what we trained last hour*.
     A full re-train produces a new hash + scheme tag that this
-    picks up on the next refresh."""
+    picks up on the next refresh.
+
+    Phase-2 PR B adds the synthetic ``ai_quality_score`` + trend for
+    the formalized decision panel. Those come from
+    :func:`src.learning.scores.ai_quality_score` computed live from
+    the DB-resident signals plus (when available) historical training
+    metrics from ``model_metrics``.
+    """
     scheme_tag: str | None               # e.g. "time_envelope_v2_weighted@0.1.0"
     model_hash_short: str | None         # first 12 hex chars of sha256
     scored_corridors: int
@@ -95,6 +102,15 @@ class LearningState:
     heuristic_stdev: float | None        # for the stdev-ratio comparison
     stdev_ratio: float | None            # pred_stdev / heuristic_stdev
     status: str                          # GREEN / YELLOW / RED / UNKNOWN
+    # Synthetic AI Quality score + trend (PR B). Score in [0, 1] combining
+    # rank_corr / stdev_ratio / AUC delta axes; trend is one of
+    # "improving" / "flat" / "worsening" / "unknown".
+    ai_quality_score: float | None = None
+    ai_quality_trend: str = "unknown"
+    # Latest training's test-set rank correlation + AUC delta, sourced
+    # from model_metrics (NULL when no training has been recorded).
+    latest_test_rank_corr: float | None = None
+    latest_auc_delta: float | None = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +120,11 @@ class DiversityState:
 
     Thresholds match the PR #25 baseline — diversity delta of
     -0.10 median or worse is RED; -0.05 to -0.10 is YELLOW;
-    -0.05 or better (incl. positive) is GREEN."""
+    -0.05 or better (incl. positive) is GREEN.
+
+    Phase-2 PR B adds ``variety_score`` in [0, 1] derived from
+    ``delta_median`` for the operator-facing panel.
+    """
     intervals_compared: int
     heuristic_diversity_median: float | None
     learned_diversity_median: float | None
@@ -112,6 +132,17 @@ class DiversityState:
     delta_mean: float | None
     status: str                          # GREEN / YELLOW / RED / UNKNOWN
     reason: str
+    variety_score: float | None = None
+
+
+@dataclass(frozen=True)
+class ReadinessState:
+    """Phase-2 generation-readiness summary. A green ``ready`` flag
+    means all gates passed; ``reasons`` explains each gate in order.
+    ``fraction`` in [0, 1] surfaces partial progress for the UI."""
+    ready: bool
+    fraction: float
+    reasons: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -137,6 +168,7 @@ class DashboardState:
     counters: dict[str, int] = field(default_factory=dict)
     learning: LearningState | None = None
     diversity: DiversityState | None = None
+    readiness: ReadinessState | None = None
     next_actions: list[NextAction] = field(default_factory=list)
     error: str | None = None           # set when collection failed; UI shows this verbatim
 
@@ -496,6 +528,64 @@ def _fetch_learning_state(cur: Any) -> LearningState:
         ratio = None
         status = "UNKNOWN"
 
+    # PR B: augment with training-history metrics (model_metrics table).
+    # Best-effort — if the table doesn't exist or a deploy predates the
+    # migration, leave the extras None and log-only.
+    latest_rank_corr: float | None = None
+    latest_auc_delta: float | None = None
+    ai_quality: float | None = None
+    ai_quality_trend: str = "unknown"
+    if scheme_tag is not None:
+        scheme_key = scheme_tag.split("@", 1)[0]
+        try:
+            cur.execute(
+                "SELECT test_rank_corr, auc_delta "
+                "FROM model_metrics WHERE scheme = %s "
+                "ORDER BY recorded_at DESC LIMIT 1",
+                (scheme_key,),
+            )
+            latest = cur.fetchone()
+            if latest is not None:
+                latest_rank_corr = (
+                    float(latest[0]) if latest[0] is not None else None
+                )
+                latest_auc_delta = (
+                    float(latest[1]) if latest[1] is not None else None
+                )
+            cur.execute(
+                "SELECT ai_quality_score FROM model_metrics "
+                "WHERE scheme = %s "
+                "ORDER BY recorded_at DESC LIMIT 20",
+                (scheme_key,),
+            )
+            history_rows = cur.fetchall()
+        except Exception:  # noqa: BLE001
+            history_rows = []
+    else:
+        history_rows = []
+
+    # Compute live ai_quality_score from the currently-observed axes.
+    # Uses the training-time rank_corr + auc_delta when available, plus
+    # the live DB-derived stdev_ratio. See src.learning.scores.
+    from src.learning import QualityInputs, ai_quality_score as _ai_q
+    from src.learning import TrendSample, trend_direction as _trend
+    ai_quality = _ai_q(QualityInputs(
+        test_rank_corr=latest_rank_corr,
+        pred_stdev_ratio=ratio,
+        auc_delta=latest_auc_delta,
+    ))
+    # Trend uses historical ai_quality_score entries from the table
+    # (oldest → newest after reversing).
+    hist_samples = [
+        TrendSample(
+            recorded_at_unix=0.0,  # not used for direction inference
+            value=float(r[0]) if r[0] is not None else None,
+        )
+        for r in reversed(list(history_rows))
+    ]
+    if hist_samples:
+        ai_quality_trend = _trend(hist_samples)
+
     return LearningState(
         scheme_tag=scheme_tag,
         model_hash_short=hash_short,
@@ -508,6 +598,10 @@ def _fetch_learning_state(cur: Any) -> LearningState:
         heuristic_stdev=(h_stdev_f if h_stdev_f > 0 else None),
         stdev_ratio=ratio,
         status=status,
+        ai_quality_score=ai_quality,
+        ai_quality_trend=ai_quality_trend,
+        latest_test_rank_corr=latest_rank_corr,
+        latest_auc_delta=latest_auc_delta,
     )
 
 
@@ -582,6 +676,7 @@ def _compute_diversity_state(conn: Connection) -> DiversityState:
             f"learned collapses {-delta_median:.3f} below heuristic "
             "— investigate"
         )
+    from src.learning import variety_score as _variety_score
     return DiversityState(
         intervals_compared=l.intervals_compared,
         heuristic_diversity_median=h.diversity_median,
@@ -590,6 +685,45 @@ def _compute_diversity_state(conn: Connection) -> DiversityState:
         delta_mean=delta_mean,
         status=status,
         reason=reason,
+        variety_score=_variety_score(delta_median),
+    )
+
+
+def _compute_readiness(
+    learning: LearningState | None,
+    diversity: DiversityState | None,
+    counters: dict[str, int],
+) -> ReadinessState:
+    """Phase-2 readiness summary. Thin wrapper over
+    :func:`src.learning.generation_readiness` that pulls inputs from
+    the dashboard's own dataclasses."""
+    from src.learning import generation_readiness as _gen_ready
+    label_coverage: float | None
+    if counters.get("maps_with_corridors", 0) > 0:
+        label_coverage = (
+            counters.get("maps_with_time_envelope_label", 0)
+            / counters["maps_with_corridors"]
+        )
+    else:
+        label_coverage = None
+    learned_coverage: float | None
+    if counters.get("corridors_top_rank", 0) > 0:
+        learned_coverage = (
+            counters.get("corridors_with_learned_score", 0)
+            / counters["corridors_top_rank"]
+        )
+    else:
+        learned_coverage = None
+    report = _gen_ready(
+        ai_quality=(learning.ai_quality_score if learning is not None else None),
+        variety=(diversity.variety_score if diversity is not None else None),
+        label_coverage=label_coverage,
+        learned_coverage=learned_coverage,
+    )
+    return ReadinessState(
+        ready=report.ready,
+        fraction=report.fraction,
+        reasons=list(report.reasons),
     )
 
 
@@ -599,6 +733,7 @@ def _compute_next_actions(
     bottlenecks: list[Bottleneck],
     learning: LearningState | None,
     diversity: DiversityState | None,
+    readiness: ReadinessState | None = None,
 ) -> list[NextAction]:
     """Rule engine. Priority order (lower wins):
 
@@ -607,8 +742,10 @@ def _compute_next_actions(
     3  investigate diversity regression (if diversity RED)
     4  refresh learned scoring (if learning stdev ratio RED, i.e.
        the deployed model compresses severely — retrain candidate)
-    5  backfill replay coverage (if replay coverage thin YELLOW)
-    6  healthy — consider next phase / OpenPlanet telemetry
+    5  retrain AI (if AI quality trend is worsening on a recent run)
+    6  backfill replay coverage (if replay coverage thin YELLOW)
+    7  ready to generate (if readiness.ready is True)
+    8  healthy — consider next phase
 
     The list is ordered so the top entry is always the highest-
     leverage next move."""
@@ -660,10 +797,23 @@ def _compute_next_actions(
             ),
         ))
 
+    if learning is not None and learning.ai_quality_trend == "worsening":
+        actions.append(NextAction(
+            priority=5,
+            title="Retrain the model (AI Quality trending down)",
+            reason=(
+                "ai_quality_score history shows a worsening trend. "
+                "A retrain may refresh the signal or expose a data "
+                "regression worth investigating."
+            ),
+            command="python -m src.cli train-corridor-ranking "
+                    "--output reports/corridor-ranking-model-latest.json",
+        ))
+
     for b in bottlenecks:
         if b.severity == "YELLOW" and "coverage" in b.title.lower():
             actions.append(NextAction(
-                priority=5,
+                priority=6,
                 title="Consider targeted replay backfill",
                 reason=b.detail,
                 command=(
@@ -674,9 +824,24 @@ def _compute_next_actions(
             ))
             break   # one coverage suggestion is enough
 
+    if (
+        readiness is not None and readiness.ready
+        and not actions                             # nothing else pending
+    ):
+        actions.append(NextAction(
+            priority=7,
+            title="Ready to generate",
+            reason=(
+                "All readiness gates passed (AI Quality, Variety, "
+                "Label coverage, Learned coverage). Safe to kick off "
+                "the generate action once PR C's design doc lands."
+            ),
+            command="",
+        ))
+
     if not actions:
         actions.append(NextAction(
-            priority=6,
+            priority=8,
             title="System is healthy",
             reason="No blocking issues detected. Consider the next "
                    "phase (OpenPlanet telemetry / generation scoping).",
@@ -744,9 +909,11 @@ def fetch_state(conn: Connection) -> DashboardState:
         )
     healths = _compute_healths(counters)
     bottlenecks = _compute_bottlenecks(counters)
+    readiness = _compute_readiness(learning, diversity, counters)
     next_actions = _compute_next_actions(
         healths=healths, bottlenecks=bottlenecks,
         learning=learning, diversity=diversity,
+        readiness=readiness,
     )
     return DashboardState(
         collected_at=_utcnow(),
@@ -757,5 +924,6 @@ def fetch_state(conn: Connection) -> DashboardState:
         counters=counters,
         learning=learning,
         diversity=diversity,
+        readiness=readiness,
         next_actions=next_actions,
     )

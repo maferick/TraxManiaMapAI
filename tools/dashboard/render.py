@@ -16,6 +16,7 @@ from tools.dashboard.state import (
     Health,
     LearningState,
     NextAction,
+    ReadinessState,
     StageFreshness,
 )
 
@@ -156,6 +157,27 @@ def render_learning(state: LearningState | None) -> str:
             f"  pred stdev:    [b]{state.pred_stdev:.4f}[/b]  "
             f"[dim](no heuristic baseline)[/dim]"
         )
+    if state.ai_quality_score is not None:
+        trend_symbol = {
+            "improving": "↑",
+            "flat": "→",
+            "worsening": "↓",
+            "unknown": "·",
+        }.get(state.ai_quality_trend, "·")
+        trend_color = {
+            "improving": "green",
+            "worsening": "red",
+            "flat": "yellow",
+        }.get(state.ai_quality_trend, "bright_black")
+        lines.append(
+            f"  AI quality:    [b]{state.ai_quality_score:.2f}[/b] / 1.00  "
+            f"[{trend_color}]{trend_symbol} {state.ai_quality_trend}[/{trend_color}]"
+        )
+    if state.latest_test_rank_corr is not None:
+        lines.append(
+            f"  latest train:  test_rank_corr={state.latest_test_rank_corr:.4f}  "
+            f"auc_delta={state.latest_auc_delta if state.latest_auc_delta is not None else 0:+.4f}"
+        )
     return "\n".join(lines)
 
 
@@ -191,6 +213,22 @@ def render_diversity(state: DiversityState | None) -> str:
         f"  delta:         median {sign_m}{delta_med:.4f}  "
         f"mean {sign_mean}{delta_mean:.4f}"
     )
+    if state.variety_score is not None:
+        lines.append(
+            f"  variety score: [b]{state.variety_score:.2f}[/b] / 1.00"
+        )
+    return "\n".join(lines)
+
+
+def render_readiness(state: ReadinessState | None) -> str:
+    lines: list[str] = ["[b]Generation readiness[/b]"]
+    if state is None:
+        lines.append("  [dim]not computed[/dim]")
+        return "\n".join(lines)
+    badge = "[green]READY[/green]" if state.ready else "[yellow]NOT READY[/yellow]"
+    lines.append(f"  {badge}  ({state.fraction:.0%} of gates)")
+    for r in state.reasons:
+        lines.append(f"    · {r}")
     return "\n".join(lines)
 
 
@@ -229,6 +267,7 @@ def render_all(state: DashboardState) -> dict[str, str]:
             "counters": msg,
             "learning": msg,
             "diversity": msg,
+            "readiness": msg,
             "next_actions": msg,
         }
     return {
@@ -239,5 +278,6 @@ def render_all(state: DashboardState) -> dict[str, str]:
         "counters": render_counters(state.counters),
         "learning": render_learning(state.learning),
         "diversity": render_diversity(state.diversity),
+        "readiness": render_readiness(state.readiness),
         "next_actions": render_next_actions(state.next_actions),
     }

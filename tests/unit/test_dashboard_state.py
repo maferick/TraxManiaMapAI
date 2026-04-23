@@ -441,6 +441,55 @@ class TestNextActionRuleEngine:
         assert "healthy" in actions[0].title.lower()
         assert actions[0].command == ""
 
+    def test_worsening_ai_quality_suggests_retrain(self) -> None:
+        from tools.dashboard.state import LearningState
+        learning = LearningState(
+            scheme_tag="time_envelope_v2_weighted@0.1.0",
+            model_hash_short="abc",
+            scored_corridors=898,
+            pred_min=0, pred_median=0.5, pred_max=1,
+            pred_mean=0.5, pred_stdev=0.1,
+            heuristic_stdev=0.15, stdev_ratio=0.67,
+            status="GREEN",
+            ai_quality_score=0.55,
+            ai_quality_trend="worsening",
+        )
+        actions = _compute_next_actions(
+            healths=[Health("cohorts", "GREEN", ""), Health("learning", "GREEN", "")],
+            bottlenecks=[],
+            learning=learning,
+            diversity=_mk_diversity(),
+        )
+        titles = [a.title.lower() for a in actions]
+        assert any("retrain" in t for t in titles)
+
+    def test_ready_to_generate_surfaces_when_gates_pass(self) -> None:
+        from tools.dashboard.state import ReadinessState
+        ready = ReadinessState(
+            ready=True, fraction=1.0,
+            reasons=["AI Quality: OK (0.60 ≥ 0.40)"],
+        )
+        actions = _compute_next_actions(
+            healths=[Health("cohorts", "GREEN", ""), Health("learning", "GREEN", "")],
+            bottlenecks=[],
+            learning=_mk_learning(),
+            diversity=_mk_diversity(),
+            readiness=ready,
+        )
+        assert actions[0].title.lower().startswith("ready to generate")
+
+    def test_ready_does_not_override_red(self) -> None:
+        from tools.dashboard.state import ReadinessState
+        ready = ReadinessState(
+            ready=True, fraction=1.0, reasons=[],
+        )
+        actions = _compute_next_actions(
+            **self._base_args(cohorts="RED"),
+            readiness=ready,
+        )
+        # Cohort RED still wins.
+        assert actions[0].title.lower().startswith("assign cohorts")
+
     def test_actions_sorted_by_priority(self) -> None:
         actions = _compute_next_actions(**self._base_args(
             cohorts="RED", learning_cov="RED",

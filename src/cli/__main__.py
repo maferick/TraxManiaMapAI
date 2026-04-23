@@ -301,6 +301,8 @@ def _cmd_update_path_support(args: argparse.Namespace) -> int:
 def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
     from src.corridor.ranking import TrainingReport, train_and_evaluate
     config = load_config(args.config)
+    sha = code_version()
+    config_hash = resolve_config_hash(config)
     v2_outlier_sigma: float | None = (
         args.v2_outlier_sigma if args.v2_outlier_sigma > 0 else None
     )
@@ -388,7 +390,100 @@ def _cmd_train_corridor_ranking(args: argparse.Namespace) -> int:
     if args.output:
         report.write_json(Path(args.output))
         _LOG.info("wrote comparative model report: %s", args.output)
+
+    # Persist metrics history for the dashboard (PR B). Each scheme in
+    # this training run becomes one row in model_metrics. Variety /
+    # pred-stdev-ratio stay NULL here — the dashboard fills them live
+    # from DB state when rendering, since those are properties of the
+    # *deployed* model, not of a training pass.
+    _persist_training_metrics(report, config, sha, config_hash)
     return 0
+
+
+def _persist_training_metrics(
+    report: "ComparativeTrainingReport",  # type: ignore[name-defined]
+    config: dict,
+    sha: str,
+    config_hash: str,
+) -> None:
+    """Write one model_metrics row per scheme from the given training
+    report. Best-effort — persistence failure logs a warning but does
+    not break the training CLI."""
+    from src.corridor.ranking.scoring_pipeline import compute_model_hash
+    from src.corridor.ranking.model import RidgeRegression
+    from src.learning import (
+        MetricInsert,
+        QualityInputs,
+        ai_quality_score,
+        new_run_id,
+        record_many,
+    )
+
+    schemes: list[tuple[str, "TrainingReport"]] = []  # type: ignore[name-defined]
+    if report.inverse_rank is not None:
+        schemes.append(("inverse_rank", report.inverse_rank))
+    if report.time_envelope is not None:
+        schemes.append(("time_envelope", report.time_envelope))
+    if report.time_envelope_v2 is not None:
+        schemes.append(("time_envelope_v2", report.time_envelope_v2))
+    if report.time_envelope_v2_weighted is not None:
+        schemes.append((
+            "time_envelope_v2_weighted", report.time_envelope_v2_weighted,
+        ))
+    if not schemes:
+        return
+
+    run_id = new_run_id()
+    rows: list[MetricInsert] = []
+    for scheme_name, sr in schemes:
+        # Re-derive the model hash from the persisted weights so the
+        # row can later be joined with route_corridors by hash.
+        model = RidgeRegression(
+            alpha=sr.alpha, feature_names=tuple(sr.feature_names),
+        )
+        import numpy as _np
+        model.weights = _np.array(sr.weights, dtype=_np.float64)
+        model_hash = compute_model_hash(model)
+
+        quality = ai_quality_score(QualityInputs(
+            test_rank_corr=sr.test_rank_corr,
+            auc_delta=sr.auc_delta,
+            # pred_stdev_ratio not available from TrainingReport — the
+            # CLI doesn't hold onto the per-alpha sweep rows. Dashboard
+            # computes this axis live from DB state.
+        ))
+        rows.append(MetricInsert(
+            run_id=run_id,
+            model_hash=model_hash,
+            scheme=scheme_name,
+            alpha=float(sr.alpha),
+            n_labeled=int(sr.total_rows),
+            code_version=sha,
+            config_hash=config_hash,
+            train_rmse=float(sr.train_rmse),
+            test_rmse=float(sr.test_rmse),
+            test_rank_corr=float(sr.test_rank_corr),
+            heuristic_rank_corr=float(sr.heuristic_rank_corr),
+            auc_learned=sr.auc_learned,
+            auc_heuristic=sr.auc_heuristic,
+            auc_delta=sr.auc_delta,
+            ai_quality_score=quality,
+            # pred_stdev, diversity, variety — not known at training
+            # time; stay NULL, dashboard fills live.
+        ))
+
+    try:
+        conn = open_connection(config)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("model_metrics persistence: db connect failed: %s", exc)
+        return
+    try:
+        n = record_many(conn, rows)
+        _LOG.info("persisted %d model_metrics rows (run_id=%s)", n, run_id)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("model_metrics persistence failed: %s", exc)
+    finally:
+        conn.close()
 
 
 def _cmd_diagnose_corridor_ranking(args: argparse.Namespace) -> int:
