@@ -209,3 +209,205 @@ class TestAppFactory:
         app = create_app(state_fetcher=lambda: _mk_state())
         assert "humanize_age" in app.jinja_env.filters
         assert "percent" in app.jinja_env.filters
+
+
+# ---------------------------------------------------------------------
+# PR G — generated-results inspection panel
+# ---------------------------------------------------------------------
+
+import json
+from pathlib import Path
+
+from tools.dashboard_web import app as app_module
+
+
+def _write_artifact(
+    root: Path,
+    filename: str,
+    *,
+    route_verified: bool = True,
+    base_map_id: int = 1212,
+    ai_confidence: float | None = 0.68,
+    reject_reason: str | None = None,
+    run_id: str = "abcdef0123456789",
+    intervals: int = 3,
+    generated_at: str = "2026-04-23T12:00:00+00:00",
+    extra: dict | None = None,
+    schema_version: str = "generation-v0",
+) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": schema_version,
+        "run_id": run_id,
+        "generated_at": generated_at,
+        "inputs": {
+            "base_map_id": base_map_id,
+            "base_map_source_id": "src-42",
+            "style_tag_filter": None,
+            "difficulty": "medium",
+            "random_seed": 42,
+        },
+        "finishability": {
+            "route_verified": route_verified,
+            "estimated_time_ms": 11732 if route_verified else None,
+            "ai_confidence": ai_confidence,
+            "reject_reason": reject_reason,
+            "gate_version": "finishability-v0",
+        },
+        "route": {
+            "intervals": [{}] * intervals,
+            "cells_total": intervals * 3,
+            "corridors_used": [{}] * intervals,
+        },
+    }
+    if extra is not None:
+        payload.update(extra)
+    path = root / filename
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+class TestSummarizeArtifact:
+    def test_parses_all_fields(self, tmp_path: Path) -> None:
+        path = _write_artifact(tmp_path, "base1212-a.json")
+        summary = app_module._summarize_generated_artifact(path)
+        assert summary is not None
+        assert summary["filename"] == "base1212-a.json"
+        assert summary["run_id"] == "abcdef0123456789"
+        assert summary["base_map_id"] == 1212
+        assert summary["route_verified"] is True
+        assert summary["reject_reason"] is None
+        assert summary["ai_confidence"] == 0.68
+        assert summary["estimated_time_ms"] == 11732
+        assert summary["interval_count"] == 3
+
+    def test_rejects_non_v0_schema(self, tmp_path: Path) -> None:
+        path = _write_artifact(
+            tmp_path, "wrong.json", schema_version="generation-v1",
+        )
+        assert app_module._summarize_generated_artifact(path) is None
+
+    def test_rejects_malformed_json(self, tmp_path: Path) -> None:
+        path = tmp_path / "junk.json"
+        path.write_text("{not json", encoding="utf-8")
+        assert app_module._summarize_generated_artifact(path) is None
+
+    def test_handles_reject_artifact(self, tmp_path: Path) -> None:
+        path = _write_artifact(
+            tmp_path, "rejected.json",
+            route_verified=False,
+            ai_confidence=None,
+            reject_reason="plain_cp_not_supported_v0",
+            intervals=0,
+        )
+        summary = app_module._summarize_generated_artifact(path)
+        assert summary is not None
+        assert summary["route_verified"] is False
+        assert summary["reject_reason"] == "plain_cp_not_supported_v0"
+        assert summary["ai_confidence"] is None
+        assert summary["interval_count"] == 0
+
+
+class TestListGenerated:
+    def test_most_recent_first(self, tmp_path: Path) -> None:
+        import os, time
+        a = _write_artifact(tmp_path, "a.json", run_id="aaaaaaaaaaaaaaaa")
+        time.sleep(0.01)
+        b = _write_artifact(tmp_path, "b.json", run_id="bbbbbbbbbbbbbbbb")
+        # Nudge mtimes explicitly so ordering is deterministic on fast FS
+        os.utime(a, (1000, 1000))
+        os.utime(b, (2000, 2000))
+        items = app_module._list_generated_artifacts(tmp_path)
+        assert [s["run_id"] for s in items] == [
+            "bbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaa",
+        ]
+
+    def test_empty_dir_returns_empty(self, tmp_path: Path) -> None:
+        assert app_module._list_generated_artifacts(tmp_path) == []
+
+    def test_missing_dir_returns_empty(self, tmp_path: Path) -> None:
+        assert app_module._list_generated_artifacts(tmp_path / "nope") == []
+
+    def test_skips_malformed_files(self, tmp_path: Path) -> None:
+        _write_artifact(tmp_path, "good.json")
+        (tmp_path / "junk.json").write_text("{bad", encoding="utf-8")
+        items = app_module._list_generated_artifacts(tmp_path)
+        assert [s["filename"] for s in items] == ["good.json"]
+
+    def test_respects_limit(self, tmp_path: Path) -> None:
+        for i in range(5):
+            _write_artifact(tmp_path, f"r{i}.json")
+        items = app_module._list_generated_artifacts(tmp_path, limit=3)
+        assert len(items) == 3
+
+
+class TestGeneratedApiRoutes:
+    def _client_with_dir(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(app_module, "_GENERATED_MAPS_DIR", tmp_path)
+        app = create_app(state_fetcher=lambda: _mk_state())
+        app.config.update(TESTING=True)
+        return app.test_client()
+
+    def test_list_empty(self, tmp_path: Path, monkeypatch) -> None:
+        client = self._client_with_dir(tmp_path, monkeypatch)
+        r = client.get("/api/generated-maps")
+        assert r.status_code == 200
+        payload = r.get_json()
+        assert payload == {
+            "latest": None, "recent": [],
+            "total_returned": 0, "cap": 20,
+        }
+
+    def test_list_with_artifacts(self, tmp_path: Path, monkeypatch) -> None:
+        _write_artifact(tmp_path, "ok.json")
+        client = self._client_with_dir(tmp_path, monkeypatch)
+        payload = client.get("/api/generated-maps").get_json()
+        assert payload["latest"]["filename"] == "ok.json"
+        assert len(payload["recent"]) == 1
+
+    def test_download_serves_json(self, tmp_path: Path, monkeypatch) -> None:
+        _write_artifact(tmp_path, "dl.json", run_id="0123456789abcdef")
+        client = self._client_with_dir(tmp_path, monkeypatch)
+        r = client.get("/api/generated-maps/dl.json")
+        assert r.status_code == 200
+        assert r.mimetype == "application/json"
+        body = json.loads(r.data)
+        assert body["run_id"] == "0123456789abcdef"
+
+    def test_download_rejects_traversal(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client = self._client_with_dir(tmp_path, monkeypatch)
+        # Path traversal + unsafe-name attempts all 404, not 200-outside-dir.
+        for bad in ("../etc/passwd", "..%2fetc", "weird name.json", "no-ext"):
+            r = client.get(f"/api/generated-maps/{bad}")
+            assert r.status_code == 404, bad
+
+    def test_download_missing_returns_404(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        client = self._client_with_dir(tmp_path, monkeypatch)
+        r = client.get("/api/generated-maps/notthere.json")
+        assert r.status_code == 404
+
+
+class TestDashboardRendersLatest:
+    def test_panel_visible_when_artifact_exists(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        _write_artifact(tmp_path, "base1212-x.json",
+                        run_id="deadbeefdeadbeef", base_map_id=1212)
+        monkeypatch.setattr(app_module, "_GENERATED_MAPS_DIR", tmp_path)
+        app = create_app(state_fetcher=lambda: _mk_state())
+        body = app.test_client().get("/").data.decode()
+        assert 'id="generated-results"' in body
+        assert "base #1212" in body
+        assert "deadbeefdeadbeef" in body
+        assert "badge-verified" in body
+        assert "base1212-x.json" in body
+
+    def test_panel_empty_state(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(app_module, "_GENERATED_MAPS_DIR", tmp_path)
+        app = create_app(state_fetcher=lambda: _mk_state())
+        body = app.test_client().get("/").data.decode()
+        assert "No generated-map artifacts yet" in body
