@@ -25,7 +25,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 from pymysql.connections import Connection
 
@@ -66,7 +66,16 @@ class CandidateCorridor:
     ``combined_sequence_score`` carries the #218-5 pattern+geometry
     average (0..1 or None when the corpus hasn't been scored yet).
     It participates as a tier-below tie-break after
-    learned_corridor_score; see ``_tie_break_key``."""
+    learned_corridor_score; see ``_tie_break_key``.
+
+    ``validation_score`` carries the #226/#227 per-corridor geom +
+    jump validator score (0..1 or None when no validator was run).
+    It joins the tie-break right after ``learned_corridor_score`` so
+    the learned ranking stays authoritative but broken-geometry
+    corridors get demoted (and zero-score corridors are pushed to
+    the back of the pool entirely). None treated as "no info" — it
+    sorts equal with low-but-positive scores so the pipeline
+    degrades gracefully when no validator is wired."""
     corridor_id: int
     map_id: int
     src: Anchor
@@ -77,6 +86,7 @@ class CandidateCorridor:
     corridor_confidence: float | None
     learned_corridor_score: float | None
     combined_sequence_score: float | None = None
+    validation_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +100,15 @@ class AssemblyInputs:
     function of seed + interval index, so a given (seed, k, corpus)
     tuple produces the same route every time. Defaults preserve
     Phase-1 behaviour (k=1 → always rank-1).
+
+    ``use_validation_tie_break`` toggles the #226/#227 validation-
+    aware tie-break. When False (default), ``validation_score`` is
+    ignored and the original (learned, combined_sequence, length,
+    id) cascade applies. When True, validation_score injects a new
+    tier right after learned_corridor_score: zero-score corridors
+    get pushed to the back of the pool, higher validation_score
+    wins ties. Callers that haven't populated ``validation_score``
+    on candidates see no behaviour change.
     """
     map_id: int
     is_linked_cp: bool
@@ -97,6 +116,7 @@ class AssemblyInputs:
     candidates: tuple[CandidateCorridor, ...]
     random_seed: int = 0
     top_k_candidates: int = 1
+    use_validation_tie_break: bool = False
 
 
 # ---------------------------------------------------------------------
@@ -140,6 +160,45 @@ def _tie_break_key(c: CandidateCorridor) -> tuple:
     the original (learned, length, id) order."""
     return (
         -(c.learned_corridor_score if c.learned_corridor_score is not None else -1.0),
+        -(c.combined_sequence_score if c.combined_sequence_score is not None else -1.0),
+        c.path_length,
+        c.corridor_id,
+    )
+
+
+def _fmt_score(v: float | None) -> str:
+    """Compact score formatter for log lines — 'None' vs '0.350'."""
+    return "None" if v is None else f"{v:.3f}"
+
+
+def _tie_break_key_with_validation(c: CandidateCorridor) -> tuple:
+    """Validation-aware tie-break. Invariants vs :func:`_tie_break_key`:
+
+      1. Highest ``learned_corridor_score`` still wins — the trained
+         model stays authoritative.
+      2. NEW: zero-floor tier. validation_score == 0.0 sorts to the
+         back of the pool within a learned-score bucket ('avoid
+         corridors with validation_score = 0' per the PR ask).
+         None / positive scores tie on this tier.
+      3. NEW: higher ``validation_score`` preferred. None treated as
+         -1 (un-validated corridors lose to validated ones with
+         positive scores; behaviour identical to combined_sequence
+         tier when nothing is scored).
+      4. Highest ``combined_sequence_score`` — unchanged.
+      5. Shorter ``path_length`` — unchanged.
+      6. Lower ``corridor_id`` — unchanged.
+
+    Float-equality pitfall: exact 0.0 from :func:`_corridor_validation_score`
+    happens via clamp(), not via a floating-point subtraction landing
+    at 0.0, so the == 0.0 comparison is safe for the values this
+    pipeline produces. If a future formula starts emitting 0.0 via
+    arithmetic, swap to ``<= _ZERO_EPSILON``."""
+    vs = c.validation_score
+    zero_floor = 1 if (vs is not None and vs == 0.0) else 0
+    return (
+        -(c.learned_corridor_score if c.learned_corridor_score is not None else -1.0),
+        zero_floor,
+        -(vs if vs is not None else -1.0),
         -(c.combined_sequence_score if c.combined_sequence_score is not None else -1.0),
         c.path_length,
         c.corridor_id,
@@ -254,7 +313,15 @@ def assemble_route_from_inputs(
                 ),
                 interval_index=idx,
             )
+        # Record pre-validator ordering so we can log swaps when the
+        # validation-aware tie-break flips the selection. Cheap — we
+        # already need the learned-only sort as the fallback anchor.
         scored_pool.sort(key=_tie_break_key)
+        pre_validator_top = scored_pool[0]
+
+        if inputs.use_validation_tie_break:
+            scored_pool.sort(key=_tie_break_key_with_validation)
+
         pick_index = _pick_within_top_k(
             random_seed=inputs.random_seed,
             interval_index=idx,
@@ -263,6 +330,28 @@ def assemble_route_from_inputs(
         )
         top = scored_pool[pick_index]
         assert top.learned_corridor_score is not None  # narrowed by filter
+
+        # Log when the validator rewrote the top-1. Only emit on true
+        # swaps (pick_index==0 with a different corridor_id than the
+        # learned-only top); Level-1 mutation picks below index 0 are
+        # deliberate per-seed variation, not validator interference.
+        if (
+            inputs.use_validation_tie_break
+            and pick_index == 0
+            and top.corridor_id != pre_validator_top.corridor_id
+        ):
+            _LOG.info(
+                "validator_swap: interval=%d learned_top=%d(learned=%.3f,"
+                "val=%s) → validator_top=%d(learned=%.3f,val=%s)",
+                idx,
+                pre_validator_top.corridor_id,
+                float(pre_validator_top.learned_corridor_score or -1.0),
+                _fmt_score(pre_validator_top.validation_score),
+                top.corridor_id,
+                float(top.learned_corridor_score or -1.0),
+                _fmt_score(top.validation_score),
+            )
+
         chosen = ChosenCorridor(
             corridor_id=top.corridor_id,
             map_id=top.map_id,
@@ -275,6 +364,7 @@ def assemble_route_from_inputs(
             learned_corridor_score=float(top.learned_corridor_score),
             expected_time_ms=_expected_time_ms(top.path_length),
             combined_sequence_score=top.combined_sequence_score,
+            validation_score=top.validation_score,
         )
         chosen_corridors.append(chosen)
         intervals.append(IntervalAssembly(
@@ -447,12 +537,26 @@ def assemble_route(
     classification_version: str = CLASSIFICATION_VERSION,
     random_seed: int = 0,
     top_k_candidates: int = 1,
+    validator: (
+        "Callable[[CandidateCorridor, int], float | None] | None"
+    ) = None,
 ) -> AssembledRoute | AssemblyError:
     """DB-facing wrapper. Fetches anchors + candidate corridors, then
     delegates to :func:`assemble_route_from_inputs`.
 
     ``random_seed`` + ``top_k_candidates`` enable Level-1 mutation; see
     :class:`AssemblyInputs`.
+
+    ``validator``, if provided, is a callable invoked once per
+    candidate within the top-K pool of each interval —
+    ``(candidate, interval_index) -> validation_score in [0, 1] | None``.
+    Scored candidates carry the score into the extended tie-break
+    (see :func:`_tie_break_key_with_validation`). Running the
+    validator on every enumerated corridor would be wasteful — only
+    the top few per interval can possibly win on learned score —
+    so the wrapper limits the validation to the top ``max(top_k_candidates,
+    _VALIDATOR_CANDIDATE_CAP)`` per interval after a preliminary
+    learned-score sort.
     """
     with cursor(conn) as cur:
         cur.execute(_ANCHOR_QUERY, (map_id,))
@@ -488,6 +592,17 @@ def assemble_route(
             ),
         ))
 
+    # Validator pass — score the top few candidates per interval
+    # on the learned-score tie-break. Running validator on every
+    # enumerated corridor costs too much; the top-K that can
+    # possibly win learned is what matters.
+    if validator is not None:
+        candidates = _score_top_candidates_per_interval(
+            candidates=candidates,
+            validator=validator,
+            per_interval_cap=max(top_k_candidates, _VALIDATOR_CANDIDATE_CAP),
+        )
+
     return assemble_route_from_inputs(AssemblyInputs(
         map_id=map_id,
         is_linked_cp=linked,
@@ -495,4 +610,76 @@ def assemble_route(
         candidates=tuple(candidates),
         random_seed=random_seed,
         top_k_candidates=top_k_candidates,
+        use_validation_tie_break=validator is not None,
     ))
+
+
+# How many top-learned-score candidates per interval to validate.
+# The top-K mutation pick samples from the first K tie-break entries;
+# beyond that, learned-score differences make them practically unable
+# to win. 10 leaves headroom over the default top_k_candidates=3.
+_VALIDATOR_CANDIDATE_CAP: int = 10
+
+
+def _score_top_candidates_per_interval(
+    *,
+    candidates: list[CandidateCorridor],
+    validator: "Callable[[CandidateCorridor, int], float | None]",
+    per_interval_cap: int,
+) -> list[CandidateCorridor]:
+    """For each (src, dst) interval, take the top ``per_interval_cap``
+    candidates by ``_tie_break_key`` and ask the validator for a
+    score. Leaves the rest of the candidate list untouched so the
+    assembly pool itself stays complete — only the top few carry a
+    validation_score.
+    """
+    by_interval: dict[
+        tuple[str, int, str, int], list[CandidateCorridor]
+    ] = {}
+    for c in candidates:
+        by_interval.setdefault(
+            (c.src.tag, c.src.order, c.dst.tag, c.dst.order), [],
+        ).append(c)
+
+    scored_ids: set[int] = set()
+    replacements: dict[int, CandidateCorridor] = {}
+
+    # Anchor ordering → interval_index. Build on the fly from the
+    # sorted list of (src_order, src_tag) pairs — matches the order
+    # the main assembly loop iterates.
+    interval_order = sorted(
+        by_interval.keys(),
+        key=lambda k: (k[1], k[3], k[0], k[2]),
+    )
+    for idx, key in enumerate(interval_order):
+        pool = list(by_interval[key])
+        pool.sort(key=_tie_break_key)
+        for c in pool[:per_interval_cap]:
+            if c.learned_corridor_score is None:
+                continue
+            score = validator(c, idx)
+            if score is None:
+                continue
+            replacements[id(c)] = CandidateCorridor(
+                corridor_id=c.corridor_id, map_id=c.map_id,
+                src=c.src, dst=c.dst,
+                path_cells=c.path_cells, path_length=c.path_length,
+                contains_virtual_edge=c.contains_virtual_edge,
+                corridor_confidence=c.corridor_confidence,
+                learned_corridor_score=c.learned_corridor_score,
+                combined_sequence_score=c.combined_sequence_score,
+                validation_score=float(score),
+            )
+            scored_ids.add(c.corridor_id)
+
+    if not replacements:
+        return candidates
+
+    out: list[CandidateCorridor] = []
+    for c in candidates:
+        out.append(replacements.get(id(c), c))
+    _LOG.info(
+        "assembly validator: scored %d candidate(s) across %d interval(s)",
+        len(scored_ids), len(interval_order),
+    )
+    return out

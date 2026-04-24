@@ -69,6 +69,7 @@ class ChosenCorridor:
     learned_corridor_score: float
     expected_time_ms: int
     combined_sequence_score: float | None = None
+    validation_score: float | None = None
 
 
 @dataclass(frozen=True)
