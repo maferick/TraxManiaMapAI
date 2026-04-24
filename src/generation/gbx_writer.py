@@ -212,7 +212,10 @@ def emit_gbx_from_artifact(
     # Non-stripped artifacts (generation-v0 + stripped=false v0.1)
     # emit with keep_cells=None → wrapper no-ops the filter.
     map_block = artifact.get("map") or {}
+    schema_version = str(artifact.get("schema_version") or "generation-v0")
     keep_cells: list[tuple[int, int, int]] | None = None
+    ai_generated = bool(map_block.get("ai_generated") is True)
+
     if map_block.get("stripped") is True:
         keep_cells = []
         for b in map_block.get("blocks") or []:
@@ -234,10 +237,40 @@ def emit_gbx_from_artifact(
 
     _LOG.info(
         "emit_gbx: base_map_id=%d run_id=%s seed=%d verified=%s "
-        "stripped=%s → %s",
-        base_map_id, run_id, seed, verified,
-        keep_cells is not None, out_path,
+        "schema=%s ai_generated=%s stripped=%s → %s",
+        base_map_id, run_id, seed, verified, schema_version,
+        ai_generated, keep_cells is not None, out_path,
     )
+
+    if ai_generated:
+        # v0.2 AI-generated: re-place every grid block from the
+        # artifact's list. keep_cells is meaningless here — the
+        # artifact IS the block list, not a filter over the base.
+        result = parser.emit_map_from_blocks(
+            base_path=base_path,
+            output_path=out_path,
+            map_uid=new_map_uid,
+            map_name=new_map_name,
+            blocks=list(map_block.get("blocks") or []),
+        )
+        if result.status is not ParseStatus.SUCCESS:
+            raise GbxEmitError(
+                f"wrapper emit-map-from-blocks failed: "
+                f"code={result.error_code.value} detail={result.error_detail}"
+            )
+        payload = result.output or {}
+        return GbxEmitResult(
+            output_path=Path(str(payload.get("output_path") or out_path)),
+            new_map_uid=str(payload.get("new_map_uid") or new_map_uid),
+            new_map_name=new_map_name,
+            base_path=base_path,
+            block_count=int(payload.get("placed_block_count") or 0),
+            baked_block_count=int(payload.get("baked_block_count") or 0),
+            subprocess_duration_ms=result.duration_ms,
+            source_block_count=int(payload.get("source_block_count") or 0),
+            removed_block_count=int(payload.get("skipped_block_count") or 0),
+            stripped=False,
+        )
 
     result = parser.emit_map(
         base_path=base_path,

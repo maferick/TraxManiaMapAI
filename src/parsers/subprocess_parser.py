@@ -132,6 +132,52 @@ class SubprocessParser(ParserClient):
             ]
         return self._invoke("emit-map", json.dumps(payload_dict) + "\n")
 
+    def emit_map_from_blocks(
+        self,
+        *,
+        base_path: Path,
+        output_path: Path,
+        map_uid: str,
+        map_name: str,
+        blocks: list[dict[str, Any]],
+    ) -> ParseResult:
+        """Invoke ``emit-map-from-blocks``: rebuild a map's grid-block
+        list from ``blocks`` instead of filtering the base.
+
+        v0.2 AI generator path — the synthesised route doesn't exist
+        on any base map, so emit-map's filter-by-keep-cells doesn't
+        apply. This wrapper preserves the base's collection /
+        environment / BakedBlocks / free-placed anchors but replaces
+        every grid block with the input list (re-placed via
+        GBX.NET's :meth:`CGameCtnChallenge.PlaceBlock`).
+
+        ``blocks`` entries follow the generated-map schema's Block
+        shape: ``block_family`` / ``block_name`` / ``x`` / ``y`` / ``z``
+        / ``rotation``. Extra keys (``ai_score`` etc.) are ignored by
+        the wrapper — we pass the list through unchanged so the
+        artifact's extras don't need stripping.
+        """
+        payload = {
+            "base_path": str(base_path),
+            "output_path": str(output_path),
+            "map_uid": map_uid,
+            "map_name": map_name,
+            "blocks": [
+                {
+                    "block_family": str(b.get("block_family") or ""),
+                    "block_name": str(b.get("block_name") or ""),
+                    "x": b.get("x"),
+                    "y": b.get("y"),
+                    "z": b.get("z"),
+                    "rotation": int(b.get("rotation") or 0),
+                }
+                for b in blocks
+            ],
+        }
+        return self._invoke(
+            "emit-map-from-blocks", json.dumps(payload) + "\n",
+        )
+
     def _invoke(self, kind: str, stdin: str) -> ParseResult:
         start = time.monotonic()
         try:
