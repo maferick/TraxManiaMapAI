@@ -623,6 +623,7 @@ def _run_preemit_validation_inline(
         return None
 
     from src.generation.geom_validator import load_geometry_lookup
+    from src.generation.replay_cells import load_replay_touched_cells
     geometry_lookup = load_geometry_lookup(conn)
     if not geometry_lookup:
         _LOG.info(
@@ -640,6 +641,12 @@ def _run_preemit_validation_inline(
             for cell in iv.chosen.path_cells:
                 route_cells.append(cell)
 
+    # Replay evidence for the jump validator's supported_by_replay
+    # bucket. load_replay_touched_cells returns an empty set when no
+    # scored corridors exist; that's the documented signal to fall
+    # back to geometry-only classification.
+    replay_cells = load_replay_touched_cells(conn, map_id=route.map_id)
+
     blocks_for_check = (
         stripped_blocks if stripped_blocks is not None else base.blocks
     )
@@ -648,6 +655,7 @@ def _run_preemit_validation_inline(
         geometry_lookup=geometry_lookup,
         route_cells=route_cells,
         spawn_cell=spawn_cell,
+        replay_touched_cells=replay_cells if replay_cells else None,
     )
     _LOG.info(
         "preemit[%s] run_id=%s fail=%d warn=%d info=%d "
