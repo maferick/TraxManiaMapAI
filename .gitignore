@@ -53,3 +53,12 @@ docker/volumes/
 parsers/_build/
 parsers/bin/
 parsers/obj/
+
+# Nadeo pack archives — multi-GB TM2020 game data copied from the
+# operator's install for local probing. Never commit these.
+*.pak
+*.Pack.Gbx
+# Stadium.pak lives at repo root on the operator's machine; explicit
+# entry guards against an accidental `git add -A` in case someone
+# overrides the glob above.
+/Stadium.pak

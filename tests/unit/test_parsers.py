@@ -323,3 +323,63 @@ class TestSubprocessParserDumpBlockInfo:
         # here is the error_code.
         assert r.error_code is ParseErrorCode.IO_ERROR
         assert r.status is ParseStatus.FAILED_TRANSIENT
+
+
+class TestSubprocessParserProbePak:
+    """M2a — probe-pak sits on the same envelope contract as the
+    parse-side commands. Full round-trip through a fake wrapper;
+    real Stadium.pak probing needs the operator's TM2020 install."""
+
+    def test_success_payload_round_trips(self, tmp_path: Path) -> None:
+        wrapper = _write_fake_wrapper(
+            tmp_path / "pak_wrap.sh",
+            r"""
+            read line
+            cat <<'EOF'
+            {"status":"success","parser_version":"1.0.0","output":{
+              "pak_path":"/games/Trackmania/Packs/Stadium.pak",
+              "pak_version":6,"title_id":"TMStadium",
+              "is_header_encrypted":false,"is_data_private":false,
+              "file_count":12345,"block_gbx_count":842,
+              "block_gbx_sample":[
+                {"path":"GameCtnBlockInfo/Stadium/Race/RoadTech/RoadTechStraight.Block.Gbx",
+                 "size":5120,"compressed_size":3211,"is_encrypted":false,"class_id":"0x2E001000"}
+              ]
+            }}
+            EOF
+            """,
+        )
+        parser = SubprocessParser(
+            executable=wrapper, parser_version="1.0.0", timeout_seconds=5.0,
+        )
+        r = parser.probe_pak(Path("/games/Trackmania/Packs/Stadium.pak"))
+        assert r.status is ParseStatus.SUCCESS
+        assert r.output["pak_version"] == 6
+        assert r.output["title_id"] == "TMStadium"
+        assert r.output["block_gbx_count"] == 842
+        assert len(r.output["block_gbx_sample"]) == 1
+        assert r.output["block_gbx_sample"][0]["path"].endswith(".Block.Gbx")
+
+    def test_unsupported_format_for_non_pak(self, tmp_path: Path) -> None:
+        # Simulates pointing probe-pak at something that isn't a
+        # NadeoPak (e.g., the raw .pak happens to be encrypted in a
+        # way GBX.NET.PAK doesn't handle, or the file has been
+        # corrupted). The real wrapper's ClassifyError routes
+        # NotAPakException → unsupported_format.
+        wrapper = _write_fake_wrapper(
+            tmp_path / "bad_pak_wrap.sh",
+            r"""
+            read line
+            cat <<'EOF'
+            {"status":"error","parser_version":"1.0.0","error_code":"unsupported_format","error_detail":"NotAPakException: magic mismatch"}
+            EOF
+            """,
+        )
+        parser = SubprocessParser(
+            executable=wrapper, parser_version="1.0.0", timeout_seconds=5.0,
+        )
+        r = parser.probe_pak(Path("/some/Stadium.pak"))
+        assert r.error_code is ParseErrorCode.UNSUPPORTED_FORMAT
+        # unsupported_format is permanent — a non-pak file is not
+        # going to become a pak on retry.
+        assert r.status is ParseStatus.FAILED_PERMANENT

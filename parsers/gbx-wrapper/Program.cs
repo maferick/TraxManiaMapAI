@@ -2,9 +2,10 @@
 //
 // Contract (must match src/parsers/README.md v1):
 //   argv:           "map" | "replay" | "diagnose-map" | "diagnose-replay"
-//                   | "emit-map"
+//                   | "emit-map" | "dump-block-info" | "probe-pak"
 //   stdin:          single line —
-//                     • parse / diagnose commands: absolute path to artifact
+//                     • parse / diagnose / dump-block-info / probe-pak:
+//                         absolute path to artifact
 //                     • "emit-map":                JSON object, see MapEmitter
 //   stdout:         a single JSON object (success or structured error)
 //   exit code:      0 for any structured outcome (including reported errors)
@@ -32,11 +33,12 @@ public static class Program
         if (args.Length != 1 ||
             (args[0] != "map" && args[0] != "replay"
              && args[0] != "diagnose-map" && args[0] != "diagnose-replay"
-             && args[0] != "emit-map" && args[0] != "dump-block-info"))
+             && args[0] != "emit-map" && args[0] != "dump-block-info"
+             && args[0] != "probe-pak"))
         {
             Console.Error.WriteLine(
                 "usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay"
-                + "|emit-map|dump-block-info>");
+                + "|emit-map|dump-block-info|probe-pak>");
             return 2;
         }
 
@@ -82,6 +84,7 @@ public static class Program
                 "diagnose-replay" => Diagnose.InspectReplay(stdinLine),
                 "emit-map" => MapEmitter.EmitFromStdinJson(stdinLine),
                 "dump-block-info" => BlockInfoDump.DumpFromPath(stdinLine),
+                "probe-pak" => PakProbe.ProbeFromPath(stdinLine),
                 _ => throw new InvalidOperationException("unreachable"),
             };
             EmitSuccess(payload);
@@ -141,6 +144,7 @@ public static class Program
             return ErrorCodes.CorruptBody;
         }
         if (name.Contains("NotAGbx", StringComparison.Ordinal)
+            || name.Contains("NotAPak", StringComparison.Ordinal)
             || name.Contains("NotSupported", StringComparison.Ordinal)
             || name.Contains("Unsupported", StringComparison.Ordinal))
         {

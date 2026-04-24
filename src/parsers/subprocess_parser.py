@@ -50,6 +50,26 @@ class SubprocessParser(ParserClient):
     def parse_replay(self, artifact_path: Path) -> ParseResult:
         return self._invoke("replay", f"{artifact_path}\n")
 
+    def probe_pak(self, pak_path: Path) -> ParseResult:
+        """Invoke the wrapper's ``probe-pak`` command.
+
+        #217-M2a — capability probe for NadeoPak (.pak) archives.
+        TM2020 ships block data in ``Packs/Stadium.pak`` rather than
+        loose ``.Block.Gbx`` files; before we build a pak walker we
+        need empirical confirmation that GBX.NET.PAK opens the
+        operator's pak without a key and can enumerate the block
+        entries.
+
+        Returns a success ``output`` with ``pak_version``, ``title_id``,
+        ``file_count``, ``block_gbx_count``, and a sample of block
+        entries (path + size + encrypted flag) — or a structured error
+        if the pak is encrypted / unsupported / malformed.
+
+        This call does NOT decompress individual entries; it only
+        reads the pak directory.
+        """
+        return self._invoke("probe-pak", f"{pak_path}\n")
+
     def dump_block_info(self, block_gbx_path: Path) -> ParseResult:
         """Invoke the wrapper's ``dump-block-info`` command.
 

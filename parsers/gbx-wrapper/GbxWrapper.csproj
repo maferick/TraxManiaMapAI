@@ -19,6 +19,11 @@
     <!-- GBX.NET.ZLib stays on the 1.x line (no 2.x release yet); only
          required if the wrapper needs to decompress ghost sample streams. -->
     <PackageReference Include="GBX.NET.ZLib" Version="1.1.*" />
+    <!-- MIT-licensed reader for NadeoPak (.pak) archives. TM2020's game
+         data ships in Packs/Stadium.pak rather than loose .Block.Gbx
+         files; the `probe-pak` verb lists entries so callers can decide
+         whether direct-pak walking is viable vs requiring extraction. -->
+    <PackageReference Include="GBX.NET.PAK" Version="2.*" />
   </ItemGroup>
 
 </Project>
