@@ -172,18 +172,26 @@ def _summarize_generated_artifact(path: Path) -> dict[str, Any] | None:
             data = json.load(f)
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or data.get("schema_version") != "generation-v0":
+    # Accept the whole generation-v0.x family. New schema revs that
+    # add fields on top of v0 should surface in the UI too; rejecting
+    # them here silently hides Level-2 stripped artifacts (v0.1) etc.
+    if not isinstance(data, dict):
+        return None
+    schema_version = data.get("schema_version") or ""
+    if not schema_version.startswith("generation-v0"):
         return None
     inputs = data.get("inputs") or {}
     fin = data.get("finishability") or {}
     route = data.get("route") or {}
     route_intervals = route.get("intervals") or []
+    map_block = data.get("map") or {}
     return {
         "filename": path.name,
         "size_bytes": path.stat().st_size,
         "mtime": datetime.fromtimestamp(
             path.stat().st_mtime, tz=timezone.utc,
         ).isoformat(),
+        "schema_version": schema_version,
         "run_id": data.get("run_id"),
         "generated_at": data.get("generated_at"),
         "base_map_id": inputs.get("base_map_id"),
@@ -191,11 +199,16 @@ def _summarize_generated_artifact(path: Path) -> dict[str, Any] | None:
         "style_tag_filter": inputs.get("style_tag_filter"),
         "difficulty": inputs.get("difficulty"),
         "random_seed": inputs.get("random_seed"),
+        "strip": inputs.get("strip", False),
         "route_verified": fin.get("route_verified"),
         "reject_reason": fin.get("reject_reason"),
         "estimated_time_ms": fin.get("estimated_time_ms"),
         "ai_confidence": fin.get("ai_confidence"),
         "interval_count": len(route_intervals),
+        # Level-2 diagnostic. 0 for v0 artifacts; real counts for v0.1.
+        "stripped": bool(map_block.get("stripped", False)),
+        "kept_block_count": map_block.get("kept_block_count"),
+        "base_block_count": map_block.get("base_block_count"),
     }
 
 
