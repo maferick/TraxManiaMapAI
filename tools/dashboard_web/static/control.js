@@ -188,8 +188,27 @@
     }
     const payload = await resp.json();
     if (resp.status === 409) {
+      // The server includes the currently-running action in the 409
+      // payload; attach our SSE stream to its log so the operator
+      // sees the live tail of whatever's blocking instead of just a
+      // "busy" dead end.
       appendLogLine('[busy] ' + (payload.detail || 'another action is running'));
-      setStatus('<span class="idle-label">busy</span>');
+      const running = payload.current_run;
+      if (running && running.id) {
+        appendLogLine(
+          '[attaching to live log of ' + running.action +
+          ' #' + running.id + ']'
+        );
+        // Replay any already-captured lines first, then stream.
+        // streamRun computes SSE offset from the current DOM line
+        // count — since we just appended preLines, the offset is
+        // correct without passing it explicitly.
+        const preLines = running.log_tail || [];
+        preLines.forEach(appendLogLine);
+        streamRun(running.id, running.title + ' (in progress)');
+      } else {
+        setStatus('<span class="idle-label">busy</span>');
+      }
       return;
     }
     if (resp.status === 400) {
