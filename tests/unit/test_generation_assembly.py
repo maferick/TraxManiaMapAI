@@ -105,6 +105,119 @@ class TestTieBreakKey:
         assert ordered[0].corridor_id == 3
 
 
+class TestValidationTieBreak:
+    """#226/#227 validator wired into assembly ranking.
+
+    Learned_corridor_score stays authoritative; validation injects
+    tiers *after* it. Verified invariants:
+      - higher learned score always wins, regardless of validation
+      - within equal learned buckets, validation_score breaks ties
+      - validation_score == 0 is pushed to the back of the bucket
+      - None validation_score degrades gracefully (no crash, no swap
+        bias vs. un-validated siblings)
+    """
+
+    def _cand(self, cid: int, learned: float, val: float | None) -> CandidateCorridor:
+        from src.generation.assembly import CandidateCorridor as CC
+        return CC(
+            corridor_id=cid, map_id=42,
+            src=_anchor("Spawn", 0), dst=_anchor("Goal", 0),
+            path_cells=((0, 0, 0), (0, 0, 1)),
+            path_length=2, contains_virtual_edge=False,
+            corridor_confidence=0.5,
+            learned_corridor_score=learned,
+            validation_score=val,
+        )
+
+    def test_learned_wins_regardless_of_validation(self) -> None:
+        # Low learned + high validation loses to high learned + 0 validation.
+        # The trained ranker stays authoritative.
+        low_learned_high_val = self._cand(1, learned=0.5, val=1.0)
+        high_learned_zero_val = self._cand(2, learned=0.9, val=0.0)
+        from src.generation.assembly import _tie_break_key_with_validation
+        ordered = sorted(
+            [low_learned_high_val, high_learned_zero_val],
+            key=_tie_break_key_with_validation,
+        )
+        assert ordered[0].corridor_id == 2  # learned=0.9 wins
+
+    def test_validation_breaks_learned_ties(self) -> None:
+        # Equal learned, different validation. Higher validation wins.
+        from src.generation.assembly import _tie_break_key_with_validation
+        a = self._cand(1, learned=0.8, val=0.3)
+        b = self._cand(2, learned=0.8, val=0.9)
+        ordered = sorted([a, b], key=_tie_break_key_with_validation)
+        assert ordered[0].corridor_id == 2
+
+    def test_zero_validation_sorts_to_back_of_bucket(self) -> None:
+        # Equal learned, one validation=0.0 and one validation=0.1 →
+        # the 0.0 goes to the back; 'avoid validation_score = 0' rule.
+        from src.generation.assembly import _tie_break_key_with_validation
+        zero_val = self._cand(1, learned=0.8, val=0.0)
+        tiny_val = self._cand(2, learned=0.8, val=0.1)
+        ordered = sorted(
+            [zero_val, tiny_val], key=_tie_break_key_with_validation,
+        )
+        assert ordered[0].corridor_id == 2
+        assert ordered[-1].corridor_id == 1
+
+    def test_none_validation_treated_as_neutral(self) -> None:
+        # None validation treated as -1 in the score tier but NOT
+        # in the zero-floor tier — so a None corridor out-ranks a
+        # zero-score corridor within the same learned bucket, which
+        # is the right answer: we shouldn't penalise un-validated
+        # corridors as if they were fully-broken ones.
+        from src.generation.assembly import _tie_break_key_with_validation
+        zero_val = self._cand(1, learned=0.8, val=0.0)
+        none_val = self._cand(2, learned=0.8, val=None)
+        ordered = sorted(
+            [zero_val, none_val], key=_tie_break_key_with_validation,
+        )
+        assert ordered[0].corridor_id == 2
+
+    def test_opt_out_preserves_legacy_behaviour(self) -> None:
+        # When use_validation_tie_break=False, the assembly result
+        # must match the pre-validator output exactly — even with
+        # validation scores populated on the candidates.
+        src, dst = _anchor("Spawn", 0), _anchor("Goal", 0)
+        scored = self._cand(1, learned=0.5, val=0.9)
+        unscored = self._cand(2, learned=0.9, val=0.0)
+        # Make src/dst match both
+        for c in (scored, unscored):
+            pass  # already share the _anchor default
+        inputs = AssemblyInputs(
+            map_id=42, is_linked_cp=True,
+            anchors=(src, dst),
+            candidates=(scored, unscored),
+            use_validation_tie_break=False,
+        )
+        result = assemble_route_from_inputs(inputs)
+        from src.generation import AssembledRoute
+        assert isinstance(result, AssembledRoute)
+        # Without validator participation, learned=0.9 wins.
+        assert result.intervals[0].chosen.corridor_id == 2
+
+    def test_validator_swap_flips_pick(self) -> None:
+        # With validator participation, a zero-validation leader
+        # flips to a lower-learned alternative *only* within the
+        # same learned-score bucket. Here both are equal learned
+        # → validation breaks the tie.
+        src, dst = _anchor("Spawn", 0), _anchor("Goal", 0)
+        clean = self._cand(9, learned=0.7, val=0.95)
+        broken = self._cand(1, learned=0.7, val=0.0)
+        inputs = AssemblyInputs(
+            map_id=42, is_linked_cp=True,
+            anchors=(src, dst),
+            candidates=(clean, broken),
+            use_validation_tie_break=True,
+        )
+        result = assemble_route_from_inputs(inputs)
+        from src.generation import AssembledRoute
+        assert isinstance(result, AssembledRoute)
+        assert result.intervals[0].chosen.corridor_id == 9
+        assert result.intervals[0].chosen.validation_score == 0.95
+
+
 # ---------------------------------------------------------------------
 # Reject-reason branches
 # ---------------------------------------------------------------------

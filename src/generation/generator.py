@@ -506,10 +506,21 @@ def generate_from_base(
             strip=inputs.strip,
         )
 
+    # Build a per-candidate validator closure — fed into assemble_route
+    # so the tie-break's new validation tier has real scores to work
+    # with. Loads geometry_lookup + replay_touched_cells once; each
+    # candidate validation is a cheap pass over the base blocks.
+    validator = _build_candidate_validator(
+        conn=conn,
+        base_blocks=base.blocks,
+        base_map_id=inputs.base_map_id,
+    )
+
     route = assemble_route(
         conn, inputs.base_map_id,
         random_seed=inputs.random_seed,
         top_k_candidates=_TOP_K_CANDIDATES,
+        validator=validator,
     )
     gate = run_finishability_gate(route)
 
@@ -603,6 +614,52 @@ def generate_from_base(
         f"{gate.ai_confidence:.3f}" if gate.ai_confidence is not None else "n/a",
     )
     return artifact
+
+
+def _build_candidate_validator(
+    *,
+    conn: Connection,
+    base_blocks: list[dict[str, Any]],
+    base_map_id: int,
+) -> "Any":
+    """Closure: CandidateCorridor → validation_score in [0, 1] | None.
+
+    Passed to :func:`assemble_route` so the extended tie-break has
+    real scores to work on. Returns None when the block_geometry
+    catalogue is empty (fresh DB / integration tests) — that
+    disables the validation tie-break without a special-case code
+    path: assemble_route just skips the per-candidate scoring loop
+    and the existing learned-score tie-break applies unchanged.
+    """
+    from src.generation.geom_validator import load_geometry_lookup
+    from src.generation.preemit import (
+        _normalize_block,
+        score_corridor,
+    )
+    from src.generation.replay_cells import load_replay_touched_cells
+
+    geometry_lookup = load_geometry_lookup(conn)
+    if not geometry_lookup:
+        _LOG.info(
+            "generate_from_base: skipping per-candidate validator — "
+            "block_geometry catalogue empty",
+        )
+        return None
+    replay_cells = load_replay_touched_cells(conn, map_id=base_map_id)
+    normalised = [_normalize_block(b) for b in base_blocks]
+
+    def _validator(candidate, interval_index: int) -> float | None:
+        cs = score_corridor(
+            corridor_id=candidate.corridor_id,
+            interval_index=interval_index,
+            path_cells=candidate.path_cells,
+            normalised_blocks=normalised,
+            geometry_lookup=geometry_lookup,
+            replay_touched_cells=replay_cells if replay_cells else None,
+        )
+        return None if cs is None else cs.validation_score
+
+    return _validator
 
 
 def _run_preemit_validation_inline(

@@ -349,6 +349,96 @@ def run_preemit_validation(
     return summary
 
 
+def score_corridor(
+    *,
+    corridor_id: int,
+    interval_index: int,
+    path_cells: Iterable[Cell],
+    blocks: Iterable[Mapping[str, Any]] | None = None,
+    normalised_blocks: list[Mapping[str, Any]] | None = None,
+    geometry_lookup: Mapping[tuple[str, str], GeometryInfo],
+    replay_touched_cells: set[Cell] | None = None,
+    ground_y: int = 9,
+    max_route_step_cheb: int = 1,
+    jump_cone: JumpConeConfig | None = None,
+) -> CorridorValidationScore | None:
+    """Score one corridor's path against the current block state.
+
+    Either ``blocks`` (raw DB / wrapper rows, will be normalised) or
+    ``normalised_blocks`` (already in wrapper shape) must be provided.
+    Callers that validate many corridors against the same map pass
+    ``normalised_blocks`` once to skip re-normalisation.
+
+    Returns ``None`` for paths shorter than one cell (can't score).
+    """
+    path_cells_list = [tuple(c) for c in path_cells]
+    if not path_cells_list:
+        return None
+    if normalised_blocks is None:
+        if blocks is None:
+            raise ValueError(
+                "score_corridor requires either blocks or normalised_blocks"
+            )
+        normalised_blocks = [_normalize_block(b) for b in blocks]
+    path_cells_set = set(path_cells_list)
+
+    geom_rpt = validate_map_geometry(
+        blocks=normalised_blocks,
+        geometry_lookup=geometry_lookup,
+        route_cells=path_cells_list,
+        ground_y=ground_y,
+        max_route_step_cheb=max_route_step_cheb,
+    )
+    partial_hits = sum(
+        1
+        for f in geom_rpt.by_code(CODE_PARTIAL_MULTICELL)
+        if f.severity == SEVERITY_FAIL and _near(path_cells_set, f.cell)
+    )
+    missing_hits = len(geom_rpt.by_code(CODE_MISSING_SUPPORT))
+    route_gap_hits = len(geom_rpt.by_code(CODE_ROUTE_GAP))
+
+    broken = uncertain = plausible = replay = 0
+    if len(path_cells_list) >= 2:
+        from src.generation.jump_validator import (
+            CLASS_GEOMETRICALLY_PLAUSIBLE,
+            CLASS_LIKELY_BROKEN,
+            CLASS_SUPPORTED_BY_REPLAY,
+            CLASS_UNCERTAIN,
+            validate_jumps,
+        )
+        jrpt = validate_jumps(
+            blocks=normalised_blocks,
+            geometry_lookup=geometry_lookup,
+            route_cells=path_cells_list,
+            replay_touched_cells=replay_touched_cells,
+            cone=jump_cone,
+        )
+        broken = len(jrpt.by_class(CLASS_LIKELY_BROKEN))
+        uncertain = len(jrpt.by_class(CLASS_UNCERTAIN))
+        plausible = len(jrpt.by_class(CLASS_GEOMETRICALLY_PLAUSIBLE))
+        replay = len(jrpt.by_class(CLASS_SUPPORTED_BY_REPLAY))
+
+    return CorridorValidationScore(
+        corridor_id=int(corridor_id),
+        interval_index=int(interval_index),
+        path_length=len(path_cells_list),
+        partial_multicell_hits=partial_hits,
+        missing_support_hits=missing_hits,
+        route_gap_hits=route_gap_hits,
+        jump_likely_broken=broken,
+        jump_uncertain=uncertain,
+        jump_geometrically_plausible=plausible,
+        jump_supported_by_replay=replay,
+        validation_score=_corridor_validation_score(
+            partial_multicell_hits=partial_hits,
+            missing_support_hits=missing_hits,
+            route_gap_hits=route_gap_hits,
+            jump_likely_broken=broken,
+            jump_uncertain=uncertain,
+        ),
+    )
+
+
 def _score_per_corridor(
     *,
     corridor_paths: Iterable[tuple[int, int, Iterable[Cell]]],
@@ -359,85 +449,22 @@ def _score_per_corridor(
     max_route_step_cheb: int,
     jump_cone: JumpConeConfig | None,
 ) -> tuple[CorridorValidationScore, ...]:
-    """Validate each corridor's path as if it were the whole route,
-    then attribute findings by Chebyshev proximity to the path.
-
-    The per-corridor pass runs the SAME validators against a single
-    corridor's path_cells; findings come back scoped automatically
-    (route_gap for this corridor, jumps at this corridor's takeoffs,
-    etc.). The one finding class that needs proximity filtering is
-    partial_multicell — that runs on the full map regardless of
-    route, so we filter to cells near this corridor's path only.
-    """
+    """Score every corridor; thin loop over :func:`score_corridor`."""
     out: list[CorridorValidationScore] = []
     for corridor_id, interval_index, path_iter in corridor_paths:
-        path_cells_list = [tuple(c) for c in path_iter]
-        if not path_cells_list:
-            continue
-        path_cells_set = set(path_cells_list)
-
-        geom_rpt = validate_map_geometry(
-            blocks=normalised_blocks,
+        cs = score_corridor(
+            corridor_id=corridor_id,
+            interval_index=interval_index,
+            path_cells=path_iter,
+            normalised_blocks=normalised_blocks,
             geometry_lookup=geometry_lookup,
-            route_cells=path_cells_list,
+            replay_touched_cells=replay_touched_cells,
             ground_y=ground_y,
             max_route_step_cheb=max_route_step_cheb,
+            jump_cone=jump_cone,
         )
-        # partial_multicell runs globally; keep only hits "near" the
-        # corridor so two corridors on opposite ends of a map don't
-        # both get blamed for the same stripper drop-out.
-        partial_hits = sum(
-            1
-            for f in geom_rpt.by_code(CODE_PARTIAL_MULTICELL)
-            if f.severity == SEVERITY_FAIL and _near(path_cells_set, f.cell)
-        )
-        missing_hits = len(geom_rpt.by_code(CODE_MISSING_SUPPORT))
-        route_gap_hits = len(geom_rpt.by_code(CODE_ROUTE_GAP))
-
-        jumps = 0, 0, 0, 0  # broken, uncertain, plausible, replay
-        if len(path_cells_list) >= 2:
-            from src.generation.jump_validator import (
-                CLASS_GEOMETRICALLY_PLAUSIBLE,
-                CLASS_LIKELY_BROKEN,
-                CLASS_SUPPORTED_BY_REPLAY,
-                CLASS_UNCERTAIN,
-                validate_jumps,
-            )
-            jrpt = validate_jumps(
-                blocks=normalised_blocks,
-                geometry_lookup=geometry_lookup,
-                route_cells=path_cells_list,
-                replay_touched_cells=replay_touched_cells,
-                cone=jump_cone,
-            )
-            jumps = (
-                len(jrpt.by_class(CLASS_LIKELY_BROKEN)),
-                len(jrpt.by_class(CLASS_UNCERTAIN)),
-                len(jrpt.by_class(CLASS_GEOMETRICALLY_PLAUSIBLE)),
-                len(jrpt.by_class(CLASS_SUPPORTED_BY_REPLAY)),
-            )
-        broken, uncertain, plausible, replay = jumps
-
-        score = _corridor_validation_score(
-            partial_multicell_hits=partial_hits,
-            missing_support_hits=missing_hits,
-            route_gap_hits=route_gap_hits,
-            jump_likely_broken=broken,
-            jump_uncertain=uncertain,
-        )
-        out.append(CorridorValidationScore(
-            corridor_id=int(corridor_id),
-            interval_index=int(interval_index),
-            path_length=len(path_cells_list),
-            partial_multicell_hits=partial_hits,
-            missing_support_hits=missing_hits,
-            route_gap_hits=route_gap_hits,
-            jump_likely_broken=broken,
-            jump_uncertain=uncertain,
-            jump_geometrically_plausible=plausible,
-            jump_supported_by_replay=replay,
-            validation_score=score,
-        ))
+        if cs is not None:
+            out.append(cs)
     return tuple(out)
 
 
