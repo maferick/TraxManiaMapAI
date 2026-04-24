@@ -50,6 +50,9 @@ STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3: str = (
 STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3: str = (
     "halo_axis_1_plus_anchor_radius_3_vext_3"
 )
+STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3: str = (
+    "halo_xz_cheb_1_vext_3_plus_anchor_radius_3"
+)
 STRIP_POLICY_NONE: str = "none"
 
 # Radius of the anchor-preservation cube used by
@@ -78,6 +81,18 @@ _AXIS_NEIGHBORS: tuple[tuple[int, int, int], ...] = (
     (+1,  0,  0), (-1,  0,  0),
     ( 0, +1,  0), ( 0, -1,  0),
     ( 0,  0, +1), ( 0,  0, -1),
+)
+
+# 3×3 XZ neighbourhood at the same Y (the 8 cells surrounding the
+# path cell in its horizontal plane). Used by the #217-b quick-patch
+# policy to catch wall / transition / slope blocks sitting at
+# XZ-diagonal offsets from the route — the canonical drop pattern
+# surfaced by the PR #56 diagnostic on map 1212 cell (31, 13, 22).
+_XZ_CHEB_1_NEIGHBORS: tuple[tuple[int, int, int], ...] = tuple(
+    (dx, 0, dz)
+    for dx in (-1, 0, 1)
+    for dz in (-1, 0, 1)
+    if (dx, dz) != (0, 0)
 )
 
 
@@ -144,22 +159,36 @@ def compute_kept_cells(
     uses_anchor_radius = policy in (
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+        STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
     )
-    uses_path_halo = (
+    uses_path_axis_halo = (
         policy == STRIP_POLICY_HALO_AXIS_1
-        or uses_anchor_radius
+        or policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3
+        or policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3
     )
-    uses_vertical_ext = (
-        policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3
+    uses_path_xz_cheb1 = (
+        policy == STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3
+    )
+    uses_vertical_ext = policy in (
+        STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+        STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
     )
 
     for iv in route.intervals:
         for cell in iv.chosen.path_cells:
             kept.add(cell)
             x, y, z = cell
-            if uses_path_halo:
+            if uses_path_axis_halo:
                 for dx, dy, dz in _AXIS_NEIGHBORS:
                     kept.add((x + dx, y + dy, z + dz))
+            if uses_path_xz_cheb1:
+                # Full 3×3 horizontal neighbourhood at the same Y.
+                # Catches wall / transition / slope blocks sitting
+                # at XZ-diagonal offsets that axis-1 skips.
+                for dx, dy, dz in _XZ_CHEB_1_NEIGHBORS:
+                    kept.add((x + dx, y + dy, z + dz))
+                # Axis-1 Y neighbours are kept by vext, so no need
+                # to add ±Y here separately.
             if uses_vertical_ext:
                 # Vertical-only column around this path cell, ±N cells
                 # on Y. Captures pillars / bases / structural supports
@@ -251,7 +280,7 @@ def strip_route(
     route: AssembledRoute,
     base_blocks: list[dict[str, Any]],
     *,
-    policy: str = STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+    policy: str = STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
     anchor_cells: frozenset[Cell] | None = None,
 ) -> StripResult:
     """Apply ``policy`` to ``base_blocks`` given the chosen ``route``.
@@ -268,6 +297,7 @@ def strip_route(
         STRIP_POLICY_HALO_AXIS_1,
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+        STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
         STRIP_POLICY_NONE,
     )
     if policy not in known_policies:

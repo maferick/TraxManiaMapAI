@@ -500,7 +500,7 @@ dropped, producing visible "floating road / missing pillar" gaps
 in-game. Operator in-game testing of map 1212 surfaced this
 pattern after PR L shipped — see #217.
 
-### Strip policy `halo_axis_1_plus_anchor_radius_3_vext_3` (default)
+### Strip policy `halo_axis_1_plus_anchor_radius_3_vext_3`
 
 Everything `halo_axis_1_plus_anchor_radius_3` does, plus:
 
@@ -509,13 +509,40 @@ Everything `halo_axis_1_plus_anchor_radius_3` does, plus:
    `(x, y ± {1, 2, 3}, z)`. A ±3 column along the Y axis.
 
 Captures support / pillar / base geometry directly beneath or above
-drivable cells, which the previous policy dropped whenever the
-route's mid-section was far from any anchor. Vertical-only (not a
-full 3D cube) so we don't widen horizontal coverage beyond the
-axis-1 halo — the original point of the policy was to keep the
-ribbon narrow.
+drivable cells. `halo_axis_1_plus_anchor_radius_3` (PR L) stays as
+a reproducibility-only option.
 
-Free-placed blocks and `BakedBlocks` remain untouched.
+**Known limitation** — the horizontal route-cell halo is still
+axis-only; wall / transition / slope blocks sitting at **XZ-diagonal
+offsets** from a path cell (same Y, ±1 X *and* ±1 Z) get dropped.
+Map-1212 diagnostic (PR #56) isolated 20 such drops at route cell
+`(31, 13, 22)` — walls, `TiltTransition2UpLeft`, `Slope2Straight`.
+Fix ships under `halo_xz_cheb_1_vext_3_plus_anchor_radius_3`.
+
+### Strip policy `halo_xz_cheb_1_vext_3_plus_anchor_radius_3` (default)
+
+Same as `halo_axis_1_plus_anchor_radius_3_vext_3` **except** the
+per-path-cell horizontal halo is upgraded from axis-1 (±X and ±Z
+independently, 4 cells + centre) to **full 3×3 XZ at the cell's Y**
+(all 8 surrounding cells in the horizontal plane, cheb ≤ 1 in XZ).
+
+Concretely, per route path cell we keep:
+- the cell itself;
+- 8 XZ-plane neighbours at the same Y (3×3 layer);
+- ±3 Y column at the same X, Z (vext_3);
+
+= 15 distinct cells per path cell (some overlap with anchor cubes
+for route cells close to anchors).
+
+Anchor cube radius 3 unchanged. Free blocks + `BakedBlocks`
+unchanged.
+
+**Rationale**: PR #56 diagnostic on map 1212 showed one route cell
+losing 20 blocks within Chebyshev distance 2, all wall /
+transition / slope blocks on XZ diagonals. The ±Y axis-1 component
+is now redundant with vext (±3 Y column covers it), so the horizontal
+expansion costs little: ~4 extra cells per path cell vs the previous
+policy.
 
 ### Reject path is preserved
 
@@ -617,13 +644,14 @@ When reviewing a generation implementation PR, verify:
 - [ ] Level-2 strip (if present): `schema_version = "generation-v0.1"`,
       `map.stripped = true`, `map.strip_policy ∈ {"halo_axis_1",
       "halo_axis_1_plus_anchor_radius_3",
-      "halo_axis_1_plus_anchor_radius_3_vext_3"}`,
+      "halo_axis_1_plus_anchor_radius_3_vext_3",
+      "halo_xz_cheb_1_vext_3_plus_anchor_radius_3"}`,
       `map.kept_block_count` matches `len(map.blocks)`, anchor cells
       kept even when not on the chosen path. Artifact + GBX are
       written even when `reject_reason = "stripped_route_broken"`.
       Default policy for `--strip` is
-      `halo_axis_1_plus_anchor_radius_3_vext_3` from #217 onward;
-      earlier policies stay available for reproducibility.
+      `halo_xz_cheb_1_vext_3_plus_anchor_radius_3` from #217-b
+      onward; earlier policies stay available for reproducibility.
 - [ ] Provenance block is complete.
 - [ ] No field surfaced in the JSON artifact is computed from
       data that could drift (e.g. no "map quality" score computed

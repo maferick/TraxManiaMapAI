@@ -517,18 +517,20 @@ def generate_from_base(
     stripped_blocks: list[dict[str, Any]] | None = None
     if inputs.strip and isinstance(route, AssembledRoute):
         from src.generation.stripper import (
-            STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+            STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
             strip_route,
         )
-        # #217 default: halo_axis_1_plus_anchor_radius_3_vext_3 —
-        # adds a ±3 vertical extension per route cell on top of
-        # PR L's anchor cube, capturing the pillar / base / support
-        # geometry that the operator's in-game testing found missing
-        # under the previous policy. Older named policies stay
-        # available for reproducibility.
+        # #217-b default: the map-1212 in-game diagnostic (PR #56)
+        # showed that axis-1 at path cells was dropping wall /
+        # transition / slope blocks sitting at XZ-diagonal offsets.
+        # This policy swaps axis-1 for full 3×3 XZ neighbourhood at
+        # each path cell's Y (catches diagonals), keeps the ±3
+        # vertical extension (#217), and keeps anchor cube radius 3
+        # (PR L). Older named policies stay available for
+        # reproducibility.
         strip_result = strip_route(
             route, base.blocks,
-            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+            policy=STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
             anchor_cells=base.anchor_cells,
         )
         strip_metadata = {
