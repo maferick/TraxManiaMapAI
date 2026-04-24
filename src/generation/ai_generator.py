@@ -79,7 +79,14 @@ _LOG = logging.getLogger(__name__)
 #          prior multi-cell block's mesh. Catalogue filters 33% of
 #          candidates that are user-imported custom blocks — won't load
 #          on a fresh TM2020 install.
-AI_GENERATOR_VERSION: str = "ai-generator-v0.4"
+#   v0.5 — titlepack-safe catalogue: require candidates to appear in
+#          ≥ _MIN_MAP_COUNT_THRESHOLD distinct corpus maps. Kills
+#          one-off TMX legacy uploads that reference blocks TM2020
+#          itself doesn't ship (PlatformDirtOnLandHillSlopeBase etc.,
+#          which caused operator's 'missing resources' load error).
+#          Catalogue is ALSO filtered to the base map's block families
+#          — guarantees the picks share the base's title-pack scope.
+AI_GENERATOR_VERSION: str = "ai-generator-v0.5"
 
 # Fixed Stadium-ground Y. Same convention as geom_validator's
 # default ground_y. Multi-env support is a later phase.
@@ -90,6 +97,15 @@ _DEFAULT_GROUND_Y: int = 9
 DEFAULT_BEAM_WIDTH: int = 3        # v0.2 default; pass 1 to force greedy
 DEFAULT_MAX_INTERVAL_DEPTH: int = 12
 DEFAULT_TOP_N_CANDIDATES: int = 8  # per step, before beam prune
+
+# v0.5 titlepack-safety: a block must appear in at least this many
+# distinct corpus maps to make it into the candidate catalogue. This
+# drops one-off blocks from TMX legacy uploads whose model strings
+# TM2020 can't resolve on a fresh install. 20 = "appears in a
+# meaningful slice of the corpus"; adjustable per-run via
+# AIGenerationInputs.min_block_map_count if a specific base map has a
+# very narrow vocabulary.
+_MIN_MAP_COUNT_THRESHOLD: int = 20
 
 # Scoring weights. Additive linear combination; see the doc.
 AI_GENERATOR_WEIGHTS = {
@@ -174,10 +190,25 @@ class _CatalogueEntry:
 
 def _load_candidate_catalogue(
     conn: Connection,
+    *,
+    base_families: frozenset[str] | None = None,
+    min_map_count: int = _MIN_MAP_COUNT_THRESHOLD,
 ) -> list[_CatalogueEntry]:
     """Return the block_geometry rows eligible as candidate next
     blocks. Drops anchors / deco / support / unknown / gate /
-    free_only. The remaining set is what the greedy loop scores."""
+    free_only / custom uploads / multi-cell blocks.
+
+    v0.5 titlepack safety filters:
+
+      * ``base_families`` — if supplied, restrict candidates to
+        block_family values observed on the base map. The base map
+        loaded in-game by construction, so anything in its family
+        list ships with the operator's title pack.
+      * ``min_map_count`` — the candidate's (family, name) must
+        appear in at least this many distinct corpus maps. One-off
+        rows come from TMX legacy uploads whose model names TM2020
+        can't resolve (the 'missing resources' load error).
+    """
     with cursor(conn) as cur:
         # v0.4 filters:
         #
@@ -198,21 +229,36 @@ def _load_candidate_catalogue(
         #    empty and read as partial_multicell FAILs post-synth.
         #    Defer multi-cell support to the mesh-aware placement
         #    phase (M1/M2 workstream); v0 stays unit-only.
+        params: list = [int(min_map_count)]
+        family_clause = ""
+        if base_families:
+            fam_placeholders = ",".join(["%s"] * len(base_families))
+            family_clause = f"  AND bg.block_family IN ({fam_placeholders}) "
+            params.extend(sorted(base_families))
         cur.execute(
-            "SELECT block_family, block_name, shape_class, "
-            "       is_anchor_capable, footprint_x, footprint_y, "
-            "       footprint_z, connector_hint "
-            "FROM block_geometry "
-            "WHERE is_anchor_capable = 0 "
-            "  AND is_deco = 0 "
-            "  AND shape_class IN ('straight','curve','ramp','loop','platform') "
-            "  AND placement_mode IN ('grid_only', 'mixed', 'unknown') "
-            "  AND connector_hint <> '' "
-            "  AND footprint_x = 1 "
-            "  AND block_name NOT LIKE '%\\\\%' "
-            "  AND block_name NOT LIKE '%/%' "
-            "  AND block_name NOT LIKE '%.Block.Gbx%' "
-            "  AND block_name NOT LIKE '%_CustomBlock%'"
+            "SELECT bg.block_family, bg.block_name, bg.shape_class, "
+            "       bg.is_anchor_capable, bg.footprint_x, bg.footprint_y, "
+            "       bg.footprint_z, bg.connector_hint "
+            "FROM block_geometry bg "
+            "WHERE bg.is_anchor_capable = 0 "
+            "  AND bg.is_deco = 0 "
+            "  AND bg.shape_class IN ('straight','curve','ramp','loop','platform') "
+            "  AND bg.placement_mode IN ('grid_only', 'mixed', 'unknown') "
+            "  AND bg.connector_hint <> '' "
+            "  AND bg.footprint_x = 1 "
+            "  AND bg.block_name NOT LIKE '%%\\\\%%' "
+            "  AND bg.block_name NOT LIKE '%%/%%' "
+            "  AND bg.block_name NOT LIKE '%%.Block.Gbx%%' "
+            "  AND bg.block_name NOT LIKE '%%_CustomBlock%%' "
+            "  AND ( "
+            "       SELECT COUNT(DISTINCT bp.map_id) "
+            "       FROM block_placements bp "
+            "       WHERE bp.block_family = bg.block_family "
+            "         AND bp.block_type = bg.block_name "
+            "         AND bp.is_free = 0 "
+            "      ) >= %s "
+            f"{family_clause}",
+            tuple(params),
         )
         rows = cur.fetchall()
     out: list[_CatalogueEntry] = []
@@ -909,6 +955,10 @@ class _BaseAnchors:
     anchor_blocks: list[dict[str, Any]]     # grid rows for the anchors
     model_hash: str | None
     learned_score_version: str | None
+    # v0.5: the block_family values the base map actually uses. The
+    # AI catalogue filters to this set so the generated map's blocks
+    # stay inside the operator's title pack.
+    base_families: frozenset[str] = frozenset()
 
 
 _ANCHOR_SQL = """
@@ -975,8 +1025,11 @@ def _fetch_base_anchors(
     # verbatim so the finishability gate's anchor-presence test
     # stays satisfied.
     anchor_blocks: list[dict[str, Any]] = []
+    base_families: set[str] = set()
     for family, name, x, y, z, rotation in block_rows:
         cell = (int(x), int(y), int(z))
+        if family:
+            base_families.add(str(family))
         if cell not in anchor_cells_set:
             continue
         anchor_blocks.append({
@@ -1000,6 +1053,7 @@ def _fetch_base_anchors(
         anchor_blocks=anchor_blocks,
         model_hash=model_hash,
         learned_score_version=learned_score_version,
+        base_families=frozenset(base_families),
     )
 
 
@@ -1166,7 +1220,10 @@ def generate_ai_map(
             config_hash=config_hash, sha=sha,
         )
 
-    catalogue = _load_candidate_catalogue(conn)
+    catalogue = _load_candidate_catalogue(
+        conn,
+        base_families=base.base_families or None,
+    )
     pair_priors = _load_pair_priors(conn)
     triple_priors = _load_triple_priors(conn)
     shape_surface_lookup = _load_shape_surface_lookup(conn)

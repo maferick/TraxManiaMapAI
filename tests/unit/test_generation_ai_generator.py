@@ -635,6 +635,26 @@ class TestBeamSearch:
         assert len(result.blocks) == 4
 
 
+class TestCatalogueFilters:
+    """v0.5: catalogue SQL excludes custom blocks, multi-cell blocks,
+    and rare blocks (< _MIN_MAP_COUNT_THRESHOLD distinct maps).
+    Full SQL integration is exercised by the live smoke; here we pin
+    the module-level constants that gate behaviour."""
+
+    def test_min_map_count_threshold_is_set(self) -> None:
+        from src.generation.ai_generator import _MIN_MAP_COUNT_THRESHOLD
+        # Regression guard: raising this unilaterally would starve the
+        # candidate pool on maps with narrow vocabulary; dropping it
+        # to 1 reintroduces the legacy-block load errors.
+        assert 5 <= _MIN_MAP_COUNT_THRESHOLD <= 100
+
+    def test_version_bumped_to_v05(self) -> None:
+        # Any algorithm change must bump the version so A/B diffs and
+        # run_id deterministic re-hash work.
+        from src.generation.ai_generator import AI_GENERATOR_VERSION
+        assert AI_GENERATOR_VERSION == "ai-generator-v0.5"
+
+
 class TestPositiveWeightKeys:
     def test_contains_only_positive_signals(self) -> None:
         # ai_confidence divides by this set's sum. Adding a penalty
