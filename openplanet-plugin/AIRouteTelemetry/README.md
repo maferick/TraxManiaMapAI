@@ -2,9 +2,15 @@
 
 AngelScript plugin that closes the feedback loop of the remote-test
 rig. Watches the shared rig folder for `<id>.in.json` triggers
-dropped by the Windows agent, loads the referenced `.Map.Gbx` via
-the TM2020 title script API, observes load-time errors + spawn
-state, and writes `<id>.out.json` for the agent to ship upstream.
+dropped by the Windows agent, opens the referenced `.Map.Gbx`
+**in the TM2020 map editor**, runs the game's native AI validator
+via `CGameEditorPluginMap.Validate()`, and writes `<id>.out.json`
+with structured telemetry the agent ships upstream.
+
+**v0.2 — unattended finishability via the editor validator.** TM2020
+ships the same AI driver the TMX upload path uses; the plugin
+delegates the "can the map be driven from spawn to goal?" question
+to the game itself instead of trying to simulate input.
 
 - **Tested target:** OpenPlanet 1.29.5, AngelScript 2.39 WIP
 - **Game:** Trackmania (2020) — `CTrackMania` only
@@ -61,45 +67,65 @@ The plugin handles files matching this shape:
   "load_success": true,
   "load_error": null,
   "spawn_ok": true,
-  "finished": false,
+  "finished": true,
+  "validation_status": "Validated",
+  "author_time_ms": 18450,
   "checkpoint_times_ms": [],
   "driven_cells": [],
-  "exit_reason": "observer_timeout",
-  "plugin_version": "plugin-v0.1"
+  "exit_reason": "validated",
+  "plugin_version": "plugin-v0.2"
 }
 ```
 
-## Lifecycle
+**New in v0.2:**
+
+- `validation_status` — `Validated` / `Validable` / `NotValidable` /
+  `Unknown`. Result of `CGameEditorPluginMap.ValidationStatus` after
+  `Validate()` runs. `Validated` means the AI successfully drove
+  from spawn to goal.
+- `author_time_ms` — author-medal time the in-game validator set
+  on the map, or absent when validation didn't succeed.
+- `finished` is now derived from `validation_status == "Validated"`
+  (the map is finishable by the game's own standards).
+
+Protocol version stays `ai_rig_v1` — v0.1 plugin files still parse.
+
+## Lifecycle (v0.2)
 
 ```
 Main() coroutine:
   loop:
     scan <plugin_storage>/*.in.json without matching *.out.json
     for each:
-      parse → back-to-menu → PlayMap(map_file, "", "")
-      wait up to LOAD_WAIT_SECONDS for RootMap → set load_success
-      observe OBSERVE_SECONDS for GameTerminal[0].ControlledPlayer → set spawn_ok
+      parse → back-to-menu → EditMap(map_file, "", "")
+      wait up to EDITOR_OPEN_WAIT_SECONDS for editor.PluginMapType.IsEditorReadyForRequest
+         → set load_success (or report titlepack / missing-resource error)
+      PluginMapType.Validate()
+      wait up to VALIDATE_WAIT_SECONDS polling ValidationStatus
+         → capture final state (Validated / NotValidable / Validable)
+         → pull PluginMapType.Map.TMObjective_AuthorTime if Validated
       back-to-menu
       write .out.json
     sleep SCAN_INTERVAL_MS
 ```
 
-## Scope
+## Scope (v0.2)
 
-✅ **In** — load-success / load-error detection, spawn sanity,
-structured telemetry file.
+✅ **In**
+- Map-load error detection (titlepack / missing resources /
+  corrupt GBX — all surface as "editor did not open within
+  EDITOR_OPEN_WAIT_SECONDS")
+- **Native editor validation** — the game's AI driver attempts
+  spawn → goal and reports finishability + author-medal time.
+  No human input, no OP input-simulation gymnastics.
 
-❌ **Out (v0.1)** — simulated driving, checkpoint-time capture
-during autonomous play, driven-cell sampling. The OpenPlanet
-sandbox disallows simulating player input; autonomous finish
-detection requires a future integration with a "bot driver"
-plugin or an external input layer. For now, `spawn_ok` +
-`load_success` + `absence of errors` is the load-time signal.
-
-If the operator drives the map manually after the plugin loads it,
-the in-game CP widget still records times — but the plugin won't
-capture them in v0.1 (the GameTerminal CP callback integration is
-a follow-up noted in `Main.as`).
+❌ **Out (deferred)**
+- Per-checkpoint driven telemetry during live play (the native
+  validator reports only the overall result; to break it down
+  per CP we'd need to wrap it or add a second pass that loads the
+  validator's ghost replay)
+- Driven-cell sampling (same reason; plugin writes empty arrays
+  for backcompat with v0.1 protocol)
 
 ## Troubleshooting
 

@@ -579,14 +579,22 @@ def _print_test_report(job: dict[str, Any]) -> None:
         print(f"    load_error        {report['load_error']}")
     print(f"    spawn_ok          {report.get('spawn_ok')}")
     print(f"    finished          {report.get('finished')}")
+    # v0.2 plugin adds native-validation fields.
+    vs = report.get("validation_status")
+    if vs is not None:
+        print(f"    validation_status {vs}")
+    at = report.get("author_time_ms")
+    if at is not None:
+        print(f"    author_time_ms    {at}")
     print(f"    exit_reason       {report.get('exit_reason')}")
     print(f"    plugin_version    {report.get('plugin_version') or '-'}")
     cps = report.get("checkpoint_times_ms") or []
-    print(f"    checkpoints       {len(cps)} times")
-    for i, t in enumerate(cps):
-        print(f"      [{i}] {t} ms")
+    if cps:
+        print(f"    checkpoints       {len(cps)} times")
+        for i, t in enumerate(cps):
+            print(f"      [{i}] {t} ms")
     dc = report.get("driven_cells_count")
-    if dc is not None:
+    if dc:
         print(f"    driven_cells      {dc} (head: {report.get('driven_cells_head') or []})")
     print("")
 

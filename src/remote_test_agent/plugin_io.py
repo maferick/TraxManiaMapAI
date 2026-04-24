@@ -68,7 +68,17 @@ PROTOCOL_VERSION: str = "ai_rig_v1"
 class TelemetryReport:
     """Parsed form of the plugin's .out.json. Fields that the
     plugin didn't populate default to safe zeros so the agent
-    can always ship a structurally-complete report upstream."""
+    can always ship a structurally-complete report upstream.
+
+    v0.2 plugin adds two optional fields for the native-editor-
+    validation path:
+      - validation_status ∈ {Validated, Validable, NotValidable,
+        Unknown} — from CGameEditorPluginMap.ValidationStatus
+      - author_time_ms — set by the in-game AI validator; -1 /
+        None when validation didn't succeed
+    Both default to None for plugins older than v0.2; the agent
+    passes them through as-is.
+    """
     job_id: int
     run_id: str
     load_success: bool = False
@@ -80,6 +90,8 @@ class TelemetryReport:
     exit_reason: str = "other"
     notes: str | None = None
     plugin_version: str | None = None
+    validation_status: str | None = None
+    author_time_ms: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_report_dict(self) -> dict[str, Any]:
@@ -98,6 +110,8 @@ class TelemetryReport:
             "exit_reason": self.exit_reason,
             "notes": self.notes,
             "plugin_version": self.plugin_version,
+            "validation_status": self.validation_status,
+            "author_time_ms": self.author_time_ms,
         }
 
 
@@ -217,6 +231,12 @@ def _parse_report(path: Path) -> TelemetryReport:
                     cells.append((int(c[0]), int(c[1]), int(c[2])))
                 except (TypeError, ValueError):
                     continue
+    author_time_raw = body.get("author_time_ms")
+    author_time = (
+        int(author_time_raw)
+        if isinstance(author_time_raw, (int, float)) and author_time_raw >= 0
+        else None
+    )
     return TelemetryReport(
         job_id=int(body["job_id"]),
         run_id=str(body.get("run_id") or ""),
@@ -236,5 +256,10 @@ def _parse_report(path: Path) -> TelemetryReport:
         plugin_version=(
             str(body["plugin_version"]) if body.get("plugin_version") else None
         ),
+        validation_status=(
+            str(body["validation_status"])
+            if body.get("validation_status") else None
+        ),
+        author_time_ms=author_time,
         raw=body,
     )

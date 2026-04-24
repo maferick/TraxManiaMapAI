@@ -108,10 +108,12 @@ class TestPluginFixtureConformance:
         assert report.job_id == 42
         assert report.load_success is True
         assert report.spawn_ok is True
-        assert report.checkpoint_times_ms == [3200, 6400, 9100]
-        assert report.driven_cells == [(0, 9, 0), (1, 9, 0), (2, 9, 0)]
-        assert report.plugin_version == "plugin-v0.1"
-        assert report.exit_reason == "observer_timeout"
+        # v0.2: native editor validation produces these fields.
+        assert report.validation_status == "Validated"
+        assert report.author_time_ms == 18450
+        assert report.finished is True
+        assert report.plugin_version == "plugin-v0.2"
+        assert report.exit_reason == "validated"
 
 
 class TestPluginIO:
@@ -169,6 +171,45 @@ class TestPluginIO:
         )
         assert rep is None
         assert time.time() - start < 2.0  # sanity: actually short
+
+    def test_v01_plugin_still_parses(self, tmp_path: Path) -> None:
+        # A pre-v0.2 plugin .out.json (no validation_status /
+        # author_time_ms) must still parse cleanly — the fields
+        # default to None on the agent side.
+        (tmp_path / "11.out.json").write_text(json.dumps({
+            "protocol": PROTOCOL_VERSION,
+            "job_id": 11, "run_id": "r", "load_success": True,
+            "spawn_ok": True, "finished": False,
+            "checkpoint_times_ms": [],
+            "driven_cells": [],
+            "exit_reason": "observer_timeout",
+            "plugin_version": "plugin-v0.1",
+        }), encoding="utf-8")
+        rep = _parse_report(tmp_path / "11.out.json")
+        assert rep.plugin_version == "plugin-v0.1"
+        assert rep.validation_status is None
+        assert rep.author_time_ms is None
+        # to_report_dict must still serialise cleanly for the server.
+        d = rep.to_report_dict()
+        assert d["validation_status"] is None
+        assert d["author_time_ms"] is None
+
+    def test_negative_author_time_coerced_to_none(
+        self, tmp_path: Path,
+    ) -> None:
+        # Plugin uses -1 sentinel when validation didn't complete.
+        (tmp_path / "12.out.json").write_text(json.dumps({
+            "protocol": PROTOCOL_VERSION,
+            "job_id": 12, "run_id": "r",
+            "validation_status": "NotValidable",
+            "author_time_ms": -1,
+            "load_success": True,
+            "finished": False,
+            "exit_reason": "not_validable",
+        }), encoding="utf-8")
+        rep = _parse_report(tmp_path / "12.out.json")
+        assert rep.author_time_ms is None
+        assert rep.validation_status == "NotValidable"
 
     def test_malformed_report_rejected(self, tmp_path: Path) -> None:
         (tmp_path / "3.out.json").write_text(

@@ -5,10 +5,12 @@
   "load_success": true,
   "load_error": null,
   "spawn_ok": true,
-  "finished": false,
-  "checkpoint_times_ms": [3200, 6400, 9100],
-  "driven_cells": [[0, 9, 0], [1, 9, 0], [2, 9, 0]],
-  "exit_reason": "observer_timeout",
-  "plugin_version": "plugin-v0.1",
+  "finished": true,
+  "validation_status": "Validated",
+  "author_time_ms": 18450,
+  "checkpoint_times_ms": [],
+  "driven_cells": [],
+  "exit_reason": "validated",
+  "plugin_version": "plugin-v0.2",
   "notes": null
 }
