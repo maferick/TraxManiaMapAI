@@ -65,7 +65,10 @@ _LOG = logging.getLogger(__name__)
 
 # Bump when scoring weights / algorithm change materially — the
 # field ships in the artifact under `map.ai_generator_version`.
-AI_GENERATOR_VERSION: str = "ai-generator-v0.0"
+#   v0.0 — pair prior + connector + traversability + diversity
+#   v0.1 — adds triple priors + pre-step shadow penalty;
+#          ai_confidence denominator now positive-weight sum only
+AI_GENERATOR_VERSION: str = "ai-generator-v0.1"
 
 # Fixed Stadium-ground Y. Same convention as geom_validator's
 # default ground_y. Multi-env support is a later phase.
@@ -192,6 +195,58 @@ def _load_candidate_catalogue(
     return out
 
 
+def _load_triple_priors(
+    conn: Connection,
+) -> dict[tuple[tuple[str, str], tuple[str, str]], dict[tuple[str, str], float]]:
+    """Load P(B_next | B_prev_prev, B_prev) from
+    block_triple_transitions. Returns
+    ``{((fam_prev_prev, name_prev_prev), (fam_prev, name_prev)):
+      {(fam_next, name_next): p}}``.
+
+    Same normalisation pattern as :func:`_load_pair_priors`. The
+    v0.1 scorer treats the triple tier as a sharpener over pairs
+    — it fires only when we have two prior blocks AND the exact
+    triple was observed. Unseen triples score 0 and fall back to
+    the pair tier cleanly."""
+    with cursor(conn) as cur:
+        cur.execute(
+            "SELECT block_family_a, block_name_a, "
+            "       block_family_b, block_name_b, "
+            "       block_family_c, block_name_c, "
+            "       SUM(transition_count) AS c "
+            "FROM block_triple_transitions "
+            "GROUP BY block_family_a, block_name_a, "
+            "         block_family_b, block_name_b, "
+            "         block_family_c, block_name_c"
+        )
+        rows = cur.fetchall()
+    counts: dict[
+        tuple[tuple[str, str], tuple[str, str]],
+        dict[tuple[str, str], int],
+    ] = {}
+    totals: dict[tuple[tuple[str, str], tuple[str, str]], int] = {}
+    for fam_a, name_a, fam_b, name_b, fam_c, name_c, c in rows:
+        key_ab = ((str(fam_a), str(name_a)), (str(fam_b), str(name_b)))
+        key_c = (str(fam_c), str(name_c))
+        c = int(c or 0)
+        counts.setdefault(key_ab, {})[key_c] = c
+        totals[key_ab] = totals.get(key_ab, 0) + c
+    priors: dict[
+        tuple[tuple[str, str], tuple[str, str]],
+        dict[tuple[str, str], float],
+    ] = {}
+    for key_ab, dests in counts.items():
+        total = totals[key_ab]
+        priors[key_ab] = {
+            kc: (c / total) for kc, c in dests.items()
+        } if total else {}
+    _LOG.info(
+        "ai_generator: triple priors for %d (prev_prev, prev) pairs",
+        len(priors),
+    )
+    return priors
+
+
 def _load_pair_priors(
     conn: Connection,
 ) -> dict[tuple[str, str], dict[tuple[str, str], float]]:
@@ -269,12 +324,61 @@ def _direction_toward(src: Cell, dst: Cell) -> int:
 # Scorer
 # ---------------------------------------------------------------------
 
+def _shadow_cells_clear(
+    *,
+    cand: _CandidateBlock,
+    occupied_cells: set[Cell],
+) -> float:
+    """Partial-multicell pre-step penalty.
+
+    If the candidate has ``footprint_x > 1``, its mesh extends from
+    the placement cell along the rotation axis. This check returns
+    the fraction of shadow cells that would be occupied by some
+    OTHER block — partial overlap risks mesh collision mid-route.
+    Fraction 0 → clean; 1 → every shadow cell collides.
+
+    Empty shadow cells (the #226 map-1212 failure) DON'T trigger
+    this penalty here — those become visible in the post-interval
+    validation pass and feed the soft post-placement signal. The
+    pre-step version specifically guards against placing a
+    multi-cell block whose mesh would overlap the anchor we're
+    trying to reach.
+    """
+    fx = cand.info.footprint_x
+    if fx <= 1:
+        return 0.0
+    # Shadow cells — same convention as geom_validator._footprint_shadow_cells
+    # but inlined here to avoid a circular import into the hot path.
+    rot = cand.rotation & 0b11
+    cx, cy, cz = cand.cell
+    if rot == 0:
+        shadow = [(cx + i, cy, cz) for i in range(1, fx)]
+    elif rot == 1:
+        shadow = [(cx, cy, cz + i) for i in range(1, fx)]
+    elif rot == 2:
+        shadow = [(cx - i, cy, cz) for i in range(1, fx)]
+    else:
+        shadow = [(cx, cy, cz - i) for i in range(1, fx)]
+    if not shadow:
+        return 0.0
+    collisions = sum(1 for c in shadow if c in occupied_cells)
+    return collisions / len(shadow)
+
+
 def score_candidate(
     *,
     cand: _CandidateBlock,
     prev_block: tuple[str, str] | None,
+    prev_prev_block: tuple[str, str] | None = None,
     pair_priors: Mapping[tuple[str, str], Mapping[tuple[str, str], float]],
+    triple_priors: (
+        Mapping[
+            tuple[tuple[str, str], tuple[str, str]],
+            Mapping[tuple[str, str], float],
+        ] | None
+    ) = None,
     path_so_far: list[dict[str, Any]],
+    occupied_cells: set[Cell] | None = None,
     weights: Mapping[str, float],
 ) -> tuple[float, dict[str, float]]:
     """Return ``(score, breakdown)`` for a candidate.
@@ -298,6 +402,20 @@ def score_candidate(
         p = pair_priors.get(prev_block, {}).get((cand.family, cand.name), 0.0)
         breakdown["pair_prior"] = float(p)
 
+    # Triple prior: P(cand | prev_prev, prev). Sharpens the pair
+    # tier when we have two prior blocks and the exact triple was
+    # observed in the corpus. Fires on step 3+ within an interval;
+    # earlier steps fall back to the pair tier cleanly.
+    if (
+        triple_priors is not None
+        and prev_block is not None
+        and prev_prev_block is not None
+    ):
+        q = triple_priors.get(
+            (prev_prev_block, prev_block), {},
+        ).get((cand.family, cand.name), 0.0)
+        breakdown["triple_prior"] = float(q)
+
     # Connector: 1.0 if candidate's connector_hint permits entry
     # along the rotation axis. Coarse: straight_x / curve_xz /
     # slope_xy / loop_y all drive along X at rotation 0, so
@@ -314,8 +432,10 @@ def score_candidate(
     # tier so a future edge-level check slots in here.
     breakdown["traversability"] = 1.0 if breakdown["pair_prior"] > 0 else 0.0
 
-    # Sequence score — stub for v0; populated once the pair-triple
-    # combined score is per-block-pair-accessible.
+    # Sequence score — stub for v0.1; ships as a separate PR once
+    # in-memory geometry pair scoring is plumbed through (the
+    # current src.constraints.sequence_scoring.score_pair does
+    # one DB roundtrip per call, unacceptable in the hot loop).
     breakdown["sequence"] = 0.0
 
     # Diversity penalty: count this block's recurrence in the path.
@@ -329,11 +449,17 @@ def score_candidate(
     else:
         breakdown["diversity_penalty"] = 0.0
 
-    # Validation penalty — scored per-step, not per-block. The
-    # pre-scorer knows nothing about cell collisions yet; cheap
-    # check is "did we just place onto an already-occupied cell?".
-    # That check happens in the beam loop; here we default to 0.
-    breakdown["validation_penalty"] = 0.0
+    # v0.1 pre-step validation penalty: partial-multicell shadow
+    # cell collision check. Full geom + jump validators still run
+    # post-interval (and feed ai_confidence); this is the cheap
+    # per-candidate gate that rejects obviously-broken placements
+    # during the greedy walk.
+    if occupied_cells is not None:
+        breakdown["validation_penalty"] = _shadow_cells_clear(
+            cand=cand, occupied_cells=occupied_cells,
+        )
+    else:
+        breakdown["validation_penalty"] = 0.0
 
     score = (
         weights["pair_prior"]         * breakdown["pair_prior"]
@@ -347,6 +473,18 @@ def score_candidate(
     return score, breakdown
 
 
+# Positive-weight signals — their sum is the denominator for the
+# ai_confidence normalisation (max achievable step score, not the
+# sum of absolute weights). Penalties subtract from the score but
+# should NOT inflate the denominator — conflating the two is why
+# v0.0 reported ai_confidence=0.159 on routes whose raw scores
+# averaged ~0.59.
+_POSITIVE_WEIGHT_KEYS = (
+    "pair_prior", "triple_prior", "connector",
+    "traversability", "sequence",
+)
+
+
 # ---------------------------------------------------------------------
 # Greedy interval walk
 # ---------------------------------------------------------------------
@@ -358,6 +496,12 @@ def _generate_interval(
     src_block: tuple[str, str] | None,
     catalogue: list[_CatalogueEntry],
     pair_priors: Mapping[tuple[str, str], Mapping[tuple[str, str], float]],
+    triple_priors: (
+        Mapping[
+            tuple[tuple[str, str], tuple[str, str]],
+            Mapping[tuple[str, str], float],
+        ] | None
+    ),
     occupied_cells: set[Cell],
     max_depth: int,
     weights: Mapping[str, float],
@@ -373,6 +517,7 @@ def _generate_interval(
     result = _IntervalResult(blocks=[], path_cells=[src_cell], score_sum=0.0, score_count=0)
     current_cell = src_cell
     prev_block = src_block
+    prev_prev_block: tuple[str, str] | None = None
 
     # Trivial interval: src and dst are already Chebyshev-adjacent.
     # Happens frequently on Linked-CP maps where consecutive
@@ -419,8 +564,11 @@ def _generate_interval(
             score, breakdown = score_candidate(
                 cand=cand,
                 prev_block=prev_block,
+                prev_prev_block=prev_prev_block,
                 pair_priors=pair_priors,
+                triple_priors=triple_priors,
                 path_so_far=result.blocks,
+                occupied_cells=occupied_cells,
                 weights=weights,
             )
             if best is None or score > best.score:
@@ -452,6 +600,7 @@ def _generate_interval(
         result.score_count += 1
         occupied_cells.add(next_cell)
         current_cell = next_cell
+        prev_prev_block = prev_block
         prev_block = (best.block["block_family"], best.block["block_name"])
 
     # Depth exhausted without reaching dst.
@@ -733,6 +882,7 @@ def generate_ai_map(
 
     catalogue = _load_candidate_catalogue(conn)
     pair_priors = _load_pair_priors(conn)
+    triple_priors = _load_triple_priors(conn)
 
     # Occupied set seeded with anchor cells so the walk never
     # overwrites Spawn / CP / Goal.
@@ -756,6 +906,7 @@ def generate_ai_map(
             src_block=src_block_ref,
             catalogue=catalogue,
             pair_priors=pair_priors,
+            triple_priors=triple_priors,
             occupied_cells=occupied,
             max_depth=inputs.max_interval_depth,
             weights=AI_GENERATOR_WEIGHTS,
@@ -832,14 +983,17 @@ def generate_ai_map(
         )
         _LOG.info("ai_generator validation: %s", validation_detail)
 
-    # AI confidence: mean step score normalised by weight sum so it
-    # sits in a sane [0, 1]-ish range. Clipped.
-    weight_sum = sum(
-        abs(v) for v in AI_GENERATOR_WEIGHTS.values()
+    # AI confidence: mean step score divided by the max achievable
+    # step score (positive weights only, each at their cap of 1.0).
+    # Penalties subtract from the raw score but don't inflate the
+    # denominator — v0.0 conflated the two and reported 0.159 on
+    # routes whose raw scores averaged ~0.59.
+    positive_weight_sum = sum(
+        AI_GENERATOR_WEIGHTS[k] for k in _POSITIVE_WEIGHT_KEYS
     )
-    if overall_score_count > 0 and weight_sum > 0:
+    if overall_score_count > 0 and positive_weight_sum > 0:
         raw = overall_score_sum / overall_score_count
-        ai_confidence = max(0.0, min(1.0, raw / weight_sum))
+        ai_confidence = max(0.0, min(1.0, raw / positive_weight_sum))
     else:
         ai_confidence = None
 

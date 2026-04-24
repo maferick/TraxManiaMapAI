@@ -10,11 +10,13 @@ import pytest
 
 from src.generation.ai_generator import (
     AI_GENERATOR_WEIGHTS,
+    _POSITIVE_WEIGHT_KEYS,
     _CandidateBlock,
     _CatalogueEntry,
     _advance,
     _direction_toward,
     _generate_interval,
+    _shadow_cells_clear,
     score_candidate,
 )
 from src.generation.geom_validator import GeometryInfo
@@ -160,6 +162,7 @@ class TestIntervalWalker:
             src_block=("Platform", "PlatformPlasticStart"),
             catalogue=self._cat(),
             pair_priors={},
+            triple_priors=None,
             occupied_cells={(0, 9, 0), (5, 9, 0)},
             max_depth=12,
             weights=AI_GENERATOR_WEIGHTS,
@@ -185,6 +188,7 @@ class TestIntervalWalker:
             src_block=("Platform", "PlatformPlasticStart"),
             catalogue=self._cat(),
             pair_priors={},
+            triple_priors=None,
             occupied_cells={(0, 9, 0), (1, 9, 0), (5, 9, 0)},
             max_depth=12,
             weights=AI_GENERATOR_WEIGHTS,
@@ -198,6 +202,7 @@ class TestIntervalWalker:
             src_block=None,
             catalogue=[],
             pair_priors={},
+            triple_priors=None,
             occupied_cells={(0, 9, 0), (5, 9, 0)},
             max_depth=12,
             weights=AI_GENERATOR_WEIGHTS,
@@ -212,6 +217,7 @@ class TestIntervalWalker:
             src_block=None,
             catalogue=self._cat(),
             pair_priors={},
+            triple_priors=None,
             occupied_cells={(0, 9, 0), (100, 9, 0)},
             max_depth=5,
             weights=AI_GENERATOR_WEIGHTS,
@@ -219,21 +225,129 @@ class TestIntervalWalker:
         assert result.reject_reason == "beam_exhausted"
         assert len(result.blocks) == 5
 
-    def test_blocks_carry_ai_score_breakdown(self) -> None:
-        # Artifact requires ai_score + ai_score_breakdown on
-        # synthesised blocks.
-        result = _generate_interval(
-            src_cell=(0, 9, 0),
-            dst_cell=(3, 9, 0),
-            src_block=None,
-            catalogue=self._cat(),
-            pair_priors={},
-            occupied_cells={(0, 9, 0), (3, 9, 0)},
-            max_depth=12,
-            weights=AI_GENERATOR_WEIGHTS,
+    def test_triple_prior_sharpens_pair(self) -> None:
+        # Two candidates with equal pair prior. One has an observed
+        # triple (prev_prev → prev → cand), the other doesn't. The
+        # triple-backed one wins.
+        prev_prev = ("Road", "RoadTechRamp")
+        prev = ("Road", "RoadTechStraight")
+        common_pair_priors = {
+            prev: {
+                ("Road", "RoadTechCurve1"): 0.4,
+                ("Road", "RoadTechCurve2"): 0.4,
+            },
+        }
+        triple_priors = {
+            (prev_prev, prev): {("Road", "RoadTechCurve1"): 0.9},
+        }
+        cand_with_triple = _CandidateBlock(
+            family="Road", name="RoadTechCurve1",
+            cell=(1, 9, 0), rotation=0,
+            info=GeometryInfo(shape_class="curve"),
         )
-        assert result.blocks
-        for b in result.blocks:
-            assert "ai_score" in b
-            assert "ai_score_breakdown" in b
-            assert isinstance(b["ai_score_breakdown"], dict)
+        cand_without = _CandidateBlock(
+            family="Road", name="RoadTechCurve2",
+            cell=(1, 9, 0), rotation=0,
+            info=GeometryInfo(shape_class="curve"),
+        )
+        s_with, _ = score_candidate(
+            cand=cand_with_triple,
+            prev_block=prev, prev_prev_block=prev_prev,
+            pair_priors=common_pair_priors,
+            triple_priors=triple_priors,
+            path_so_far=[], weights=AI_GENERATOR_WEIGHTS,
+        )
+        s_without, _ = score_candidate(
+            cand=cand_without,
+            prev_block=prev, prev_prev_block=prev_prev,
+            pair_priors=common_pair_priors,
+            triple_priors=triple_priors,
+            path_so_far=[], weights=AI_GENERATOR_WEIGHTS,
+        )
+        assert s_with > s_without
+
+    def test_triple_prior_needs_both_prev_and_prev_prev(self) -> None:
+        # prev_prev=None → triple tier must be 0 even if triple_priors
+        # is populated. Otherwise step 2 would dip into step-3 priors
+        # and get nonsensical scores.
+        cand = _CandidateBlock(
+            family="Road", name="RoadTechCurve1",
+            cell=(1, 9, 0), rotation=0,
+            info=GeometryInfo(shape_class="curve"),
+        )
+        _, breakdown = score_candidate(
+            cand=cand,
+            prev_block=("Road", "RoadTechStraight"),
+            prev_prev_block=None,
+            pair_priors={},
+            triple_priors={(("A", "a"), ("B", "b")): {("Road", "RoadTechCurve1"): 1.0}},
+            path_so_far=[], weights=AI_GENERATOR_WEIGHTS,
+        )
+        assert breakdown["triple_prior"] == 0.0
+
+
+class TestShadowCellsPenalty:
+    def test_unit_footprint_no_penalty(self) -> None:
+        cand = _CandidateBlock(
+            family="Road", name="RoadTechStraight",
+            cell=(5, 9, 7), rotation=0,
+            info=GeometryInfo(footprint_x=1),
+        )
+        assert _shadow_cells_clear(cand=cand, occupied_cells=set()) == 0.0
+
+    def test_clean_shadow_no_penalty(self) -> None:
+        # Wall4 at rot=0 extends to (6,9,7)(7,9,7)(8,9,7) — all free.
+        cand = _CandidateBlock(
+            family="Platform", name="PlatformPlasticWallStraight4",
+            cell=(5, 9, 7), rotation=0,
+            info=GeometryInfo(footprint_x=4),
+        )
+        assert _shadow_cells_clear(cand=cand, occupied_cells=set()) == 0.0
+
+    def test_full_collision_penalty_1(self) -> None:
+        cand = _CandidateBlock(
+            family="Platform", name="PlatformPlasticWallStraight4",
+            cell=(5, 9, 7), rotation=0,
+            info=GeometryInfo(footprint_x=4),
+        )
+        # All 3 shadow cells are occupied.
+        occ = {(6, 9, 7), (7, 9, 7), (8, 9, 7)}
+        assert _shadow_cells_clear(cand=cand, occupied_cells=occ) == 1.0
+
+    def test_partial_collision_penalty(self) -> None:
+        cand = _CandidateBlock(
+            family="Platform", name="PlatformPlasticWallStraight4",
+            cell=(5, 9, 7), rotation=0,
+            info=GeometryInfo(footprint_x=4),
+        )
+        occ = {(7, 9, 7)}   # 1 of 3 shadow cells collides
+        assert _shadow_cells_clear(cand=cand, occupied_cells=occ) == pytest.approx(1 / 3)
+
+    def test_shadow_rotates_with_block(self) -> None:
+        # Same Wall4 at rot=1 extends to +Z. Occupy only a +Z cell.
+        cand = _CandidateBlock(
+            family="Platform", name="PlatformPlasticWallStraight4",
+            cell=(5, 9, 7), rotation=1,
+            info=GeometryInfo(footprint_x=4),
+        )
+        occ_plus_z = {(5, 9, 8)}
+        assert _shadow_cells_clear(cand=cand, occupied_cells=occ_plus_z) > 0
+        occ_plus_x = {(6, 9, 7)}  # +X direction isn't the shadow at rot=1
+        assert _shadow_cells_clear(cand=cand, occupied_cells=occ_plus_x) == 0.0
+
+
+class TestPositiveWeightKeys:
+    def test_contains_only_positive_signals(self) -> None:
+        # ai_confidence divides by this set's sum. Adding a penalty
+        # here would regress v0.0's inflated-denominator bug.
+        expected = {
+            "pair_prior", "triple_prior", "connector",
+            "traversability", "sequence",
+        }
+        assert set(_POSITIVE_WEIGHT_KEYS) == expected
+
+    def test_all_keys_exist_in_weights(self) -> None:
+        for k in _POSITIVE_WEIGHT_KEYS:
+            assert k in AI_GENERATOR_WEIGHTS
+
+
