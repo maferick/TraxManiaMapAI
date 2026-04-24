@@ -50,6 +50,32 @@ class SubprocessParser(ParserClient):
     def parse_replay(self, artifact_path: Path) -> ParseResult:
         return self._invoke("replay", f"{artifact_path}\n")
 
+    def dump_block_info(self, block_gbx_path: Path) -> ParseResult:
+        """Invoke the wrapper's ``dump-block-info`` command.
+
+        #217-M1 — reads one ``.Block.Gbx`` file from the TM2020 game
+        data and returns its footprint data:
+
+            {
+              "block_id": "PlatformPlasticWallStraight4",
+              "name": ..., "collection": "Stadium", "author": "Nadeo",
+              "has_ground": true, "has_air": false,
+              "ground_units": [[0,0,0], [1,0,0], [2,0,0], [3,0,0]],
+              "air_units":    [],
+              "ground_variant_count": 1,
+              "air_variant_count": 0
+            }
+
+        ``ground_units`` / ``air_units`` are lists of `[dx, dy, dz]`
+        relative cell offsets from the block's placement origin —
+        the real footprint the strip policy needs.
+
+        The operator runs this across their TM2020 install to build
+        a ``block_catalog`` table; generation-time lookups avoid
+        re-parsing the .Block.Gbx each time.
+        """
+        return self._invoke("dump-block-info", f"{block_gbx_path}\n")
+
     def emit_map(
         self,
         *,
