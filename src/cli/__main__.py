@@ -400,6 +400,197 @@ def _cmd_remote_test_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_test_in_game(args: argparse.Namespace) -> int:
+    """End-to-end: generate → emit → enqueue → poll → pretty-print.
+
+    This is the closed-loop entry point for the remote-test rig:
+    one command turns a base_map_id + seed into a queued job,
+    watches the Windows agent process it, and prints the
+    telemetry report.
+
+    Exit codes:
+      0 → job completed (telemetry received; route_verified may
+          still be False — that's the map's fault, not the rig's)
+      1 → job failed / timed_out / rig unreachable
+      2 → setup error (bad artifact, etc.)
+    """
+    import json as _json
+    import tempfile
+    import time
+
+    import requests
+    from src.generation.ai_generator import (
+        AIGenerationInputs,
+        generate_ai_map,
+    )
+    from src.generation.gbx_writer import (
+        GbxEmitError,
+        emit_gbx_from_artifact,
+    )
+
+    config = load_config(args.config)
+    gbx_cfg = (config.get("parsers") or {}).get("gbx") or {}
+    executable = Path(
+        gbx_cfg.get("executable")
+        or "./parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper"
+    )
+    parser = SubprocessParser(
+        executable=executable,
+        parser_version=gbx_cfg.get("parser_version", "0.1.0"),
+        timeout_seconds=float(gbx_cfg.get("timeout_seconds", 30.0)),
+    )
+
+    # Match the other remote-test commands: --token wins, then env.
+    from src.remote_test.server import resolve_auth_token
+    args.token = resolve_auth_token(args.token)
+
+    conn = open_connection(config)
+    try:
+        inputs = AIGenerationInputs(
+            base_map_id=args.base_map_id,
+            random_seed=args.random_seed,
+            beam_width=args.beam_width,
+            max_interval_depth=args.max_interval_depth,
+        )
+        _LOG.info(
+            "test-in-game step 1/5: generate-ai-map (base=%d seed=%d)",
+            inputs.base_map_id, inputs.random_seed,
+        )
+        artifact = generate_ai_map(conn, inputs=inputs, config=config)
+
+        _LOG.info(
+            "test-in-game step 2/5: emit-gbx (run_id=%s)",
+            artifact["run_id"],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            emit_dir = Path(tmp) / "gbx"
+            emit_dir.mkdir()
+            try:
+                gbx = emit_gbx_from_artifact(
+                    conn, artifact=artifact,
+                    parser=parser, output_dir=emit_dir,
+                )
+            except GbxEmitError as exc:
+                _LOG.error("emit-gbx failed: %s", exc)
+                return 2
+            gbx_bytes = gbx.output_path.read_bytes()
+
+            _LOG.info(
+                "test-in-game step 3/5: enqueue to %s (size=%d)",
+                args.server, len(gbx_bytes),
+            )
+            headers = (
+                {"Authorization": f"Bearer {args.token}"}
+                if args.token else {}
+            )
+            metadata = {
+                "run_id": artifact["run_id"],
+                "base_map_id": inputs.base_map_id,
+                "random_seed": inputs.random_seed,
+                "ai_generator_version": artifact["map"].get(
+                    "ai_generator_version",
+                ),
+                "ai_confidence": (
+                    artifact["finishability"].get("ai_confidence")
+                ),
+            }
+            resp = requests.post(
+                f"{args.server.rstrip('/')}/jobs",
+                headers=headers,
+                files={
+                    "artifact": (
+                        f"{artifact['run_id']}.Map.Gbx",
+                        gbx_bytes, "application/octet-stream",
+                    ),
+                },
+                data={
+                    "run_id": artifact["run_id"],
+                    "metadata": _json.dumps(metadata, sort_keys=True),
+                    "timeout_seconds": str(args.timeout_seconds),
+                },
+                timeout=60,
+            )
+            if resp.status_code != 201:
+                _LOG.error(
+                    "enqueue failed: %d %s", resp.status_code, resp.text,
+                )
+                return 1
+            job = resp.json()
+            job_id = int(job["id"])
+            _LOG.info(
+                "test-in-game step 4/5: poll job %d (local timeout=%ds)",
+                job_id, args.wait_seconds,
+            )
+
+    finally:
+        conn.close()
+
+    # --- poll outside the DB connection; the rig call doesn't need the
+    # MariaDB conn and a long-held connection is wasteful ---
+    deadline = time.monotonic() + float(args.wait_seconds)
+    last_status = "queued"
+    while time.monotonic() < deadline:
+        r = requests.get(
+            f"{args.server.rstrip('/')}/jobs/{job_id}",
+            headers=headers, timeout=15,
+        )
+        if r.status_code != 200:
+            _LOG.warning("poll got %d: %s", r.status_code, r.text)
+            time.sleep(args.poll_interval)
+            continue
+        j = r.json()
+        status = j["status"]
+        if status != last_status:
+            _LOG.info(
+                "test-in-game status change: %s → %s (detail=%s)",
+                last_status, status, j.get("detail") or "-",
+            )
+            last_status = status
+        if status in ("complete", "failed", "timed_out", "cancelled"):
+            _LOG.info("test-in-game step 5/5: done")
+            _print_test_report(j)
+            return 0 if status == "complete" else 1
+        time.sleep(args.poll_interval)
+
+    _LOG.error(
+        "test-in-game timed out locally after %ds — job may still be "
+        "running; query later with remote-test-status --job-id %d",
+        args.wait_seconds, job_id,
+    )
+    return 1
+
+
+def _print_test_report(job: dict[str, Any]) -> None:
+    """Human-readable summary of a completed test job."""
+    print("")
+    print(f"  job_id         {job['id']}")
+    print(f"  run_id         {job['run_id']}")
+    print(f"  status         {job['status']}")
+    print(f"  agent          {job.get('agent_id') or '-'}")
+    print(f"  detail         {job.get('detail') or '-'}")
+    report = job.get("report") or {}
+    if not report:
+        print("  (no telemetry report attached)")
+        return
+    print("")
+    print("  telemetry:")
+    print(f"    load_success      {report.get('load_success')}")
+    if report.get("load_error"):
+        print(f"    load_error        {report['load_error']}")
+    print(f"    spawn_ok          {report.get('spawn_ok')}")
+    print(f"    finished          {report.get('finished')}")
+    print(f"    exit_reason       {report.get('exit_reason')}")
+    print(f"    plugin_version    {report.get('plugin_version') or '-'}")
+    cps = report.get("checkpoint_times_ms") or []
+    print(f"    checkpoints       {len(cps)} times")
+    for i, t in enumerate(cps):
+        print(f"      [{i}] {t} ms")
+    dc = report.get("driven_cells_count")
+    if dc is not None:
+        print(f"    driven_cells      {dc} (head: {report.get('driven_cells_head') or []})")
+    print("")
+
+
 def _cmd_remote_test_agent(args: argparse.Namespace) -> int:
     """Run the Windows agent (PR2 of the remote-test rig).
 
@@ -2563,6 +2754,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of recent jobs to list.",
     )
     rt_status.set_defaults(func=_cmd_remote_test_status)
+
+    rt_e2e = sub.add_parser(
+        "test-in-game",
+        help="End-to-end loop: generate an AI map, emit its GBX, "
+             "push it onto the remote-test queue, poll the Windows "
+             "agent for telemetry, print the report. Closes the "
+             "feedback loop for generator iteration.",
+    )
+    rt_e2e.add_argument("--base-map-id", type=int, required=True)
+    rt_e2e.add_argument("--random-seed", type=int, default=42)
+    rt_e2e.add_argument("--beam-width", type=int, default=3)
+    rt_e2e.add_argument("--max-interval-depth", type=int, default=30)
+    rt_e2e.add_argument(
+        "--server", default="http://localhost:8787",
+        help="Queue server URL.",
+    )
+    rt_e2e.add_argument(
+        "--token", default=None,
+        help="Bearer token. Falls back to REMOTE_TEST_TOKEN env var.",
+    )
+    rt_e2e.add_argument(
+        "--timeout-seconds", type=int, default=300,
+        help="Per-job timeout passed to the agent (sets when the "
+             "agent gives up waiting on the plugin).",
+    )
+    rt_e2e.add_argument(
+        "--wait-seconds", type=int, default=600,
+        help="Local polling deadline. Separate from the agent-side "
+             "timeout: this is how long test-in-game itself waits "
+             "before giving up + returning non-zero.",
+    )
+    rt_e2e.add_argument(
+        "--poll-interval", type=float, default=2.0,
+    )
+    rt_e2e.set_defaults(func=_cmd_test_in_game)
 
     emit_gbx_cmd = sub.add_parser(
         "emit-gbx",
