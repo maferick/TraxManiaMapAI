@@ -1,4 +1,4 @@
-"""Phase 2 #218-3 — block-geometry catalogue.
+"""Phase 2 #218-3 / #218-6 — block-geometry catalogue.
 
 Per-(block_family, block_name) metadata used as a soft input to the
 generation-time pattern/geometry compatibility score. Scope per
@@ -10,6 +10,11 @@ string via pattern matching. This gets 99% of the corpus right on
 Nadeo-shipped blocks and is brittle on community custom blocks
 (those get shape_class='unknown' without blocking downstream).
 
+v1.1 (#218-6) adds three extensions — observed footprint from name
+patterns (``Straight4`` → length 4 cells), ``placement_mode`` from
+corpus SQL aggregation (grid_only / free_only / mixed), and a
+``connector_hint`` derived from shape + name.
+
 Future enhancements — mesh-level geometry from the GBX itself,
 cross-environment shape canonicalisation — land as classifier
 version bumps. The ``classifier_version`` column lets older rows
@@ -18,6 +23,7 @@ get rebuilt cleanly when the rules change.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -28,7 +34,7 @@ from src.storage.mariadb import cursor
 _LOG = logging.getLogger(__name__)
 
 # Bump this when rule changes would invalidate existing rows.
-CLASSIFIER_VERSION: str = "v1.0.0"
+CLASSIFIER_VERSION: str = "v1.1.0"
 
 
 # Shape classes — mirrors the migration's ENUM.
@@ -46,6 +52,26 @@ SHAPE_GATE = "gate"
 SHAPE_UNKNOWN = "unknown"
 
 
+# Placement-mode values (column values in block_geometry).
+PLACEMENT_GRID_ONLY = "grid_only"
+PLACEMENT_FREE_ONLY = "free_only"
+PLACEMENT_MIXED = "mixed"
+PLACEMENT_UNKNOWN = "unknown"
+
+
+# Connector hints — labels the orientation of a block's drivable
+# exits at rotation 0. These feed the geometry validator (#218-6
+# follow-up) which checks that consecutive route cells belong to
+# compatible connector types.
+CONNECTOR_STRAIGHT_X = "straight_x"    # Flat run along ±X, flat Y
+CONNECTOR_CURVE_XZ = "curve_xz"        # Turn in XZ plane, flat Y
+CONNECTOR_SLOPE_XY = "slope_xy"        # Run along X with Y rise/fall
+CONNECTOR_LOOP_Y = "loop_y"            # Full vertical loop
+CONNECTOR_PLATFORM = "platform"        # Flat pad, no directional exit
+CONNECTOR_ANCHOR = "anchor"            # Start / Checkpoint / Finish
+CONNECTOR_NONE = ""                    # Support, deco, unknown shapes
+
+
 @dataclass(frozen=True)
 class BlockGeometry:
     block_family: str
@@ -57,6 +83,8 @@ class BlockGeometry:
     footprint_x: int = 1
     footprint_y: int = 1
     footprint_z: int = 1
+    placement_mode: str = PLACEMENT_UNKNOWN
+    connector_hint: str = CONNECTOR_NONE
     classifier_version: str = CLASSIFIER_VERSION
 
 
@@ -149,6 +177,79 @@ _SURFACE_NAME_PATTERNS: tuple[tuple[str, str], ...] = (
 
 
 # ---------------------------------------------------------------------
+# Footprint inference from name suffix — #218-6.
+#
+# TM2020 names often carry an X-length suffix directly on the shape
+# word: PlatformPlasticWallStraight4 is 4 cells along X, Slope2Straight
+# is 2 cells along X. These are the multi-cell offenders the strip
+# policy keeps tripping over. Curves / loops have irregular footprints
+# the name doesn't encode — they stay at 1x1x1 until mesh data is
+# available (M1/M2 workstream).
+# ---------------------------------------------------------------------
+
+# Shape words whose trailing digit indicates X-length. Matched against
+# the name with a word boundary on either side so "Straight4" catches
+# but "Straight4Gate" does not over-count. Order: most-specific first.
+_FOOTPRINT_X_WORDS: tuple[str, ...] = (
+    "slopestraight",
+    "slope",
+    "straight",
+    "tilttransition",
+    "wallstraight",
+)
+
+_FOOTPRINT_X_RE = re.compile(
+    r"(?:" + "|".join(_FOOTPRINT_X_WORDS) + r")(\d)",
+    re.IGNORECASE,
+)
+
+
+def _infer_footprint(shape_class: str, name: str) -> tuple[int, int, int]:
+    """Best-effort (fx, fy, fz) from name suffixes.
+
+    Returns (1, 1, 1) when the name carries no length signal. We do
+    NOT try to infer non-X dimensions from names; cross-axis footprints
+    need mesh-level data.
+    """
+    if shape_class in (
+        SHAPE_CURVE, SHAPE_LOOP, SHAPE_DECO, SHAPE_UNKNOWN,
+    ):
+        # Curves + loops have irregular footprints; decline to guess.
+        return (1, 1, 1)
+
+    lname = name.lower()
+    best_n = 1
+    for m in _FOOTPRINT_X_RE.finditer(lname):
+        try:
+            n = int(m.group(1))
+        except ValueError:
+            continue
+        # Names can carry two length suffixes (e.g. "Slope2Straight4") —
+        # interpret the larger as the block's footprint span.
+        if n > best_n:
+            best_n = n
+
+    return (best_n, 1, 1)
+
+
+# ---------------------------------------------------------------------
+# Connector hint from shape + name patterns — #218-6.
+# ---------------------------------------------------------------------
+
+_SHAPE_TO_CONNECTOR: dict[str, str] = {
+    SHAPE_STRAIGHT: CONNECTOR_STRAIGHT_X,
+    SHAPE_CURVE: CONNECTOR_CURVE_XZ,
+    SHAPE_RAMP: CONNECTOR_SLOPE_XY,
+    SHAPE_LOOP: CONNECTOR_LOOP_Y,
+    SHAPE_PLATFORM: CONNECTOR_PLATFORM,
+    SHAPE_START: CONNECTOR_ANCHOR,
+    SHAPE_CHECKPOINT: CONNECTOR_ANCHOR,
+    SHAPE_FINISH: CONNECTOR_ANCHOR,
+    # Support / gate / deco / unknown — no connector.
+}
+
+
+# ---------------------------------------------------------------------
 # Pure classifier
 # ---------------------------------------------------------------------
 
@@ -190,6 +291,11 @@ def classify_block(family: str, name: str) -> BlockGeometry:
         SHAPE_START, SHAPE_CHECKPOINT, SHAPE_FINISH,
     )
 
+    footprint_x, footprint_y, footprint_z = _infer_footprint(
+        shape_class, name,
+    )
+    connector_hint = _SHAPE_TO_CONNECTOR.get(shape_class, CONNECTOR_NONE)
+
     return BlockGeometry(
         block_family=family,
         block_name=name,
@@ -197,6 +303,12 @@ def classify_block(family: str, name: str) -> BlockGeometry:
         surface_hint=surface_hint,
         is_anchor_capable=is_anchor_capable,
         is_deco=is_deco,
+        footprint_x=footprint_x,
+        footprint_y=footprint_y,
+        footprint_z=footprint_z,
+        connector_hint=connector_hint,
+        # placement_mode stays 'unknown' in the pure classifier —
+        # it needs the corpus. ``build_block_geometry`` fills it in.
     )
 
 
@@ -205,11 +317,28 @@ def classify_block(family: str, name: str) -> BlockGeometry:
 # ---------------------------------------------------------------------
 
 _DISTINCT_BLOCKS_SQL = """
-SELECT DISTINCT block_family, block_type
+SELECT
+    block_family,
+    block_type,
+    SUM(CASE WHEN is_free = 0 THEN 1 ELSE 0 END) AS grid_count,
+    SUM(CASE WHEN is_free = 1 THEN 1 ELSE 0 END) AS free_count
 FROM block_placements
-WHERE is_free = 0
-  AND block_family IS NOT NULL AND block_family <> ''
+WHERE block_family IS NOT NULL AND block_family <> ''
+GROUP BY block_family, block_type
 """
+
+
+def _placement_mode_from_counts(
+    grid_count: int, free_count: int,
+) -> str:
+    """Map the corpus grid/free counts to a placement_mode enum value."""
+    if grid_count > 0 and free_count == 0:
+        return PLACEMENT_GRID_ONLY
+    if grid_count == 0 and free_count > 0:
+        return PLACEMENT_FREE_ONLY
+    if grid_count > 0 and free_count > 0:
+        return PLACEMENT_MIXED
+    return PLACEMENT_UNKNOWN
 
 
 _UPSERT_GEOMETRY_SQL = """
@@ -218,8 +347,9 @@ INSERT INTO block_geometry (
     shape_class, surface_hint,
     is_anchor_capable, is_deco,
     footprint_x, footprint_y, footprint_z,
+    placement_mode, connector_hint,
     classifier_version
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE
     shape_class = VALUES(shape_class),
     surface_hint = VALUES(surface_hint),
@@ -228,6 +358,8 @@ ON DUPLICATE KEY UPDATE
     footprint_x = VALUES(footprint_x),
     footprint_y = VALUES(footprint_y),
     footprint_z = VALUES(footprint_z),
+    placement_mode = VALUES(placement_mode),
+    connector_hint = VALUES(connector_hint),
     classifier_version = VALUES(classifier_version),
     updated_at = CURRENT_TIMESTAMP(6)
 """
@@ -248,15 +380,28 @@ def build_block_geometry(
     conn: Connection, *, families: Iterable[str] | None = None,
 ) -> BuildReport:
     """Scan block_placements for distinct (family, name) combos, run
-    the classifier, upsert into ``block_geometry``. ``families`` is
-    an optional filter for smoke runs."""
+    the classifier, upsert into ``block_geometry``.
+
+    v1.1 (#218-6) derives ``placement_mode`` from the per-block
+    grid/free counts the aggregation SQL already returns — no second
+    round-trip, the GROUP BY does it in one pass.
+
+    ``families`` is an optional filter for smoke runs.
+    """
     with cursor(conn) as cur:
         sql = _DISTINCT_BLOCKS_SQL
         params: tuple = ()
         if families:
             fam_list = list(families)
             placeholders = ",".join(["%s"] * len(fam_list))
-            sql += f" AND block_family IN ({placeholders})"
+            # GROUP BY already pushed past the WHERE so we splice the
+            # IN-filter in ahead of GROUP BY. The SQL template makes
+            # this readable enough without a query builder.
+            sql = sql.replace(
+                "GROUP BY block_family, block_type",
+                f"AND block_family IN ({placeholders}) "
+                "GROUP BY block_family, block_type",
+            )
             params = tuple(fam_list)
         cur.execute(sql, params)
         distinct = cur.fetchall()
@@ -265,8 +410,11 @@ def build_block_geometry(
     report.distinct_blocks_seen = len(distinct)
 
     rows: list[tuple] = []
-    for family, name in distinct:
+    for family, name, grid_count, free_count in distinct:
         geom = classify_block(str(family), str(name))
+        placement_mode = _placement_mode_from_counts(
+            int(grid_count or 0), int(free_count or 0),
+        )
         report.shape_breakdown[geom.shape_class] = (
             report.shape_breakdown.get(geom.shape_class, 0) + 1
         )
@@ -275,6 +423,7 @@ def build_block_geometry(
             geom.shape_class, geom.surface_hint,
             int(geom.is_anchor_capable), int(geom.is_deco),
             int(geom.footprint_x), int(geom.footprint_y), int(geom.footprint_z),
+            placement_mode, geom.connector_hint,
             geom.classifier_version,
         ))
 
@@ -300,7 +449,9 @@ def build_block_geometry(
 _FETCH_SQL = """
 SELECT block_family, block_name, shape_class, surface_hint,
        is_anchor_capable, is_deco,
-       footprint_x, footprint_y, footprint_z, classifier_version
+       footprint_x, footprint_y, footprint_z,
+       placement_mode, connector_hint,
+       classifier_version
 FROM block_geometry
 WHERE block_family = %s AND block_name = %s
 """
@@ -319,5 +470,6 @@ def fetch_geometry(
         shape_class=str(r[2]), surface_hint=str(r[3]),
         is_anchor_capable=bool(r[4]), is_deco=bool(r[5]),
         footprint_x=int(r[6]), footprint_y=int(r[7]), footprint_z=int(r[8]),
-        classifier_version=str(r[9]),
+        placement_mode=str(r[9]), connector_hint=str(r[10]),
+        classifier_version=str(r[11]),
     )
