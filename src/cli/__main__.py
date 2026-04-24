@@ -2313,8 +2313,10 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["easy", "medium", "hard"],
     )
     ai_gen_cmd.add_argument(
-        "--beam-width", type=int, default=1,
-        help="beam search width (v0.2 = greedy, default 1)",
+        "--beam-width", type=int, default=3,
+        help="beam search width. 1 = greedy; wider explores alternate "
+             "next-block picks per step and keeps the top-N globally. "
+             "Default 3.",
     )
     ai_gen_cmd.add_argument(
         "--max-interval-depth", type=int, default=12,
