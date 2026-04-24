@@ -1,4 +1,4 @@
-"""Phase 2 #218-4 — pair-sequence scoring.
+"""Phase 2 #218-4/#218-5 — pair-sequence scoring.
 
 Combines ``block_pair_transitions`` frequency counts with
 ``block_geometry`` shape-compatibility heuristics into a single
@@ -290,3 +290,141 @@ def score_pair(
         geometry_detail=geometry_detail,
         reasoning=reasoning,
     )
+
+
+# ---------------------------------------------------------------------
+# #218-5 — corridor-level aggregation
+# ---------------------------------------------------------------------
+
+import json
+from typing import Any, Iterable
+
+from src.utils.config import code_version
+
+
+def score_corridor_path(
+    conn: Connection,
+    *,
+    path_cells: Iterable[tuple[int, int, int]],
+    cell_to_block: dict[tuple[int, int, int], tuple[str, str]],
+    environment: str,
+) -> float | None:
+    """Average the combined_score of every consecutive cell-pair in a
+    corridor's path. Returns None when the path has < 2 known-block
+    cells (the caller stores NULL so "not computable" stays distinct
+    from "legitimately zero").
+
+    Callers are expected to have already fetched ``cell_to_block``
+    for the map in bulk (one SELECT per map) — calling this per
+    corridor does per-pair score_pair lookups, so amortising the
+    block lookup matters for large maps."""
+    cells = list(path_cells)
+    if len(cells) < 2:
+        return None
+
+    scores: list[float] = []
+    for i in range(len(cells) - 1):
+        a = cell_to_block.get(cells[i])
+        b = cell_to_block.get(cells[i + 1])
+        if a is None or b is None:
+            continue
+        pair_score = score_pair(
+            conn,
+            a_family=a[0], a_name=a[1],
+            b_family=b[0], b_name=b[1],
+            environment=environment,
+        )
+        scores.append(pair_score.combined_score)
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
+# ---------------------------------------------------------------------
+# Bulk scorer — populates route_corridors.combined_sequence_score
+# ---------------------------------------------------------------------
+
+_CORRIDORS_FOR_SCORING_SQL = """
+SELECT rc.id, rc.map_id, COALESCE(m.environment, '') AS env, rc.path_cells
+FROM route_corridors rc
+JOIN maps m ON m.id = rc.map_id
+WHERE rc.path_cells IS NOT NULL
+  AND (%s IS NULL OR rc.map_id = %s)
+ORDER BY rc.map_id, rc.id
+"""
+
+_BLOCKS_FOR_MAP_SQL = """
+SELECT block_family, block_type, x, y, z
+FROM block_placements
+WHERE map_id = %s AND is_free = 0
+"""
+
+_UPDATE_CORRIDOR_SCORE_SQL = """
+UPDATE route_corridors SET combined_sequence_score = %s WHERE id = %s
+"""
+
+
+def score_all_corridors(
+    conn: Connection, *, map_id: int | None = None, limit: int | None = None,
+) -> dict[str, int]:
+    """Populate ``route_corridors.combined_sequence_score`` across
+    every corridor (or a single map when ``map_id`` is given). One
+    block-lookup per map, one score_pair per consecutive cell pair.
+
+    Returns a counts dict for the CLI report."""
+    counts = {"corridors_seen": 0, "scored": 0, "null_scores": 0}
+    with cursor(conn) as cur:
+        cur.execute(_CORRIDORS_FOR_SCORING_SQL, (map_id, map_id))
+        rows = cur.fetchall()
+        if limit:
+            rows = rows[: int(limit)]
+    counts["corridors_seen"] = len(rows)
+
+    # Group corridor rows by map so we fetch block_placements once
+    # per map. Very cheap vs one SQL per corridor.
+    by_map: dict[int, list[tuple]] = {}
+    for row in rows:
+        by_map.setdefault(int(row[1]), []).append(row)
+
+    for mid, corridors in by_map.items():
+        with cursor(conn) as cur:
+            cur.execute(_BLOCKS_FOR_MAP_SQL, (mid,))
+            cell_to_block = {
+                (int(x), int(y), int(z)): (str(fam), str(name))
+                for fam, name, x, y, z in cur.fetchall()
+            }
+        for cid, _mid, env, path_cells_raw in corridors:
+            try:
+                path = json.loads(path_cells_raw)
+                path_tuples = [
+                    (int(c[0]), int(c[1]), int(c[2]))
+                    for c in path
+                    if isinstance(c, (list, tuple)) and len(c) == 3
+                ]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                path_tuples = []
+            score = score_corridor_path(
+                conn,
+                path_cells=path_tuples,
+                cell_to_block=cell_to_block,
+                environment=str(env),
+            )
+            with cursor(conn) as cur:
+                cur.execute(
+                    _UPDATE_CORRIDOR_SCORE_SQL,
+                    (score, int(cid)),
+                )
+            if score is None:
+                counts["null_scores"] += 1
+            else:
+                counts["scored"] += 1
+        conn.commit()
+
+    _LOG.info(
+        "score_all_corridors: corridors=%d scored=%d null=%d",
+        counts["corridors_seen"], counts["scored"], counts["null_scores"],
+    )
+    # Use code_version() for a side-effect-free touch that helps
+    # callers log the stamping code version alongside the counts.
+    counts["code_version_len"] = len(code_version())
+    return counts

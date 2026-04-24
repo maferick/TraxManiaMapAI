@@ -566,3 +566,80 @@ class TestMutationEndToEnd:
         assert all(isinstance(r, AssembledRoute) for r in results)
         chosen_ids = {r.intervals[0].chosen.corridor_id for r in results}
         assert len(chosen_ids) == 1
+
+
+# ---------------------------------------------------------------------
+# #218-5 — combined_sequence_score as a tier-below tie-break
+# ---------------------------------------------------------------------
+
+class TestSequenceScoreTieBreak:
+    def _two_candidates_same_learned(
+        self, seq_a: float | None, seq_b: float | None,
+    ) -> tuple[AssemblyInputs, CandidateCorridor, CandidateCorridor]:
+        spawn = _anchor("Spawn", 0, (0, 0, 0))
+        goal = _anchor("Goal", 0, (0, 0, 5))
+        a = _candidate(
+            corridor_id=100, src=spawn, dst=goal,
+            cells=((0, 0, 0), (0, 0, 5)),
+            learned=0.7,
+        )
+        b = _candidate(
+            corridor_id=200, src=spawn, dst=goal,
+            cells=((0, 0, 0), (0, 0, 5)),
+            learned=0.7,
+        )
+        # Attach sequence scores via dataclasses.replace since the
+        # helper doesn't take the kwarg.
+        import dataclasses
+        a = dataclasses.replace(a, combined_sequence_score=seq_a)
+        b = dataclasses.replace(b, combined_sequence_score=seq_b)
+        return AssemblyInputs(
+            map_id=1, is_linked_cp=True,
+            anchors=(spawn, goal), candidates=(a, b),
+        ), a, b
+
+    def test_higher_sequence_score_wins_on_learned_tie(self) -> None:
+        inputs, a, b = self._two_candidates_same_learned(
+            seq_a=0.4, seq_b=0.9,
+        )
+        result = assemble_route_from_inputs(inputs)
+        assert isinstance(result, AssembledRoute)
+        # b has the higher sequence score → b is chosen.
+        assert result.intervals[0].chosen.corridor_id == 200
+        assert result.intervals[0].chosen.combined_sequence_score == 0.9
+
+    def test_null_sequence_loses_to_scored_sequence(self) -> None:
+        # NULL (un-scored) corridor treated as -1 in the sort key
+        # → loses to a scored corridor on learned-score ties.
+        inputs, a, b = self._two_candidates_same_learned(
+            seq_a=None, seq_b=0.1,
+        )
+        result = assemble_route_from_inputs(inputs)
+        assert isinstance(result, AssembledRoute)
+        assert result.intervals[0].chosen.corridor_id == 200
+
+    def test_both_null_falls_through_to_path_length(self) -> None:
+        # Both null → they tie on tier-2 as well, assembly falls
+        # through to path_length → corridor_id.
+        import dataclasses
+        spawn = _anchor("Spawn", 0, (0, 0, 0))
+        goal = _anchor("Goal", 0, (0, 0, 5))
+        a = _candidate(
+            corridor_id=100, src=spawn, dst=goal,
+            cells=((0, 0, 0), (0, 0, 5)),
+            length=10, learned=0.7,
+        )
+        b = _candidate(
+            corridor_id=200, src=spawn, dst=goal,
+            cells=((0, 0, 0), (0, 0, 5)),
+            length=5, learned=0.7,
+        )
+        a = dataclasses.replace(a, combined_sequence_score=None)
+        b = dataclasses.replace(b, combined_sequence_score=None)
+        result = assemble_route_from_inputs(AssemblyInputs(
+            map_id=1, is_linked_cp=True,
+            anchors=(spawn, goal), candidates=(a, b),
+        ))
+        assert isinstance(result, AssembledRoute)
+        # Shorter path wins.
+        assert result.intervals[0].chosen.corridor_id == 200

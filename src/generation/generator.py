@@ -342,6 +342,10 @@ def _corridors_used_entries(
         }
         if c.corridor_confidence is not None:
             entry["corridor_confidence"] = c.corridor_confidence
+        # #218-5 diagnostic — optional field, emitted only when the
+        # corpus has been scored.
+        if c.combined_sequence_score is not None:
+            entry["combined_sequence_score"] = c.combined_sequence_score
         out.append(entry)
     return out
 

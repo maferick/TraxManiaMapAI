@@ -50,8 +50,14 @@ class ChosenCorridor:
 
     Mirrors the subset of ``route_corridors`` columns the assembly
     algorithm needs plus the derived per-corridor expected time.
-    ``learned_corridor_score`` is the ranking signal used for
-    selection and later aggregated into the route's AI confidence."""
+    ``learned_corridor_score`` is the primary ranking signal used for
+    selection and later aggregated into the route's AI confidence.
+    ``combined_sequence_score`` is the #218 pattern+geometry score,
+    present when the corridor was scored by
+    :func:`src.constraints.sequence_scoring.score_all_corridors`;
+    None otherwise. Purely a tier-below tie-break for assembly and
+    a diagnostic field in the artifact; never bypasses the
+    finishability gate."""
     corridor_id: int
     map_id: int
     src: Anchor
@@ -62,6 +68,7 @@ class ChosenCorridor:
     corridor_confidence: float | None
     learned_corridor_score: float
     expected_time_ms: int
+    combined_sequence_score: float | None = None
 
 
 @dataclass(frozen=True)

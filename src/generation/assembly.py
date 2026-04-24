@@ -61,7 +61,12 @@ _LOG = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class CandidateCorridor:
     """One row from route_corridors, shaped for assembly. Order within
-    an interval is not meaningful; the algorithm sorts them."""
+    an interval is not meaningful; the algorithm sorts them.
+
+    ``combined_sequence_score`` carries the #218-5 pattern+geometry
+    average (0..1 or None when the corpus hasn't been scored yet).
+    It participates as a tier-below tie-break after
+    learned_corridor_score; see ``_tie_break_key``."""
     corridor_id: int
     map_id: int
     src: Anchor
@@ -71,6 +76,7 @@ class CandidateCorridor:
     contains_virtual_edge: bool
     corridor_confidence: float | None
     learned_corridor_score: float | None
+    combined_sequence_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -115,15 +121,26 @@ def _expected_time_ms(path_length_cells: int) -> int:
 def _tie_break_key(c: CandidateCorridor) -> tuple:
     """Sort key used to pick the top candidate per interval.
 
-    Primary: highest ``learned_corridor_score`` (negate for ascending
-    sort). Tie-breakers match scope-v0 exactly:
-        1) shorter ``path_length``
-        2) lower ``corridor_id``
+    Tiers, in order:
+      1. Highest ``learned_corridor_score``. This is the trained
+         corridor-ranking model's verdict; it already bakes in
+         traversability-derived evidence and is the authoritative
+         rank signal.
+      2. Highest ``combined_sequence_score`` (#218-5). Breaks
+         learned-score ties by preferring corridors whose block
+         transitions match the corpus's pattern/geometry priors.
+         NULL treated as -1 so un-scored corridors lose to scored
+         ones on equal footing.
+      3. Shorter ``path_length``.
+      4. Lower ``corridor_id`` (final deterministic tiebreak).
 
-    The scope doc pins this ordering so different implementations
-    don't drift on near-tie cases."""
+    This cascade is purely additive relative to scope-v0: when
+    combined_sequence_score is NULL everywhere (pre-#218), the
+    second tier collapses to a constant and behaviour reduces to
+    the original (learned, length, id) order."""
     return (
         -(c.learned_corridor_score if c.learned_corridor_score is not None else -1.0),
+        -(c.combined_sequence_score if c.combined_sequence_score is not None else -1.0),
         c.path_length,
         c.corridor_id,
     )
@@ -257,6 +274,7 @@ def assemble_route_from_inputs(
             corridor_confidence=top.corridor_confidence,
             learned_corridor_score=float(top.learned_corridor_score),
             expected_time_ms=_expected_time_ms(top.path_length),
+            combined_sequence_score=top.combined_sequence_score,
         )
         chosen_corridors.append(chosen)
         intervals.append(IntervalAssembly(
@@ -344,7 +362,8 @@ ORDER BY
 _CORRIDORS_QUERY = """
 SELECT id, map_id, src_tag, src_order, dst_tag, dst_order,
        path_cells, path_length, contains_virtual_edge,
-       corridor_confidence, learned_corridor_score
+       corridor_confidence, learned_corridor_score,
+       combined_sequence_score
 FROM route_corridors
 WHERE map_id = %s
   AND classification_version = %s
@@ -447,7 +466,7 @@ def assemble_route(
         (
             cid, mid, src_tag, src_order, dst_tag, dst_order,
             path_cells_raw, path_length, virtual,
-            conf, learned,
+            conf, learned, seq_score,
         ) = r
         cells = _parse_cells(path_cells_raw)
         candidates.append(CandidateCorridor(
@@ -463,6 +482,9 @@ def assemble_route(
             ),
             learned_corridor_score=(
                 float(learned) if learned is not None else None
+            ),
+            combined_sequence_score=(
+                float(seq_score) if seq_score is not None else None
             ),
         ))
 
