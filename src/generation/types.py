@@ -24,6 +24,11 @@ RejectReason = Literal[
     "unknown_block",
     "invalid_schema",
     "stripped_route_broken",
+    # v0.2 AI generator rejection paths — see
+    # docs/generation/minimal-ai-generator-v0.md §Failure modes.
+    "beam_exhausted",
+    "interval_validation_failed",
+    "no_valid_candidates",
 ]
 
 
