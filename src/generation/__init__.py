@@ -26,6 +26,11 @@ from src.generation.finishability import (
     AI_CONFIDENCE_FLOOR,
     run_finishability_gate,
 )
+from src.generation.ai_generator import (
+    AI_GENERATOR_VERSION,
+    AIGenerationInputs,
+    generate_ai_map,
+)
 from src.generation.generator import (
     GenerationInputs,
     generate_from_base,
@@ -49,6 +54,8 @@ from src.generation.types import (
 
 __all__ = [
     "AI_CONFIDENCE_FLOOR",
+    "AI_GENERATOR_VERSION",
+    "AIGenerationInputs",
     "Anchor",
     "AssembledRoute",
     "AssemblyError",
@@ -64,6 +71,7 @@ __all__ = [
     "RejectReason",
     "assemble_route",
     "assemble_route_from_inputs",
+    "generate_ai_map",
     "generate_from_base",
     "load_schema",
     "run_finishability_gate",

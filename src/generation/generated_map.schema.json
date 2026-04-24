@@ -18,8 +18,8 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "enum": ["generation-v0", "generation-v0.1"],
-      "description": "v0: full-base copy. v0.1: adds optional strip-to-route metadata on map.*; see docs/generation/generation-scope-v0.md §Level-2."
+      "enum": ["generation-v0", "generation-v0.1", "generation-v0.2"],
+      "description": "v0: full-base copy. v0.1: adds optional strip-to-route metadata on map.*. v0.2: AI-synthesised block list (see docs/generation/minimal-ai-generator-v0.md)."
     },
     "run_id": {
       "type": "string",
@@ -91,7 +91,9 @@
           ]
         },
         "kept_block_count":  { "type": "integer", "minimum": 0 },
-        "base_block_count":  { "type": "integer", "minimum": 0 }
+        "base_block_count":  { "type": "integer", "minimum": 0 },
+        "ai_generated":         { "type": "boolean" },
+        "ai_generator_version": { "type": "string" }
       }
     },
     "route": {
@@ -129,7 +131,10 @@
             "confidence_below_floor",
             "unknown_block",
             "invalid_schema",
-            "stripped_route_broken"
+            "stripped_route_broken",
+            "beam_exhausted",
+            "interval_validation_failed",
+            "no_valid_candidates"
           ]
         },
         "gate_version":       { "const": "finishability-v0" },
@@ -148,7 +153,21 @@
         "x":            { "type": "integer" },
         "y":            { "type": "integer" },
         "z":            { "type": "integer" },
-        "rotation":     { "type": "integer", "minimum": 0, "maximum": 3 }
+        "rotation":     { "type": "integer", "minimum": 0, "maximum": 3 },
+        "ai_score":     { "type": ["number", "null"] },
+        "ai_score_breakdown": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "pair_prior":          { "type": ["number", "null"] },
+            "triple_prior":        { "type": ["number", "null"] },
+            "connector":           { "type": ["number", "null"] },
+            "traversability":      { "type": ["number", "null"] },
+            "sequence":            { "type": ["number", "null"] },
+            "diversity_penalty":   { "type": ["number", "null"] },
+            "validation_penalty":  { "type": ["number", "null"] }
+          }
+        }
       }
     },
     "Checkpoint": {
@@ -178,7 +197,7 @@
         "src_order":             { "type": "integer", "minimum": 0 },
         "dst_tag":               { "type": "string", "enum": ["Checkpoint", "LinkedCheckpoint", "Goal"] },
         "dst_order":             { "type": "integer", "minimum": 0 },
-        "chosen_corridor_id":    { "type": "integer", "minimum": 0 },
+        "chosen_corridor_id":    { "type": "integer", "description": "Non-negative in v0/v0.1 (references route_corridors.id). v0.2 synthesised corridors use negative, monotonically-decreasing ids (-1, -2, ...) to disambiguate from DB-enumerated corridors without colliding in the dashboard." },
         "chosen_corridor_score": { "type": "number", "minimum": 0, "maximum": 1 },
         "path_length_cells":     { "type": "integer", "minimum": 0 },
         "expected_time_ms":      { "type": "integer", "minimum": 0 }
@@ -192,7 +211,7 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "corridor_id":             { "type": "integer", "minimum": 0 },
+        "corridor_id":             { "type": "integer", "description": "Non-negative references route_corridors.id; negative values indicate v0.2 synthesised corridors (no DB row)." },
         "interval_index":          { "type": "integer", "minimum": 0 },
         "learned_corridor_score":  { "type": "number", "minimum": 0, "maximum": 1 },
         "corridor_confidence":     { "type": ["number", "null"] },

@@ -334,6 +334,44 @@ def _cmd_generate_map(args: argparse.Namespace) -> int:
     return 0 if fin["route_verified"] else 1
 
 
+def _cmd_generate_ai_map(args: argparse.Namespace) -> int:
+    import json as _json
+    from src.generation.ai_generator import (
+        AIGenerationInputs,
+        generate_ai_map,
+    )
+    config = load_config(args.config)
+    inputs = AIGenerationInputs(
+        base_map_id=args.base_map_id,
+        random_seed=args.random_seed,
+        style_tag_filter=args.style_tag_filter,
+        difficulty=args.difficulty,
+        beam_width=args.beam_width,
+        max_interval_depth=args.max_interval_depth,
+    )
+    conn = open_connection(config)
+    try:
+        artifact = generate_ai_map(conn, inputs=inputs, config=config)
+    finally:
+        conn.close()
+    fin = artifact["finishability"]
+    _LOG.info(
+        "generate-ai-map: run_id=%s base=%d synthesised=%d "
+        "route_verified=%s ai_confidence=%s reject=%s",
+        artifact["run_id"], inputs.base_map_id,
+        len(artifact["map"]["blocks"]) - sum(
+            1 for b in artifact["map"]["blocks"] if "ai_score" not in b
+        ),
+        fin["route_verified"], fin["ai_confidence"], fin["reject_reason"],
+    )
+    if args.output:
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_json.dumps(artifact, indent=2), encoding="utf-8")
+        _LOG.info("wrote ai-generated artifact: %s", args.output)
+    return 0 if fin["route_verified"] else 1
+
+
 def _cmd_validate_generation(args: argparse.Namespace) -> int:
     from src.generation.generator import validate_artifact_file
     config = load_config(args.config)
@@ -2248,6 +2286,45 @@ def _build_parser() -> argparse.ArgumentParser:
              "grid-axis halo. Output is generation-v0.1.",
     )
     generate_map_cmd.set_defaults(func=_cmd_generate_map)
+
+    ai_gen_cmd = sub.add_parser(
+        "generate-ai-map",
+        help="Phase 2 v0.2 — block-sequence AI generator. Synthesises "
+             "a new route between a Linked-CP base map's anchors "
+             "using pair-transition priors + block-geometry catalogue + "
+             "diversity / validation signals. Emits a generation-v0.2 "
+             "JSON artifact. Design: docs/generation/minimal-ai-generator-v0.md.",
+    )
+    ai_gen_cmd.add_argument(
+        "--base-map-id", type=int, required=True,
+        help="MariaDB maps.id of the Linked-CP base map (supplies anchors)",
+    )
+    ai_gen_cmd.add_argument(
+        "--random-seed", type=int, default=42,
+        help="deterministic seed — same (seed, map, corpus) → same run_id",
+    )
+    ai_gen_cmd.add_argument(
+        "--style-tag-filter", type=str, default=None,
+        choices=["Tech", "FullSpeed"],
+        help="optional style filter (currently passed through for provenance)",
+    )
+    ai_gen_cmd.add_argument(
+        "--difficulty", type=str, default="medium",
+        choices=["easy", "medium", "hard"],
+    )
+    ai_gen_cmd.add_argument(
+        "--beam-width", type=int, default=1,
+        help="beam search width (v0.2 = greedy, default 1)",
+    )
+    ai_gen_cmd.add_argument(
+        "--max-interval-depth", type=int, default=12,
+        help="hard cap on synthesised blocks per interval",
+    )
+    ai_gen_cmd.add_argument(
+        "--output", type=str, default=None,
+        help="write the generation-v0.2 artifact JSON to this path",
+    )
+    ai_gen_cmd.set_defaults(func=_cmd_generate_ai_map)
 
     validate_gen_cmd = sub.add_parser(
         "validate-generation",
