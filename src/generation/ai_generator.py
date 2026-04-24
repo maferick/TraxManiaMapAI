@@ -68,7 +68,10 @@ _LOG = logging.getLogger(__name__)
 #   v0.0 — pair prior + connector + traversability + diversity
 #   v0.1 — adds triple priors + pre-step shadow penalty;
 #          ai_confidence denominator now positive-weight sum only
-AI_GENERATOR_VERSION: str = "ai-generator-v0.1"
+#   v0.2 — beam search (width>=1); greedy v0.1 = beam_width=1 special
+#          case. Beams that dead-end are pruned; winning beam merges
+#          its cells back into the occupancy set on interval close.
+AI_GENERATOR_VERSION: str = "ai-generator-v0.2"
 
 # Fixed Stadium-ground Y. Same convention as geom_validator's
 # default ground_y. Multi-env support is a later phase.
@@ -76,7 +79,7 @@ _DEFAULT_GROUND_Y: int = 9
 
 # Default hyperparameters. The doc pins these; changes require a
 # revision bump on ``AI_GENERATOR_VERSION``.
-DEFAULT_BEAM_WIDTH: int = 1        # greedy; widen in a follow-up
+DEFAULT_BEAM_WIDTH: int = 3        # v0.2 default; pass 1 to force greedy
 DEFAULT_MAX_INTERVAL_DEPTH: int = 12
 DEFAULT_TOP_N_CANDIDATES: int = 8  # per step, before beam prune
 
@@ -486,8 +489,124 @@ _POSITIVE_WEIGHT_KEYS = (
 
 
 # ---------------------------------------------------------------------
-# Greedy interval walk
+# Beam search interval walk — v0.2
+#
+# Greedy (width=1) stays the default-equivalent pick when
+# beam_width=1; wider beams explore alternate next-block choices
+# per step and globally prune to beam_width survivors. Backtracking
+# falls out for free: a beam that dead-ends on no_valid_candidates
+# is dropped from the live pool but its siblings continue.
 # ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Beam:
+    """One partial path inside an in-progress interval search.
+
+    Immutable so a beam's ancestors survive expansion without
+    aliasing issues. ``interval_cells`` covers cells placed during
+    THIS interval only; the caller's ``occupied_cells`` (prior
+    intervals + anchors) stays shared + read-only during the walk.
+    """
+    blocks: tuple[dict[str, Any], ...]
+    path_cells: tuple[Cell, ...]
+    interval_cells: frozenset[Cell]
+    score_sum: float
+    current_cell: Cell
+    prev_block: tuple[str, str] | None
+    prev_prev_block: tuple[str, str] | None
+
+    @property
+    def depth(self) -> int:
+        return len(self.blocks)
+
+    @property
+    def score_count(self) -> int:
+        return len(self.blocks)
+
+
+def _beam_reached_dst(beam: _Beam, dst: Cell) -> bool:
+    """Arrival test: dst is Chebyshev-adjacent to the beam's current
+    cell AND the beam has placed at least one block (so a trivial
+    zero-block beam doesn't auto-complete and starve real searches)."""
+    cx, _, cz = beam.current_cell
+    dx = abs(dst[0] - cx)
+    dz = abs(dst[2] - cz)
+    return beam.depth > 0 and max(dx, dz) <= 1
+
+
+def _expand_beam(
+    *,
+    beam: _Beam,
+    dst_cell: Cell,
+    catalogue: list[_CatalogueEntry],
+    pair_priors: Mapping[tuple[str, str], Mapping[tuple[str, str], float]],
+    triple_priors: (
+        Mapping[
+            tuple[tuple[str, str], tuple[str, str]],
+            Mapping[tuple[str, str], float],
+        ] | None
+    ),
+    occupied_cells: set[Cell],
+    weights: Mapping[str, float],
+    top_n_children: int,
+) -> list[_Beam]:
+    """Expand one beam by one step; return up to ``top_n_children``
+    successor beams in score-descending order.
+
+    Wider children counts feed the beam width's global pruning step
+    (which picks the top ``beam_width`` across ALL parents' children).
+    """
+    rotation = _direction_toward(beam.current_cell, dst_cell)
+    next_cell = _advance(beam.current_cell, rotation)
+    if next_cell in occupied_cells or next_cell in beam.interval_cells:
+        return []
+
+    combined_occupancy = occupied_cells | beam.interval_cells
+    scored: list[tuple[float, dict[str, Any], dict[str, float]]] = []
+    path_list = list(beam.blocks)
+    for entry in catalogue:
+        cand = _CandidateBlock(
+            family=entry.family, name=entry.name,
+            cell=next_cell, rotation=rotation, info=entry.info,
+        )
+        score, breakdown = score_candidate(
+            cand=cand,
+            prev_block=beam.prev_block,
+            prev_prev_block=beam.prev_prev_block,
+            pair_priors=pair_priors,
+            triple_priors=triple_priors,
+            path_so_far=path_list,
+            occupied_cells=combined_occupancy,
+            weights=weights,
+        )
+        block = {
+            "block_family": entry.family,
+            "block_name": entry.name,
+            "x": next_cell[0], "y": next_cell[1], "z": next_cell[2],
+            "rotation": rotation,
+            "ai_score": round(score, 6),
+            "ai_score_breakdown": {k: round(v, 6) for k, v in breakdown.items()},
+        }
+        scored.append((score, block, breakdown))
+
+    if not scored:
+        return []
+    # Descending by score; take top_n_children.
+    scored.sort(key=lambda t: -t[0])
+    children: list[_Beam] = []
+    for score, block, _ in scored[:top_n_children]:
+        children.append(_Beam(
+            blocks=beam.blocks + (block,),
+            path_cells=beam.path_cells + (next_cell,),
+            interval_cells=beam.interval_cells | frozenset({next_cell}),
+            score_sum=beam.score_sum + score,
+            current_cell=next_cell,
+            prev_block=(block["block_family"], block["block_name"]),
+            prev_prev_block=beam.prev_block,
+        ))
+    return children
+
 
 def _generate_interval(
     *,
@@ -505,110 +624,127 @@ def _generate_interval(
     occupied_cells: set[Cell],
     max_depth: int,
     weights: Mapping[str, float],
+    beam_width: int = 1,
+    top_n_children: int = DEFAULT_TOP_N_CANDIDATES,
 ) -> _IntervalResult:
-    """Greedy walk from ``src_cell`` toward ``dst_cell``.
+    """Beam search from ``src_cell`` toward ``dst_cell``.
 
-    At each step, compute the current direction, enumerate candidate
-    blocks, score them, pick the top-1, advance the current cell.
-    Terminate when the next advance would land within Chebyshev 1
-    of ``dst_cell`` — that means the anchor at ``dst_cell`` is the
-    landing block for the interval.
+    ``beam_width=1`` is the v0.1 greedy equivalent (single beam,
+    top-1 expansion per step). Wider beams keep ``beam_width``
+    parallel candidate paths alive; each expands to
+    ``top_n_children`` successors per step and the global top
+    ``beam_width`` survives to the next layer.
+
+    Completed beams (arrived within Chebyshev 1 of dst) are held
+    aside and the best-scoring completed beam wins at termination.
+    If all beams dead-end before reaching dst → reject_reason
+    ``beam_exhausted``. If the starting pool finds no candidates
+    at all → ``no_valid_candidates``.
     """
-    result = _IntervalResult(blocks=[], path_cells=[src_cell], score_sum=0.0, score_count=0)
-    current_cell = src_cell
-    prev_block = src_block
-    prev_prev_block: tuple[str, str] | None = None
+    result = _IntervalResult(
+        blocks=[], path_cells=[src_cell], score_sum=0.0, score_count=0,
+    )
 
-    # Trivial interval: src and dst are already Chebyshev-adjacent.
-    # Happens frequently on Linked-CP maps where consecutive
-    # LinkedCheckpoint waypoints sit side-by-side (e.g. map 1212
-    # anchors at (23,9,10) and (24,9,10)). Return success with
-    # zero synthesised blocks — the dst anchor block is the
-    # landing surface by construction.
+    # Trivial interval (Chebyshev-adjacent anchors) returns empty.
     if max(
         abs(dst_cell[0] - src_cell[0]),
         abs(dst_cell[2] - src_cell[2]),
     ) <= 1:
         return result
 
-    for depth in range(max_depth):
-        # Check arrival: if destination is reachable in one step
-        # we're done — the anchor block itself is the landing.
-        _dx = dst_cell[0] - current_cell[0]
-        _dz = dst_cell[2] - current_cell[2]
-        if max(abs(_dx), abs(_dz)) <= 1:
-            return result
+    initial = _Beam(
+        blocks=(), path_cells=(src_cell,),
+        interval_cells=frozenset(),
+        score_sum=0.0, current_cell=src_cell,
+        prev_block=src_block, prev_prev_block=None,
+    )
+    live: list[_Beam] = [initial]
+    completed: list[_Beam] = []
+    any_step_succeeded = False
 
-        rotation = _direction_toward(current_cell, dst_cell)
-        next_cell = _advance(current_cell, rotation)
+    for _ in range(max_depth):
+        # Move any already-arrived beams into the completed bucket.
+        next_live: list[_Beam] = []
+        for b in live:
+            if _beam_reached_dst(b, dst_cell):
+                completed.append(b)
+            else:
+                next_live.append(b)
+        if not next_live:
+            break
 
-        # Occupied-cell filter: don't overlap an existing anchor or
-        # a block we already placed this interval.
-        if next_cell in occupied_cells:
-            result.reject_reason = "no_valid_candidates"
-            result.detail = (
-                f"next cell {next_cell} already occupied; "
-                f"depth={depth} interval src={src_cell} dst={dst_cell}"
-            )
-            return result
-
-        # Score every catalogue entry at this (cell, rotation) and
-        # pick the top. Limits search cost to O(|catalogue|) per
-        # step — acceptable for ~5k distinct blocks.
-        best: _StepOutcome | None = None
-        for entry in catalogue:
-            cand = _CandidateBlock(
-                family=entry.family, name=entry.name,
-                cell=next_cell, rotation=rotation, info=entry.info,
-            )
-            score, breakdown = score_candidate(
-                cand=cand,
-                prev_block=prev_block,
-                prev_prev_block=prev_prev_block,
+        # Expand each live beam, collect all children.
+        all_children: list[_Beam] = []
+        for b in next_live:
+            all_children.extend(_expand_beam(
+                beam=b, dst_cell=dst_cell,
+                catalogue=catalogue,
                 pair_priors=pair_priors,
                 triple_priors=triple_priors,
-                path_so_far=result.blocks,
                 occupied_cells=occupied_cells,
                 weights=weights,
-            )
-            if best is None or score > best.score:
-                best = _StepOutcome(
-                    block={
-                        "block_family": entry.family,
-                        "block_name": entry.name,
-                        "x": next_cell[0], "y": next_cell[1], "z": next_cell[2],
-                        "rotation": rotation,
-                        "ai_score": round(score, 6),
-                        "ai_score_breakdown": {
-                            k: round(v, 6) for k, v in breakdown.items()
-                        },
-                    },
-                    score=score,
-                    breakdown=breakdown,
-                )
+                top_n_children=top_n_children,
+            ))
+        if not all_children:
+            # Every live beam dead-ended. No further progress.
+            break
+        any_step_succeeded = True
 
-        if best is None:
+        # Global prune — keep top ``beam_width`` by score_sum.
+        all_children.sort(key=lambda b: -b.score_sum)
+        live = all_children[:beam_width]
+
+    # Any remaining live beams that happen to arrive exactly at the
+    # depth cap count as completed.
+    for b in live:
+        if _beam_reached_dst(b, dst_cell):
+            completed.append(b)
+
+    if not completed:
+        # Differentiate "never made a single step" (occupancy or
+        # empty catalogue at step 1) from "walked a while but
+        # couldn't reach the destination within max_depth". On the
+        # "walked a while" case, emit the best partial beam as
+        # ``result.blocks`` for debugging visibility — operators
+        # can inspect the ai_score_breakdown of the steps leading
+        # to the dead-end.
+        if not any_step_succeeded:
             result.reject_reason = "no_valid_candidates"
             result.detail = (
-                f"empty catalogue at depth={depth} cell={next_cell}"
+                f"first-step expansion produced zero candidates "
+                f"(src={src_cell} dst={dst_cell}); likely an "
+                f"occupancy conflict or empty catalogue"
             )
-            return result
+        else:
+            result.reject_reason = "beam_exhausted"
+            result.detail = (
+                f"no beam reached cheb=1 of {dst_cell} within "
+                f"max_depth={max_depth} (beam_width={beam_width}, "
+                f"top_n_children={top_n_children})"
+            )
+            if live:
+                best_partial = max(
+                    live,
+                    key=lambda b: (b.score_sum / max(1, b.depth), -b.depth),
+                )
+                result.blocks = list(best_partial.blocks)
+                result.path_cells = list(best_partial.path_cells)
+                result.score_sum = best_partial.score_sum
+                result.score_count = best_partial.score_count
+        return result
 
-        result.blocks.append(best.block)
-        result.path_cells.append(next_cell)
-        result.score_sum += best.score
-        result.score_count += 1
-        occupied_cells.add(next_cell)
-        current_cell = next_cell
-        prev_prev_block = prev_block
-        prev_block = (best.block["block_family"], best.block["block_name"])
-
-    # Depth exhausted without reaching dst.
-    result.reject_reason = "beam_exhausted"
-    result.detail = (
-        f"reached max_interval_depth={max_depth} without arriving "
-        f"within cheb=1 of {dst_cell}"
+    # Best completed beam wins.
+    best = max(
+        completed,
+        key=lambda b: (b.score_sum / max(1, b.depth), -b.depth),
     )
+    result.blocks = list(best.blocks)
+    result.path_cells = list(best.path_cells)
+    result.score_sum = best.score_sum
+    result.score_count = best.score_count
+    # Merge the winning beam's interval cells into the caller's
+    # occupancy so subsequent intervals don't collide.
+    occupied_cells |= best.interval_cells
     return result
 
 
@@ -910,6 +1046,7 @@ def generate_ai_map(
             occupied_cells=occupied,
             max_depth=inputs.max_interval_depth,
             weights=AI_GENERATOR_WEIGHTS,
+            beam_width=max(1, inputs.beam_width),
         )
         if result.reject_reason is not None:
             return _build_v0_2_artifact(

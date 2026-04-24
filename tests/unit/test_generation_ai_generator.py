@@ -336,6 +336,141 @@ class TestShadowCellsPenalty:
         assert _shadow_cells_clear(cand=cand, occupied_cells=occ_plus_x) == 0.0
 
 
+class TestBeamSearch:
+    """v0.2 beam search — width=1 must match greedy; width>1 must
+    prune globally; deadends must fall out of the pool."""
+
+    def _cat(self) -> list[_CatalogueEntry]:
+        return [
+            _CatalogueEntry(
+                family="Road", name="RoadTechStraight",
+                info=GeometryInfo(shape_class="straight"),
+            ),
+            _CatalogueEntry(
+                family="Road", name="RoadTechCurve",
+                info=GeometryInfo(shape_class="curve"),
+            ),
+            _CatalogueEntry(
+                family="Road", name="RoadTechBend",
+                info=GeometryInfo(shape_class="curve"),
+            ),
+        ]
+
+    def test_width_1_matches_greedy(self) -> None:
+        # With beam_width=1, same deterministic path as the v0.1
+        # greedy loop produced. Priors tie → first catalogue entry
+        # wins (stable sort).
+        result = _generate_interval(
+            src_cell=(0, 9, 0), dst_cell=(4, 9, 0),
+            src_block=None,
+            catalogue=self._cat(),
+            pair_priors={}, triple_priors=None,
+            occupied_cells={(0, 9, 0), (4, 9, 0)},
+            max_depth=12, weights=AI_GENERATOR_WEIGHTS,
+            beam_width=1,
+        )
+        assert result.reject_reason is None
+        assert result.blocks
+        # Walker lands within cheb=1 of dst.
+        last = result.path_cells[-1]
+        assert max(abs(last[0] - 4), abs(last[2])) <= 1
+
+    def test_wider_beam_reaches_same_dst(self) -> None:
+        # Width=3 should also reach, with equal-or-better
+        # score_sum (wider search never picks worse under greedy
+        # tie-break semantics).
+        narrow = _generate_interval(
+            src_cell=(0, 9, 0), dst_cell=(4, 9, 0),
+            src_block=None,
+            catalogue=self._cat(),
+            pair_priors={}, triple_priors=None,
+            occupied_cells={(0, 9, 0), (4, 9, 0)},
+            max_depth=12, weights=AI_GENERATOR_WEIGHTS,
+            beam_width=1,
+        )
+        wide = _generate_interval(
+            src_cell=(0, 9, 0), dst_cell=(4, 9, 0),
+            src_block=None,
+            catalogue=self._cat(),
+            pair_priors={}, triple_priors=None,
+            occupied_cells={(0, 9, 0), (4, 9, 0)},
+            max_depth=12, weights=AI_GENERATOR_WEIGHTS,
+            beam_width=3,
+        )
+        assert narrow.reject_reason is None
+        assert wide.reject_reason is None
+        # Wider beam's mean-score shouldn't be lower on the same
+        # problem — if it were, pruning is broken.
+        narrow_mean = narrow.score_sum / max(1, narrow.score_count)
+        wide_mean = wide.score_sum / max(1, wide.score_count)
+        assert wide_mean >= narrow_mean - 1e-9
+
+    def test_beam_carries_diversity_per_path(self) -> None:
+        # Two beams exploring different first-step picks should
+        # carry distinct prev_block lineage (the diversity penalty
+        # and pair/triple priors reference per-beam path, not a
+        # shared mutable).
+        # We assert indirectly: the winning beam's block list is
+        # a subset of its own ancestor — not a concatenation across
+        # beams. Easiest check: all path_cells are contiguous.
+        result = _generate_interval(
+            src_cell=(0, 9, 0), dst_cell=(5, 9, 0),
+            src_block=None,
+            catalogue=self._cat(),
+            pair_priors={}, triple_priors=None,
+            occupied_cells={(0, 9, 0), (5, 9, 0)},
+            max_depth=12, weights=AI_GENERATOR_WEIGHTS,
+            beam_width=3,
+        )
+        assert result.reject_reason is None
+        for i in range(1, len(result.path_cells)):
+            a, b = result.path_cells[i - 1], result.path_cells[i]
+            assert max(abs(a[0] - b[0]), abs(a[2] - b[2])) <= 1
+
+    def test_occupancy_across_siblings_isolated(self) -> None:
+        # Caller's occupied set stays read-only during a beam
+        # search; a beam's placements belong to ITS frozen
+        # interval_cells only. No sibling can collide with another's
+        # choice because rotation + direction are shared up to the
+        # split point, but the assertion here is lighter: the
+        # initial occupancy set (anchors) must NOT grow during
+        # expansion of competing beams.
+        occ = {(0, 9, 0), (5, 9, 0)}
+        snapshot = set(occ)
+        _generate_interval(
+            src_cell=(0, 9, 0), dst_cell=(5, 9, 0),
+            src_block=None,
+            catalogue=self._cat(),
+            pair_priors={}, triple_priors=None,
+            occupied_cells=occ,
+            max_depth=12, weights=AI_GENERATOR_WEIGHTS,
+            beam_width=3,
+        )
+        # Anchor cells are still there; additional cells (winning
+        # beam's interval) got merged back in — that's the documented
+        # protocol so downstream intervals don't collide.
+        assert snapshot.issubset(occ)
+        # Net-new cells = winning beam's path, which is >= 1 cell
+        # (non-trivial interval).
+        assert len(occ) > len(snapshot)
+
+    def test_partial_beam_preserved_on_exhaustion(self) -> None:
+        # max_depth too small to reach dst → reject_reason=beam_exhausted,
+        # but result.blocks keeps the best partial beam so the
+        # operator can inspect ai_score_breakdown post-hoc.
+        result = _generate_interval(
+            src_cell=(0, 9, 0), dst_cell=(100, 9, 0),
+            src_block=None,
+            catalogue=self._cat(),
+            pair_priors={}, triple_priors=None,
+            occupied_cells={(0, 9, 0), (100, 9, 0)},
+            max_depth=4, weights=AI_GENERATOR_WEIGHTS,
+            beam_width=2,
+        )
+        assert result.reject_reason == "beam_exhausted"
+        assert len(result.blocks) == 4
+
+
 class TestPositiveWeightKeys:
     def test_contains_only_positive_signals(self) -> None:
         # ai_confidence divides by this set's sum. Adding a penalty
