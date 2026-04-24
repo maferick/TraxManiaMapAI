@@ -13,9 +13,11 @@ from src.generation.ai_generator import (
     _POSITIVE_WEIGHT_KEYS,
     _CandidateBlock,
     _CatalogueEntry,
+    _ShapeSurface,
     _advance,
     _direction_toward,
     _generate_interval,
+    _sequence_pair_score,
     _shadow_cells_clear,
     score_candidate,
 )
@@ -334,6 +336,90 @@ class TestShadowCellsPenalty:
         assert _shadow_cells_clear(cand=cand, occupied_cells=occ_plus_z) > 0
         occ_plus_x = {(6, 9, 7)}  # +X direction isn't the shadow at rot=1
         assert _shadow_cells_clear(cand=cand, occupied_cells=occ_plus_x) == 0.0
+
+
+class TestSequencePairScore:
+    """v0.3 sequence tier — shape+surface compatibility in-memory."""
+
+    def test_same_surface_same_shape_family_high_score(self) -> None:
+        # straight → straight on the same surface is the canonical
+        # "clean continuation" — scores high.
+        prev = _ShapeSurface(shape_class="straight", surface_hint="road_tech")
+        cand = _ShapeSurface(shape_class="straight", surface_hint="road_tech")
+        assert _sequence_pair_score(prev, cand) == pytest.approx(1.0)
+
+    def test_compatible_shape_different_surface(self) -> None:
+        # straight → curve is compatible; surface differs → +0.3 only.
+        prev = _ShapeSurface(shape_class="straight", surface_hint="road_tech")
+        cand = _ShapeSurface(shape_class="curve", surface_hint="dirt")
+        # baseline 0.4 + shape 0.3 = 0.7
+        assert _sequence_pair_score(prev, cand) == pytest.approx(0.7)
+
+    def test_incompatible_shape_pair(self) -> None:
+        # loop → platform isn't in the compatibility set → baseline only.
+        prev = _ShapeSurface(shape_class="loop", surface_hint="plastic")
+        cand = _ShapeSurface(shape_class="platform", surface_hint="plastic")
+        # baseline 0.4 + surface 0.3 = 0.7 (no shape bonus)
+        assert _sequence_pair_score(prev, cand) == pytest.approx(0.7)
+
+    def test_unknown_shape_penalty(self) -> None:
+        prev = _ShapeSurface(shape_class="unknown", surface_hint="")
+        cand = _ShapeSurface(shape_class="straight", surface_hint="")
+        # 0.4 - 0.1 = 0.3
+        assert _sequence_pair_score(prev, cand) == pytest.approx(0.3)
+
+    def test_prev_none_is_zero(self) -> None:
+        cand = _ShapeSurface(shape_class="straight", surface_hint="road")
+        assert _sequence_pair_score(None, cand) == 0.0
+
+    def test_score_bounded_zero_to_one(self) -> None:
+        prev = _ShapeSurface(shape_class="start", surface_hint="x")
+        cand = _ShapeSurface(shape_class="straight", surface_hint="x")
+        score = _sequence_pair_score(prev, cand)
+        assert 0.0 <= score <= 1.0
+
+
+class TestScoreSequenceIntegration:
+    def test_sequence_tier_fires_with_lookup(self) -> None:
+        cand = _CandidateBlock(
+            family="Road", name="RoadTechStraight",
+            cell=(1, 9, 0), rotation=0,
+            info=GeometryInfo(shape_class="straight"),
+        )
+        lookup = {
+            ("Road", "RoadTechRamp"): _ShapeSurface(
+                shape_class="ramp", surface_hint="road_tech",
+            ),
+            ("Road", "RoadTechStraight"): _ShapeSurface(
+                shape_class="straight", surface_hint="road_tech",
+            ),
+        }
+        _, breakdown = score_candidate(
+            cand=cand,
+            prev_block=("Road", "RoadTechRamp"),
+            pair_priors={}, triple_priors=None,
+            shape_surface_lookup=lookup,
+            path_so_far=[], weights=AI_GENERATOR_WEIGHTS,
+        )
+        # ramp → straight compatible + same surface → 1.0
+        assert breakdown["sequence"] == pytest.approx(1.0)
+
+    def test_sequence_tier_zero_without_lookup(self) -> None:
+        # Backcompat: pre-v0.3 callers that don't pass the lookup
+        # see the sequence tier as 0 (same as v0.0–v0.2).
+        cand = _CandidateBlock(
+            family="Road", name="RoadTechStraight",
+            cell=(1, 9, 0), rotation=0,
+            info=GeometryInfo(shape_class="straight"),
+        )
+        _, breakdown = score_candidate(
+            cand=cand,
+            prev_block=("Road", "RoadTechRamp"),
+            pair_priors={}, triple_priors=None,
+            shape_surface_lookup=None,
+            path_so_far=[], weights=AI_GENERATOR_WEIGHTS,
+        )
+        assert breakdown["sequence"] == 0.0
 
 
 class TestBeamSearch:
