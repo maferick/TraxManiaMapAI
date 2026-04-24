@@ -90,6 +90,30 @@ class TestConfigLoader:
 # PluginIO
 # ---------------------------------------------------------------------
 
+class TestPluginFixtureConformance:
+    """Golden fixture — ``tests/fixtures/remote_test/plugin_out_v1.json``
+    is the canonical example shipped alongside the OpenPlanet plugin's
+    README. This test asserts the agent's parser accepts it as-is.
+    Any plugin change that breaks this fixture either breaks v1 of
+    the protocol (need a version bump) or has a bug.
+    """
+
+    def test_fixture_parses_cleanly(self) -> None:
+        fixture = (
+            Path(__file__).parent.parent
+            / "fixtures" / "remote_test" / "plugin_out_v1.json"
+        )
+        assert fixture.exists(), "fixture missing — check path"
+        report = _parse_report(fixture)
+        assert report.job_id == 42
+        assert report.load_success is True
+        assert report.spawn_ok is True
+        assert report.checkpoint_times_ms == [3200, 6400, 9100]
+        assert report.driven_cells == [(0, 9, 0), (1, 9, 0), (2, 9, 0)]
+        assert report.plugin_version == "plugin-v0.1"
+        assert report.exit_reason == "observer_timeout"
+
+
 class TestPluginIO:
     def test_drop_trigger_writes_expected_shape(self, tmp_path: Path) -> None:
         plugin = PluginIO(tmp_path)
