@@ -165,6 +165,100 @@ class TestTopFindingsOrdering:
             )
 
 
+class TestPerCorridorScores:
+    """Per-corridor validation score — the soft generation signal.
+
+    Formula is conservative by design: a clean corridor scores 1.0;
+    a corridor with one likely_broken jump + a partial_multicell hit
+    sits around ~0.6; a catastrophic corridor floors at 0.0.
+    """
+
+    def test_clean_corridor_scores_1_0(self) -> None:
+        blocks = [
+            {"block_family": "Road", "block_name": "RoadTechStraight",
+             "x": 0, "y": 9, "z": 0, "rotation": 0},
+            {"block_family": "Road", "block_name": "RoadTechStraight",
+             "x": 1, "y": 9, "z": 0, "rotation": 0},
+        ]
+        lookup = {("Road", "RoadTechStraight"): _STRAIGHT}
+        summary = run_preemit_validation(
+            blocks=blocks, geometry_lookup=lookup,
+            route_cells=[(0, 9, 0), (1, 9, 0)],
+            corridor_paths=[(99, 0, [(0, 9, 0), (1, 9, 0)])],
+        )
+        assert len(summary.per_corridor_scores) == 1
+        cs = summary.per_corridor_scores[0]
+        assert cs.corridor_id == 99
+        assert cs.validation_score == pytest.approx(1.0)
+        assert cs.partial_multicell_hits == 0
+        assert cs.jump_likely_broken == 0
+
+    def test_broken_corridor_loses_score(self) -> None:
+        # Ramp takeoff, no landing in cone, plus a nearby empty-
+        # shadow multi-cell block. Score should drop meaningfully.
+        wall_lookup = GeometryInfo(
+            footprint_x=4, shape_class="straight",
+        )
+        ramp_lookup = GeometryInfo(shape_class="ramp")
+        blocks = [
+            {"block_family": "Road", "block_name": "RoadTechRamp",
+             "x": 0, "y": 10, "z": 0, "rotation": 0},
+            # Wall4 whose 3 shadow cells are empty, near the path.
+            {"block_family": "Platform",
+             "block_name": "PlatformPlasticWallStraight4",
+             "x": 2, "y": 10, "z": 0, "rotation": 0},
+        ]
+        lookup = {
+            ("Road", "RoadTechRamp"): ramp_lookup,
+            ("Platform", "PlatformPlasticWallStraight4"): wall_lookup,
+        }
+        summary = run_preemit_validation(
+            blocks=blocks, geometry_lookup=lookup,
+            route_cells=[(0, 10, 0), (10, 10, 0)],
+            corridor_paths=[(7, 0, [(0, 10, 0), (10, 10, 0)])],
+        )
+        cs = summary.per_corridor_scores[0]
+        # The ramp launches toward (10,10,0); the Wall4 mesh at
+        # (2..5,10,0) lands inside the cone but isn't aligned with
+        # the next route cell — broken OR uncertain is correct.
+        assert cs.jump_likely_broken + cs.jump_uncertain >= 1
+        # Partial-multicell fails nearby (the Wall4's 3 empty shadows
+        # aren't actually empty here because the Wall4 origin *is* a
+        # block; instead its own shadow is empty) should still push
+        # the score visibly below 1.0.
+        assert cs.validation_score < 0.9
+
+    def test_score_floored_at_zero(self) -> None:
+        # 50 ramp → nothing jumps; enough penalty to drive below 0,
+        # should clamp to 0.0.
+        blocks = [
+            {"block_family": "Road", "block_name": "RoadTechRamp",
+             "x": i * 10, "y": 10, "z": 0, "rotation": 0}
+            for i in range(50)
+        ]
+        lookup = {("Road", "RoadTechRamp"): GeometryInfo(shape_class="ramp")}
+        route = [(i * 10, 10, 0) for i in range(50)]
+        summary = run_preemit_validation(
+            blocks=blocks, geometry_lookup=lookup,
+            route_cells=route,
+            corridor_paths=[(1, 0, route)],
+        )
+        cs = summary.per_corridor_scores[0]
+        assert cs.validation_score == 0.0
+
+    def test_no_corridor_paths_means_no_per_corridor_scores(self) -> None:
+        # Backwards-compat: callers that didn't opt into corridor
+        # scoring get an empty tuple (not None).
+        summary = run_preemit_validation(
+            blocks=[{
+                "block_family": "Road", "block_name": "RoadTechStraight",
+                "x": 0, "y": 9, "z": 0, "rotation": 0,
+            }],
+            geometry_lookup={("Road", "RoadTechStraight"): _STRAIGHT},
+        )
+        assert summary.per_corridor_scores == ()
+
+
 class TestToDict:
     """JSON sidecar round-trip: the shape consumers read back must
     be stable across runs."""

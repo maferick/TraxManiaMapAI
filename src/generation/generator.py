@@ -634,12 +634,16 @@ def _run_preemit_validation_inline(
 
     route_cells: list[tuple[int, int, int]] = []
     spawn_cell: tuple[int, int, int] | None = None
+    corridor_paths: list[tuple[int, int, tuple[tuple[int, int, int], ...]]] = []
     for iv in route.intervals:
         if iv.chosen.path_cells:
             if not route_cells:
                 spawn_cell = iv.chosen.path_cells[0]
             for cell in iv.chosen.path_cells:
                 route_cells.append(cell)
+            corridor_paths.append((
+                iv.chosen.corridor_id, iv.index, iv.chosen.path_cells,
+            ))
 
     # Replay evidence for the jump validator's supported_by_replay
     # bucket. load_replay_touched_cells returns an empty set when no
@@ -656,12 +660,14 @@ def _run_preemit_validation_inline(
         route_cells=route_cells,
         spawn_cell=spawn_cell,
         replay_touched_cells=replay_cells if replay_cells else None,
+        corridor_paths=corridor_paths or None,
     )
     _LOG.info(
         "preemit[%s] run_id=%s fail=%d warn=%d info=%d "
-        "(map_id=%d stripped=%s)",
+        "corridor_scores=%d (map_id=%d stripped=%s)",
         summary.version, run_id,
         summary.fail_count, summary.warn_count, summary.info_count,
+        len(summary.per_corridor_scores),
         route.map_id, stripped_blocks is not None,
     )
     return summary
