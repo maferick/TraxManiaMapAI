@@ -18,6 +18,8 @@
 //     "title_id":        "TMStadium" | null,
 //     "is_header_encrypted": bool,
 //     "is_data_private": bool,
+//     "has_packlist":    bool,                 // packlist.dat found next to pak
+//     "has_key":         bool,                 // key for this pak derived from packlist
 //     "file_count":      int,
 //     "block_gbx_count": int,                  // ends with .Block.Gbx (case-insensitive)
 //     "block_gbx_sample": [                    // first N block entries, for sanity
@@ -26,9 +28,11 @@
 //     ]
 //   }}
 //
-// The goal is a yes/no on "can we read Stadium.pak" plus enough
-// metadata to design M2b. If the operator's pak needs a key we expect
-// a structured error here, not an exception.
+// #217-M2b: If a sibling ``packlist.dat`` is present (as shipped in
+// TM2020's ``Packs/`` folder), its per-pak keys are derived using
+// GBX.NET.PAK's PakList(TM salts) and the matching key is handed to
+// Pak.Parse. Without it, the pak directory on TM2020's Stadium.pak
+// reads as zero entries (header + data both private).
 
 using GBX.NET.PAK;
 
@@ -45,11 +49,25 @@ internal static class PakProbe
         if (!File.Exists(path))
             throw new FileNotFoundException($"pak file missing: {path}");
 
+        // Look for a sibling packlist.dat (TM2020 ships one in the
+        // game's Packs/ folder). Parse it with TM salts if present;
+        // the resulting dict maps pak-id → decryption key bytes.
+        var pakDir = Path.GetDirectoryName(path) ?? "";
+        var packlistPath = Path.Combine(pakDir, PakList.FileName);
+        byte[]? pakKey = null;
+        bool hasPacklist = File.Exists(packlistPath);
+        if (hasPacklist)
+        {
+            var packlist = PakList.Parse(packlistPath, PakListGame.TM);
+            var pakId = Path.GetFileNameWithoutExtension(path);
+            packlist.ToKeyInfoDictionary().TryGetValue(pakId, out pakKey);
+        }
+
         using var stream = File.OpenRead(path);
-        // key=null: best-effort read. Public paks should expose their
-        // directory under the library's built-in header key; private
-        // paks will throw and we'll surface that via ClassifyError.
-        var pak = Pak.Parse(stream, key: null, computeKey: true);
+        // With a derived key, Pak.Parse decrypts the directory. Without
+        // one, we still open best-effort — some paks expose metadata
+        // under the library's built-in header key even when private.
+        var pak = Pak.Parse(stream, key: pakKey, computeKey: true);
 
         string? titleId = null;
         bool isDataPrivate = false;
@@ -92,6 +110,8 @@ internal static class PakProbe
             ["title_id"] = titleId,
             ["is_header_encrypted"] = pak.IsHeaderEncrypted,
             ["is_data_private"] = isDataPrivate,
+            ["has_packlist"] = hasPacklist,
+            ["has_key"] = pakKey is not null,
             ["file_count"] = files.Count,
             ["block_gbx_count"] = blockEntries.Count,
             ["block_gbx_sample"] = sample,

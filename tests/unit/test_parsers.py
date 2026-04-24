@@ -340,6 +340,7 @@ class TestSubprocessParserProbePak:
               "pak_path":"/games/Trackmania/Packs/Stadium.pak",
               "pak_version":6,"title_id":"TMStadium",
               "is_header_encrypted":false,"is_data_private":false,
+              "has_packlist":true,"has_key":true,
               "file_count":12345,"block_gbx_count":842,
               "block_gbx_sample":[
                 {"path":"GameCtnBlockInfo/Stadium/Race/RoadTech/RoadTechStraight.Block.Gbx",
@@ -357,6 +358,8 @@ class TestSubprocessParserProbePak:
         assert r.output["pak_version"] == 6
         assert r.output["title_id"] == "TMStadium"
         assert r.output["block_gbx_count"] == 842
+        assert r.output["has_packlist"] is True
+        assert r.output["has_key"] is True
         assert len(r.output["block_gbx_sample"]) == 1
         assert r.output["block_gbx_sample"][0]["path"].endswith(".Block.Gbx")
 
