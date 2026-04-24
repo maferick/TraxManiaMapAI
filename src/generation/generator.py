@@ -129,6 +129,13 @@ class _BaseMapData:
     source_map_id: str | None
     blocks: list[dict[str, Any]]
     checkpoints: list[dict[str, Any]]
+    # Union of all grid cells occupied by every waypoint — grid-placed
+    # cells directly, free-placed cells after snapping via TM2020's
+    # fixed block-size grid. Level-2 strip uses this to preserve
+    # structural geometry around anchors under the
+    # halo_axis_1_plus_anchor_radius_3 policy. An empty set is
+    # perfectly valid (matches the grid-only scope-v0 invariant).
+    anchor_cells: frozenset[tuple[int, int, int]]
     # Provenance from scored-corridor rows (consistent across the map
     # if all corridors share one model hash, which they do when
     # score-corridors-learned ran cleanly).
@@ -150,7 +157,8 @@ ORDER BY placement_index ASC
 """
 
 _CHECKPOINTS_SQL = """
-SELECT waypoint_index, waypoint_order, tag, x, y, z
+SELECT waypoint_index, waypoint_order, tag, x, y, z,
+       abs_x, abs_y, abs_z, placement
 FROM map_checkpoints
 WHERE map_id = %s
   AND tag IN ('Spawn', 'Checkpoint', 'LinkedCheckpoint', 'Goal')
@@ -164,6 +172,28 @@ ORDER BY
     waypoint_order,
     waypoint_index
 """
+
+
+# TM2020 grid cell dimensions (metres). Verified empirically from
+# map 1212: Spawn abs=(752, 24, 128) snaps to cell (23, 3, 4) →
+# 752/32=23.5, 24/8=3, 128/32=4. These are the canonical native block
+# dimensions and are invariant per environment.
+_BLOCK_SIZE_X: int = 32
+_BLOCK_SIZE_Y: int = 8
+_BLOCK_SIZE_Z: int = 32
+
+
+def _snap_abs_to_grid(
+    abs_x: float, abs_y: float, abs_z: float,
+) -> tuple[int, int, int]:
+    """Map an absolute (x, y, z) in metres to a TM2020 grid cell.
+    Floor-divided so free-placed waypoints land in the cell they're
+    nominally inside. See _BLOCK_SIZE_{X,Y,Z}."""
+    return (
+        int(abs_x // _BLOCK_SIZE_X),
+        int(abs_y // _BLOCK_SIZE_Y),
+        int(abs_z // _BLOCK_SIZE_Z),
+    )
 
 _PROVENANCE_SQL = """
 SELECT learned_score_model_hash, learned_score_version, COUNT(*)
@@ -205,27 +235,50 @@ def _fetch_base_map(conn: Connection, map_id: int) -> _BaseMapData:
         for r in block_rows
     ]
     # Free-placed waypoints (placement='free') store positions in
-    # abs_x/y/z rather than grid x/y/z, so the x/y/z we selected are
-    # NULL. Skip them here: scope-v0 §map.checkpoints requires integer
-    # grid coords, and the snapped grid cells used for the actual route
-    # already flow through route.intervals + route.corridors_used. Log
-    # so the operator sees why the list is shorter than the row count.
+    # abs_x/y/z rather than grid x/y/z, so the grid x/y/z we selected
+    # are NULL. We skip them from the schema-emitted `checkpoints`
+    # list — scope-v0 §map.checkpoints requires integer grid coords
+    # and route.intervals + route.corridors_used already carry their
+    # snapped cells. But PR L adds a second use: the Level-2 strip
+    # policy needs anchor cells to preserve the structural geometry
+    # around Spawn / CP / Goal blocks. For that we snap free-placed
+    # waypoints to grid via the TM2020 block-size constants and
+    # collect *all* anchor cells (grid + snapped) into
+    # ``_BaseMapData.anchor_cells``.
     checkpoints: list[dict[str, Any]] = []
+    anchor_cells_set: set[tuple[int, int, int]] = set()
     skipped_free = 0
     for r in cp_rows:
-        if r[3] is None or r[4] is None or r[5] is None:
+        (
+            waypoint_index, waypoint_order, tag, x, y, z,
+            abs_x, abs_y, abs_z, placement,
+        ) = r
+        if x is not None and y is not None and z is not None:
+            cell = (int(x), int(y), int(z))
+            anchor_cells_set.add(cell)
+            checkpoints.append({
+                "waypoint_index": int(waypoint_index),
+                "waypoint_order": int(waypoint_order),
+                "tag": str(tag),
+                "x": cell[0], "y": cell[1], "z": cell[2],
+            })
+        elif abs_x is not None and abs_y is not None and abs_z is not None:
+            # Free-placed → snap to grid. Kept out of the artifact's
+            # `checkpoints` (schema constraint) but included in the
+            # strip-time anchor set.
+            snapped = _snap_abs_to_grid(
+                float(abs_x), float(abs_y), float(abs_z),
+            )
+            anchor_cells_set.add(snapped)
             skipped_free += 1
-            continue
-        checkpoints.append({
-            "waypoint_index": int(r[0]),
-            "waypoint_order": int(r[1]),
-            "tag": str(r[2]),
-            "x": int(r[3]), "y": int(r[4]), "z": int(r[5]),
-        })
+        else:
+            # Row has neither grid nor abs coords — parse anomaly.
+            skipped_free += 1
     if skipped_free:
         _LOG.info(
             "base map_id=%d: %d free-placed waypoint(s) omitted from "
-            "artifact.map.checkpoints (scope-v0 grid-only constraint)",
+            "artifact.map.checkpoints (scope-v0 grid-only constraint); "
+            "snapped cells captured for strip anchor-radius preservation",
             map_id, skipped_free,
         )
 
@@ -239,6 +292,7 @@ def _fetch_base_map(conn: Connection, map_id: int) -> _BaseMapData:
         source_map_id=source_map_id,
         blocks=blocks,
         checkpoints=checkpoints,
+        anchor_cells=frozenset(anchor_cells_set),
         model_hash=model_hash,
         learned_score_version=learned_score_version,
     )
@@ -458,9 +512,18 @@ def generate_from_base(
     strip_metadata: dict[str, Any] | None = None
     stripped_blocks: list[dict[str, Any]] | None = None
     if inputs.strip and isinstance(route, AssembledRoute):
-        from src.generation.stripper import STRIP_POLICY_HALO_AXIS_1, strip_route
+        from src.generation.stripper import (
+            STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+            strip_route,
+        )
+        # PR L default: halo_axis_1_plus_anchor_radius_3. The plain
+        # halo_axis_1 policy from PR #45 dropped structural spawn /
+        # finish / CP geometry that TM2020 needs to spawn the car
+        # onto a driveable surface (see PR L diagnosis of map 1212).
         strip_result = strip_route(
-            route, base.blocks, policy=STRIP_POLICY_HALO_AXIS_1,
+            route, base.blocks,
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=base.anchor_cells,
         )
         strip_metadata = {
             "stripped": True,

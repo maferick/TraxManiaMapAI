@@ -13,8 +13,10 @@ from src.generation import (
 )
 from src.generation.stripper import (
     STRIP_POLICY_HALO_AXIS_1,
+    STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
     STRIP_POLICY_NONE,
     StripResult,
+    _cheb_cube,
     compute_kept_cells,
     filter_blocks_by_cells,
     strip_route,
@@ -218,13 +220,13 @@ class TestStripRoute:
         return route, blocks
 
     def test_halo_axis_1_keeps_route_and_halo_drops_far(self) -> None:
+        # Explicit halo_axis_1 (the PR L default changed to
+        # halo_axis_1_plus_anchor_radius_3, which would keep more).
         route, blocks = self._sample()
-        result = strip_route(route, blocks)
+        result = strip_route(route, blocks, policy=STRIP_POLICY_HALO_AXIS_1)
         assert result.strip_policy == STRIP_POLICY_HALO_AXIS_1
         assert result.route_intact is True
         assert result.broken_detail is None
-        # Route cells (0..5, 0, 0) all kept; (50,50,50) and (-10,0,0)
-        # are outside the axis-1 halo → dropped.
         kept_cells = {(b["x"], b["y"], b["z"]) for b in result.stripped_blocks}
         for x in range(6):
             assert (x, 0, 0) in kept_cells
@@ -246,7 +248,149 @@ class TestStripRoute:
             strip_route(route, blocks, policy="mystery_halo")
 
     def test_result_has_expected_strip_policy(self) -> None:
+        # strip_route's default is halo_axis_1_plus_anchor_radius_3
+        # as of PR L.
         route, blocks = self._sample()
         result = strip_route(route, blocks)
         assert isinstance(result, StripResult)
-        assert result.strip_policy == STRIP_POLICY_HALO_AXIS_1
+        assert result.strip_policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3
+
+
+# ---------------------------------------------------------------------
+# PR L — halo_axis_1_plus_anchor_radius_3
+# ---------------------------------------------------------------------
+
+class TestChebCube:
+    def test_radius_0_is_single_cell(self) -> None:
+        assert _cheb_cube((5, 5, 5), 0) == {(5, 5, 5)}
+
+    def test_radius_1_is_27_cells(self) -> None:
+        cube = _cheb_cube((0, 0, 0), 1)
+        assert len(cube) == 27
+        # Includes corners (diagonals) — that's the Chebyshev
+        # distinction from our axis-only neighbours.
+        assert (1, 1, 1) in cube and (-1, -1, -1) in cube
+
+    def test_radius_3_is_343_cells(self) -> None:
+        assert len(_cheb_cube((0, 0, 0), 3)) == 7 * 7 * 7
+
+
+class TestComputeKeptCellsWithAnchorRadius:
+    def test_policy_radius_3_grows_around_every_anchor_cell(self) -> None:
+        # Single-interval route with a 1-cell path. Two anchors:
+        # Spawn at (0, 0, 0), Goal at (10, 0, 10) (both "virtual" in
+        # the sense that the path only touches one of them).
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (10, 0, 10))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((5, 5, 5),),
+            ),
+        )
+        route = _route([iv])
+        kept = compute_kept_cells(
+            route,
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=frozenset({(0, 0, 0), (10, 0, 10)}),
+        )
+        # 7×7×7 cube around Spawn:
+        for dx in range(-3, 4):
+            for dy in range(-3, 4):
+                for dz in range(-3, 4):
+                    assert (dx, dy, dz) in kept
+        # 7×7×7 cube around Goal:
+        assert (10 + 3, 0 + 3, 10 + 3) in kept
+        assert (10 - 3, 0 - 3, 10 - 3) in kept
+        # Path cell itself survives via the path branch.
+        assert (5, 5, 5) in kept
+        # And its axis-1 halo (inherited from halo_axis_1):
+        assert (6, 5, 5) in kept
+
+    def test_snapped_anchor_cell_from_free_waypoint_is_included(self) -> None:
+        # Simulates free-Spawn at abs (752, 24, 128) → snapped (23, 3, 4).
+        # Route path is far away; we rely entirely on anchor_cells
+        # for the snap to land in kept.
+        spawn = Anchor("Spawn", 0, None)  # free-placed
+        goal = Anchor("Goal", 0, (30, 10, 30))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((30, 10, 30),),
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=frozenset({(23, 3, 4), (30, 10, 30)}),
+        )
+        assert (23, 3, 4) in kept
+        # Surrounding cube also preserved:
+        assert (22, 3, 4) in kept
+        assert (23, 2, 4) in kept
+        assert (23, 3, 5) in kept
+
+    def test_halo_axis_1_ignores_anchor_cells_arg(self) -> None:
+        # Regression: the old policy must NOT pick up the anchor
+        # radius behaviour by accident if anchor_cells is passed.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (1, 0, 0))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((5, 5, 5),),
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_AXIS_1,
+            anchor_cells=frozenset({(100, 100, 100)}),
+        )
+        # (100, 100, 100) must NOT be in kept under the old policy.
+        assert (100, 100, 100) not in kept
+        # And the cube around it isn't there either.
+        assert (99, 100, 100) not in kept
+
+    def test_strip_route_accepts_new_policy(self) -> None:
+        spawn = Anchor("Spawn", 0, None)  # free-placed
+        cp = Anchor("LinkedCheckpoint", 1, (3, 0, 0))
+        goal = Anchor("Goal", 0, (5, 0, 0))
+        route = _route([
+            IntervalAssembly(
+                index=0, src=spawn, dst=cp,
+                chosen=_corridor(
+                    corridor_id=1, src=spawn, dst=cp,
+                    cells=((0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0)),
+                ),
+            ),
+            IntervalAssembly(
+                index=1, src=cp, dst=goal,
+                chosen=_corridor(
+                    corridor_id=2, src=cp, dst=goal,
+                    cells=((3, 0, 0), (4, 0, 0), (5, 0, 0)),
+                ),
+            ),
+        ])
+        # Blocks: route cells + a cluster near a snapped spawn at (20, 3, 4)
+        blocks = (
+            [_block(x, 0, 0) for x in range(6)]
+            + [_block(20 + dx, 3, 4 + dz) for dx in (-2, -1, 0, 1, 2) for dz in (-2, -1, 0, 1, 2)]
+            + [_block(200, 200, 200)]  # far-away, should be dropped
+        )
+        result = strip_route(
+            route, blocks,
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=frozenset({(20, 3, 4), (3, 0, 0), (5, 0, 0)}),
+        )
+        assert result.strip_policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3
+        assert result.route_intact is True
+        kept_cells = {(b["x"], b["y"], b["z"]) for b in result.stripped_blocks}
+        # Spawn cluster all preserved (within radius 3 of snapped anchor).
+        for dx in (-2, -1, 0, 1, 2):
+            for dz in (-2, -1, 0, 1, 2):
+                assert (20 + dx, 3, 4 + dz) in kept_cells
+        # Far-away block dropped.
+        assert (200, 200, 200) not in kept_cells

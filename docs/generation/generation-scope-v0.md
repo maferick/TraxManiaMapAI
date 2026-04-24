@@ -439,8 +439,10 @@ v0 output is a full copy of the base map's blocks; v0.1 (with
   down to the route's cells.
 - **`map.stripped`** — mirrors `inputs.strip` in the output so
   readers don't have to cross-reference.
-- **`map.strip_policy`** — enum: `none` / `halo_axis_1`. v0.1 ships
-  `halo_axis_1` only; tighter / looser policies are v0.2+.
+- **`map.strip_policy`** — enum: `none` / `halo_axis_1` /
+  `halo_axis_1_plus_anchor_radius_3`. `halo_axis_1_plus_anchor_radius_3`
+  is the default for `--strip` from PR L onward; `halo_axis_1` stays
+  available for reproducibility / comparative runs.
 - **`map.kept_block_count`** + **`map.base_block_count`** — diagnostic
   counts so the operator can see "we stripped 541 → N blocks."
 - **`schema_version`** bumps to `generation-v0.1` *only* when stripping.
@@ -455,12 +457,44 @@ For every cell in every chosen corridor's `path_cells`:
 1. Keep the cell itself.
 2. Keep its 6 grid-axis neighbours (±x, ±y, ±z).
 
-Anchor cells are kept unconditionally (multi-cell CPs have cells the
-route didn't step on; the game still registers them as the same
-waypoint, so dropping them would break in-game race structure).
+Anchor cells are kept unconditionally via `Anchor.cell` (multi-cell
+CPs have cells the route didn't step on; the game still registers
+them as the same waypoint, so dropping them would break in-game race
+structure).
 
 Free-placed blocks (NULL grid coords) and `BakedBlocks` (stadium
 scenery) are untouched.
+
+**Known limitation** — this policy drops structural geometry around
+Spawn / CP / Finish blocks when those blocks form multi-cell
+assemblies that the chosen route doesn't step through. Canonical
+case: map 1212's `PlatformPlasticLoopOutStartCurve1` cluster — 5
+blocks surrounding the Spawn form the start ramp; `halo_axis_1`
+kept only the one on the route and dropped the other 4, leaving the
+car to spawn above nothing. PR L adds
+`halo_axis_1_plus_anchor_radius_3` to address this. The
+`halo_axis_1` policy stays available for reproducibility /
+comparative analysis but **isn't the recommended default for
+in-game use**.
+
+### Strip policy `halo_axis_1_plus_anchor_radius_3` (default)
+
+Everything `halo_axis_1` does, plus:
+
+1. **Free-placed waypoints snap to grid** via the canonical TM2020
+   block dimensions `(32 m × 8 m × 32 m)`. Snapped cells join the
+   anchor set for preservation.
+2. **Every cell within Chebyshev distance 3** of any anchor cell
+   (grid-placed or snapped-from-free) is kept unconditionally — a
+   7×7×7 cube (343 cells) per anchor.
+
+This covers multi-block start-curve / finish-gate / CP-ramp
+assemblies (radial span ≤ 3 cells in the corpus we've seen). Anchor
+cubes overlap where anchors are near each other, so total cell
+counts stay modest (map 1212's 8 grid anchors + 3 snapped ≈ 1-2k
+cells before the route halo).
+
+Free-placed blocks and `BakedBlocks` remain untouched.
 
 ### Reject path is preserved
 
@@ -521,10 +555,13 @@ When reviewing a generation implementation PR, verify:
       building the anchor chain — both in the enumerator's
       `_plan_intervals` and the assembler's `_detect_and_order_anchors`.
 - [ ] Level-2 strip (if present): `schema_version = "generation-v0.1"`,
-      `map.stripped = true`, `map.strip_policy ∈ {"halo_axis_1"}`,
-      `map.kept_block_count` matches `len(map.blocks)`, anchor cells
-      kept even when not on the chosen path. Artifact + GBX are
-      written even when `reject_reason = "stripped_route_broken"`.
+      `map.stripped = true`, `map.strip_policy ∈ {"halo_axis_1",
+      "halo_axis_1_plus_anchor_radius_3"}`, `map.kept_block_count`
+      matches `len(map.blocks)`, anchor cells kept even when not on
+      the chosen path. Artifact + GBX are written even when
+      `reject_reason = "stripped_route_broken"`. Default policy for
+      `--strip` is `halo_axis_1_plus_anchor_radius_3` from PR L
+      onward; `halo_axis_1` stays available for reproducibility.
 - [ ] Provenance block is complete.
 - [ ] No field surfaced in the JSON artifact is computed from
       data that could drift (e.g. no "map quality" score computed
