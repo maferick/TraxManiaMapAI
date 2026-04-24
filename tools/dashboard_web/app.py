@@ -212,6 +212,85 @@ def _summarize_generated_artifact(path: Path) -> dict[str, Any] | None:
     }
 
 
+def _attach_finishability_proof(
+    summaries: list[dict[str, Any]],
+) -> None:
+    """Enrich summaries in-place with a `proof` dict for each unique
+    base_map_id. Reads ``map_finishability_proof`` via one batched
+    SELECT, attaches the row's badge-relevant fields plus a
+    ``proof_badge`` string that the UI renders.
+
+    Failure modes are soft: if the config / DB is unreachable we
+    leave ``proof`` out of each summary and the renderer falls back
+    to "no badge." Proof is additive; the panel stays functional
+    without it.
+    """
+    if not summaries:
+        return
+    base_ids = sorted({
+        int(s["base_map_id"]) for s in summaries
+        if isinstance(s.get("base_map_id"), int)
+    })
+    if not base_ids:
+        return
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from src.storage.mariadb import cursor as _cursor, open_connection
+        from src.utils.config import load_config
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        conn = open_connection(load_config(None))
+    except Exception as exc:  # noqa: BLE001
+        _LOG.info("proof lookup skipped — db unreachable: %s", exc)
+        return
+    try:
+        placeholders = ",".join(["%s"] * len(base_ids))
+        sql = (
+            "SELECT map_id, author_time_ms, bronze_time_ms, "
+            "silver_time_ms, gold_time_ms, world_record_time_ms, "
+            "has_author_time, has_world_record, proof_source "
+            "FROM map_finishability_proof "
+            f"WHERE map_id IN ({placeholders})"
+        )
+        with _cursor(conn) as cur:
+            cur.execute(sql, tuple(base_ids))
+            rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        _LOG.info("proof lookup skipped — query failed: %s", exc)
+        conn.close()
+        return
+    conn.close()
+
+    # Renderer-facing badge string, keyed off proof_source.
+    badge_labels = {
+        "replay": "Player validated",
+        "author_time": "Author validated",
+        "world_record": "Player validated (unverified)",
+        "internal_route": "Internally verified",
+        "none": "",
+    }
+    by_map = {}
+    for r in rows:
+        mid = int(r[0])
+        source = str(r[8])
+        by_map[mid] = {
+            "author_time_ms": int(r[1]) if r[1] is not None else None,
+            "bronze_time_ms": int(r[2]) if r[2] is not None else None,
+            "silver_time_ms": int(r[3]) if r[3] is not None else None,
+            "gold_time_ms":   int(r[4]) if r[4] is not None else None,
+            "world_record_time_ms": int(r[5]) if r[5] is not None else None,
+            "has_author_time": bool(r[6]),
+            "has_world_record": bool(r[7]),
+            "proof_source": source,
+            "proof_badge": badge_labels.get(source, ""),
+        }
+    for s in summaries:
+        mid = s.get("base_map_id")
+        if isinstance(mid, int) and mid in by_map:
+            s["proof"] = by_map[mid]
+
+
 def _list_generated_artifacts(
     root: Path | None = None,
     *,
@@ -278,6 +357,7 @@ def create_app(
     def dashboard():  # noqa: ANN202
         state = fetch()
         generated = _list_generated_artifacts()
+        _attach_finishability_proof(generated)
         return render_template(
             "dashboard.html",
             state=state,
@@ -337,6 +417,7 @@ def create_app(
     @app.route("/api/generated-maps")
     def api_generated_maps_list():  # noqa: ANN202
         items = _list_generated_artifacts()
+        _attach_finishability_proof(items)
         return jsonify({
             "latest": items[0] if items else None,
             "recent": items[:_GENERATED_LIST_CAP],

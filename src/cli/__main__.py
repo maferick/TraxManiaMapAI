@@ -334,6 +334,60 @@ def _cmd_generate_map(args: argparse.Namespace) -> int:
     return 0 if fin["route_verified"] else 1
 
 
+def _cmd_compute_finishability_proof(args: argparse.Namespace) -> int:
+    from src.generation.finishability_proof import compute_for_map
+    config = load_config(args.config)
+    gbx_cfg = (config.get("parsers") or {}).get("gbx") or {}
+    executable = Path(
+        args.parser_executable
+        or gbx_cfg.get("executable")
+        or "./parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper"
+    )
+    timeout = float(gbx_cfg.get("timeout_seconds", 30.0))
+    parser_version = gbx_cfg.get("parser_version", "0.1.0")
+    parser = SubprocessParser(
+        executable=executable,
+        parser_version=parser_version,
+        timeout_seconds=timeout,
+    )
+
+    conn = open_connection(config)
+    try:
+        if args.map_id is not None:
+            map_ids = [int(args.map_id)]
+        else:
+            # --all / default: every map with a raw_artifact_path.
+            from src.storage.mariadb import cursor as cursor_ctx
+            with cursor_ctx(conn) as cur:
+                cur.execute(
+                    "SELECT id FROM maps WHERE raw_artifact_path IS NOT NULL "
+                    "AND parse_status = 'success' "
+                    "ORDER BY id"
+                    + (f" LIMIT {int(args.limit)}" if args.limit else "")
+                )
+                map_ids = [int(row[0]) for row in cur.fetchall()]
+
+        ok = 0
+        errors: list[tuple[int, str]] = []
+        for mid in map_ids:
+            try:
+                compute_for_map(conn, mid, parser=parser)
+                ok += 1
+            except (FileNotFoundError, RuntimeError) as exc:
+                errors.append((mid, str(exc)))
+                _LOG.warning("compute-finishability-proof: map_id=%d failed: %s", mid, exc)
+        _LOG.info(
+            "compute-finishability-proof: maps_seen=%d ok=%d errors=%d",
+            len(map_ids), ok, len(errors),
+        )
+        if errors:
+            for mid, msg in errors[:5]:
+                _LOG.warning("  fail map_id=%d: %s", mid, msg[:120])
+    finally:
+        conn.close()
+    return 0 if not errors else 1
+
+
 def _cmd_emit_gbx(args: argparse.Namespace) -> int:
     from src.generation.gbx_writer import (
         DEFAULT_GBX_OUTPUT_DIR,
@@ -1967,6 +2021,27 @@ def _build_parser() -> argparse.ArgumentParser:
              "(default from config.parsers.gbx.executable)",
     )
     emit_gbx_cmd.set_defaults(func=_cmd_emit_gbx)
+
+    fin_proof_cmd = sub.add_parser(
+        "compute-finishability-proof",
+        help="Phase 2 PR M — compute + persist source-map "
+             "finishability evidence (author times, WR from replays, "
+             "proof_source) into map_finishability_proof. Generated-"
+             "map safety gates are unaffected.",
+    )
+    fin_proof_cmd.add_argument(
+        "--map-id", type=int, default=None,
+        help="single map_id (default: scan every parsed map)",
+    )
+    fin_proof_cmd.add_argument(
+        "--limit", type=int, default=None,
+        help="cap the number of maps processed (for smoke runs)",
+    )
+    fin_proof_cmd.add_argument(
+        "--parser-executable", type=str, default=None,
+        help="override path to the GBX wrapper binary",
+    )
+    fin_proof_cmd.set_defaults(func=_cmd_compute_finishability_proof)
 
     train_corridor_ranking_cmd = sub.add_parser(
         "train-corridor-ranking",

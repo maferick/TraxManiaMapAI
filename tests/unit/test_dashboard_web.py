@@ -625,3 +625,78 @@ class TestGbxDownloadRoute:
         client = self._client(tmp_path, monkeypatch)
         r = client.get("/api/generated-gbx/base9-notthere.Map.Gbx")
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------
+# PR M — finishability-proof attachment
+# ---------------------------------------------------------------------
+
+class TestAttachFinishabilityProof:
+    def test_no_summaries_is_noop(self) -> None:
+        # Smoke: shouldn't blow up on empty input, shouldn't touch DB.
+        summaries: list = []
+        app_module._attach_finishability_proof(summaries)
+        assert summaries == []
+
+    def test_summaries_without_base_map_id_are_untouched(self, monkeypatch) -> None:
+        summaries = [{"filename": "nope.json", "base_map_id": None}]
+        # Sabotage open_connection so we'd notice if the helper tried
+        # to query the DB despite no valid base_map_ids.
+        from src.storage import mariadb
+        called = {"n": 0}
+        def boom(_cfg):
+            called["n"] += 1
+            raise RuntimeError("should not be reached")
+        monkeypatch.setattr(mariadb, "open_connection", boom)
+        app_module._attach_finishability_proof(summaries)
+        assert called["n"] == 0
+        assert "proof" not in summaries[0]
+
+    def test_attaches_badge_labels_for_each_source(self, monkeypatch) -> None:
+        from unittest.mock import MagicMock
+        from src.storage import mariadb
+        from src.utils import config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda _=None: {})
+
+        # Fake cursor returning proof rows for four different sources.
+        fake_rows = [
+            # map_id, author, bronze, silver, gold, wr, has_at, has_wr, source
+            (1,   73501, 111000, 89000, 78000, 57092, 1, 1, "replay"),
+            (2,   60000, 100000, 80000, 70000, None,  1, 0, "author_time"),
+            (3,   None,  None,   None,  None,  42000, 0, 1, "world_record"),
+            (4,   None,  None,   None,  None,  None,  0, 0, "internal_route"),
+        ]
+        cur = MagicMock()
+        cur.fetchall.return_value = fake_rows
+        ctx = MagicMock()
+        ctx.__enter__.return_value = cur
+        ctx.__exit__.return_value = False
+        conn = MagicMock()
+        monkeypatch.setattr(mariadb, "cursor", lambda c: ctx)
+        monkeypatch.setattr(mariadb, "open_connection", lambda _c: conn)
+
+        summaries = [
+            {"filename": f"m{i}.json", "base_map_id": i} for i in (1, 2, 3, 4, 5)
+        ]
+        app_module._attach_finishability_proof(summaries)
+
+        proofs = {s["base_map_id"]: s.get("proof") for s in summaries}
+        assert proofs[1]["proof_badge"] == "Player validated"
+        assert proofs[1]["author_time_ms"] == 73501
+        assert proofs[2]["proof_badge"] == "Author validated"
+        assert proofs[3]["proof_badge"] == "Player validated (unverified)"
+        assert proofs[4]["proof_badge"] == "Internally verified"
+        assert proofs[5] is None  # no row in the fake data
+
+    def test_db_failure_is_soft(self, monkeypatch) -> None:
+        # If the DB is unreachable, the helper logs + returns without
+        # raising. Summaries stay untouched; panel still renders.
+        from src.storage import mariadb
+        from src.utils import config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda _=None: {})
+        def boom(_cfg):
+            raise RuntimeError("db down")
+        monkeypatch.setattr(mariadb, "open_connection", boom)
+        summaries = [{"filename": "m.json", "base_map_id": 42}]
+        app_module._attach_finishability_proof(summaries)
+        assert "proof" not in summaries[0]

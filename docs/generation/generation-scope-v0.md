@@ -511,6 +511,45 @@ future policies might drop path cells), the gate re-run sets
 - **Cross-map corridor splicing** — that's Level-3, a bigger scope
   revision.
 
+## Finishability-proof metadata (source maps only)
+
+PR M adds a ``map_finishability_proof`` table tracking per-source-map
+evidence that a map is actually finishable in-game: author-set medal
+times (from the GBX itself), world-record time (derived as
+``MIN(finish_time_ms)`` across our clean replays), and a derived
+``proof_source`` enum.
+
+**Hard boundary**: this metadata is **evidence, never a bypass**.
+
+- The generator's internal finishability gate
+  (``src.generation.finishability.run_finishability_gate``) runs
+  **mandatorily** on every generated map. ``route_verified`` in the
+  artifact's ``finishability`` block is set **only** by that gate.
+- No ``map_finishability_proof`` field is consulted by the gate. A
+  base map with a world-record replay + gold medal time still
+  produces ``route_verified=false`` if the assembler can't chain a
+  corridor route through it.
+- The Flask UI renders proof as a label on the Generated maps panel
+  ("Author validated" / "Player validated" / "Internally verified")
+  — presented alongside ``route_verified``, never replacing it.
+
+**`proof_source` precedence** (strongest → weakest, derived at
+write-time):
+
+1. ``replay`` — at least one ``clean`` / ``usable_with_warnings``
+   replay has a ``finish_time_ms``.
+2. ``author_time`` — the GBX carries an AuthorTime.
+3. ``world_record`` — any replay exists on the map but none were
+   marked clean. Weaker than ``replay`` because we haven't verified
+   it in-engine.
+4. ``internal_route`` — only our corridor gate says so.
+5. ``none`` — no evidence yet.
+
+**Why a separate table**: keeps the provenance layer pluggable for
+future signals (leaderboard snapshots, telemetry-derived evidence,
+community-flagged uploads). `maps` is a hot row; widening it for
+every new evidence type ages badly.
+
 ## What this doc does NOT decide
 
 Explicit open questions that are **not** v0 decisions. Follow-up
