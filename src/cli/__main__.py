@@ -400,6 +400,24 @@ def _cmd_remote_test_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_remote_test_agent(args: argparse.Namespace) -> int:
+    """Run the Windows agent (PR2 of the remote-test rig).
+
+    Works on any OS — ``windows-ness`` is a matter of where you
+    point the tm_maps_root / plugin_rig_dir at. The loop is
+    identical; only paths and the TM launch mechanism differ
+    across hosts.
+    """
+    from src.remote_test_agent.agent import run_agent
+    from src.remote_test_agent.config import load_config
+
+    cfg = load_config(Path(args.config))
+    max_iterations = (
+        int(args.max_iterations) if args.max_iterations is not None else None
+    )
+    return run_agent(cfg, max_iterations=max_iterations)
+
+
 def _cmd_remote_test_enqueue(args: argparse.Namespace) -> int:
     """Push a .Map.Gbx + metadata onto the queue."""
     import json as _json
@@ -2476,6 +2494,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable bearer auth. Dev-only; do NOT use on a LAN.",
     )
     rt_serve.set_defaults(func=_cmd_remote_test_serve)
+
+    rt_agent = sub.add_parser(
+        "remote-test-agent",
+        help="Run the Windows-side agent that pulls jobs from the "
+             "Linux queue, downloads .Map.Gbx artifacts into TM2020's "
+             "Maps/AI-inbox, signals the OpenPlanet plugin, and "
+             "reports telemetry back.",
+    )
+    rt_agent.add_argument(
+        "--config", required=True,
+        help="Path to the agent YAML config. See "
+             "src/remote_test_agent/README.md for schema.",
+    )
+    rt_agent.add_argument(
+        "--max-iterations", type=int, default=None,
+        help="Stop after this many poll cycles. Useful for smoke "
+             "tests; omit to run until SIGINT/SIGTERM.",
+    )
+    rt_agent.set_defaults(func=_cmd_remote_test_agent)
 
     rt_enqueue = sub.add_parser(
         "remote-test-enqueue",

@@ -1,0 +1,29 @@
+# Windows agent — example config. Copy to agent.yaml and edit.
+# The REMOTE_TEST_TOKEN env var wins over `server.token` — use that
+# to keep secrets out of the repo.
+
+server:
+  url: http://192.168.1.42:8787   # the Linux box's LAN IP + port
+  token: null                      # env REMOTE_TEST_TOKEN overrides
+  verify_tls: true                 # only relevant with an https URL
+
+agent:
+  id: winrig-01
+  version: agent-v0.1
+  hostname: null                   # null → autodetect via socket.gethostname()
+
+paths:
+  # Where TM2020 reads .Map.Gbx files from. Windows default:
+  # %USERPROFILE%\Documents\Trackmania2020\Maps
+  tm_maps_root: C:/Users/YOU/Documents/Trackmania2020/Maps
+  ai_inbox_subdir: AI-inbox        # created under tm_maps_root if missing
+
+  # Shared folder the agent + OpenPlanet plugin use to swap JSON:
+  # %USERPROFILE%\OpenplanetNext\PluginStorage\ai_rig
+  plugin_rig_dir: C:/Users/YOU/OpenplanetNext/PluginStorage/ai_rig
+
+polling:
+  queue_interval_s: 3.0
+  heartbeat_interval_s: 30.0
+  plugin_poll_interval_s: 1.0
+  plugin_wait_max_extra_s: 60.0
