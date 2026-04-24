@@ -311,7 +311,14 @@ def create_app(
         except ValueError as exc:
             return jsonify({"error": "invalid params", "detail": str(exc)}), 400
         except ActionWorker.BusyError as exc:
-            return jsonify({"error": "busy", "detail": str(exc)}), 409
+            # Include the currently-running action in the response so
+            # the client can attach its SSE log without a second
+            # round-trip. One call = busy status + live tail.
+            return jsonify({
+                "error": "busy",
+                "detail": str(exc),
+                "current_run": _serialize_run(action_worker.current),
+            }), 409
         return jsonify({"started": _serialize_run(run)}), 202
 
     @app.route("/api/generated-maps")

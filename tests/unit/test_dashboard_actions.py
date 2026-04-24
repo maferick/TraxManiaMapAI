@@ -353,7 +353,7 @@ class TestActionRoutes:
             validate_params=lambda p: p,
             expected_minutes=0,
         )
-        w.start(blocking_spec, {}, runner=_blocking)
+        first = w.start(blocking_spec, {}, runner=_blocking)
         assert ready.wait(timeout=2.0)
         _, client = _make_client(worker=w)
         r = client.post(
@@ -361,7 +361,15 @@ class TestActionRoutes:
             json={"base_map_id": 1212},
         )
         assert r.status_code == 409
-        assert r.get_json()["error"] == "busy"
+        payload = r.get_json()
+        assert payload["error"] == "busy"
+        # PR J: the 409 response carries the currently-running action
+        # so the UI can attach its SSE log without a second round trip.
+        current = payload["current_run"]
+        assert current is not None
+        assert current["id"] == first.id
+        assert current["action"] == "generate-map"
+        assert current["status"] == "running"
         release.set()
 
     def test_log_route_unknown_id_returns_404(self) -> None:
