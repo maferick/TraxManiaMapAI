@@ -1,0 +1,14 @@
+{
+  "protocol": "ai_rig_v1",
+  "job_id": 42,
+  "run_id": "aa391b2f0476efa1",
+  "load_success": true,
+  "load_error": null,
+  "spawn_ok": true,
+  "finished": false,
+  "checkpoint_times_ms": [3200, 6400, 9100],
+  "driven_cells": [[0, 9, 0], [1, 9, 0], [2, 9, 0]],
+  "exit_reason": "observer_timeout",
+  "plugin_version": "plugin-v0.1",
+  "notes": null
+}
