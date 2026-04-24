@@ -282,10 +282,38 @@ class TestSummarizeArtifact:
         assert summary["interval_count"] == 3
 
     def test_rejects_non_v0_schema(self, tmp_path: Path) -> None:
+        # Future majors (v1+) or unrelated schemas → filtered out.
         path = _write_artifact(
             tmp_path, "wrong.json", schema_version="generation-v1",
         )
         assert app_module._summarize_generated_artifact(path) is None
+
+    def test_accepts_v0_1_stripped_artifact(self, tmp_path: Path) -> None:
+        # Level-2 stripped artifacts use schema_version="generation-v0.1".
+        # The dashboard must surface them — before this fix the whole
+        # v0.x family was silently dropped.
+        path = _write_artifact(
+            tmp_path, "strip.json",
+            schema_version="generation-v0.1",
+            extra={
+                "map": {
+                    "waypoint_order_style": "linked",
+                    "interval_count": 3,
+                    "blocks": [],
+                    "checkpoints": [],
+                    "stripped": True,
+                    "strip_policy": "halo_axis_1",
+                    "kept_block_count": 33,
+                    "base_block_count": 541,
+                },
+            },
+        )
+        summary = app_module._summarize_generated_artifact(path)
+        assert summary is not None
+        assert summary["schema_version"] == "generation-v0.1"
+        assert summary["stripped"] is True
+        assert summary["kept_block_count"] == 33
+        assert summary["base_block_count"] == 541
 
     def test_rejects_malformed_json(self, tmp_path: Path) -> None:
         path = tmp_path / "junk.json"
