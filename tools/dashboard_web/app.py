@@ -421,6 +421,9 @@ def create_app(
             "block_count": result.block_count,
             "baked_block_count": result.baked_block_count,
             "duration_ms": result.subprocess_duration_ms,
+            "stripped": result.stripped,
+            "source_block_count": result.source_block_count,
+            "removed_block_count": result.removed_block_count,
             "download_url": f"/api/generated-gbx/{gbx_filename}",
         }), 200
 

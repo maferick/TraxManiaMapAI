@@ -16,7 +16,11 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "generation-v0" },
+    "schema_version": {
+      "type": "string",
+      "enum": ["generation-v0", "generation-v0.1"],
+      "description": "v0: full-base copy. v0.1: adds optional strip-to-route metadata on map.*; see docs/generation/generation-scope-v0.md §Level-2."
+    },
     "run_id": {
       "type": "string",
       "pattern": "^[0-9a-f]{16}$",
@@ -35,7 +39,8 @@
         "base_map_source_id":  { "type": ["string", "null"] },
         "style_tag_filter":    { "type": ["string", "null"], "enum": ["Tech", "FullSpeed", null] },
         "difficulty":          { "type": "string", "enum": ["easy", "medium", "hard"] },
-        "random_seed":         { "type": "integer" }
+        "random_seed":         { "type": "integer" },
+        "strip":               { "type": "boolean" }
       }
     },
     "provenance": {
@@ -72,7 +77,14 @@
           "type": "array",
           "minItems": 2,
           "items": { "$ref": "#/$defs/Checkpoint" }
-        }
+        },
+        "stripped":          { "type": "boolean" },
+        "strip_policy":      {
+          "type": "string",
+          "enum": ["none", "halo_axis_1"]
+        },
+        "kept_block_count":  { "type": "integer", "minimum": 0 },
+        "base_block_count":  { "type": "integer", "minimum": 0 }
       }
     },
     "route": {
@@ -109,7 +121,8 @@
             "empty_corridors",
             "confidence_below_floor",
             "unknown_block",
-            "invalid_schema"
+            "invalid_schema",
+            "stripped_route_broken"
           ]
         },
         "gate_version":       { "const": "finishability-v0" },

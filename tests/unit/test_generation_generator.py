@@ -215,6 +215,73 @@ class TestHappyPathArtifact:
 
 
 # ---------------------------------------------------------------------
+# Level-2 artifact construction — build_artifact with strip metadata
+# ---------------------------------------------------------------------
+
+class TestStrippedArtifact:
+    def test_schema_version_bumps_when_stripped(self) -> None:
+        inputs = GenerationInputs(
+            base_map_id=1, base_map_source_id="12345",
+            random_seed=42, strip=True,
+        )
+        base = _happy_base()
+        route = _happy_route()
+        gate = _happy_gate(route)
+        stripped_blocks = [base.blocks[0]]  # synthetic "strip to 1 block"
+        art = _build_artifact(
+            inputs=inputs, base=base, route=route, gate=gate,
+            config_hash="cfg", sha="sha",
+            strip_metadata={
+                "stripped": True,
+                "strip_policy": "halo_axis_1",
+                "kept_block_count": 1,
+                "base_block_count": len(base.blocks),
+            },
+            stripped_blocks=stripped_blocks,
+        )
+        assert art["schema_version"] == "generation-v0.1"
+        assert art["map"]["stripped"] is True
+        assert art["map"]["strip_policy"] == "halo_axis_1"
+        assert art["map"]["kept_block_count"] == 1
+        assert art["map"]["base_block_count"] == len(base.blocks)
+        # Stripped blocks override the base blocks.
+        assert art["map"]["blocks"] == stripped_blocks
+        # inputs.strip round-trips.
+        assert art["inputs"]["strip"] is True
+        assert validate_generated_map(art) is None
+
+    def test_non_stripped_stays_v0(self) -> None:
+        # No strip_metadata → schema stays v0, inputs.strip=false round-trips.
+        inputs = GenerationInputs(
+            base_map_id=1, base_map_source_id="12345",
+            random_seed=42, strip=False,
+        )
+        base = _happy_base()
+        route = _happy_route()
+        gate = _happy_gate(route)
+        art = _build_artifact(
+            inputs=inputs, base=base, route=route, gate=gate,
+            config_hash="cfg", sha="sha",
+        )
+        assert art["schema_version"] == "generation-v0"
+        assert art["inputs"]["strip"] is False
+        assert "stripped" not in art["map"]
+
+    def test_strip_in_inputs_changes_run_id(self) -> None:
+        # strip participates in run_id so (seed=42, strip=False) and
+        # (seed=42, strip=True) have distinct identities / filenames.
+        a = GenerationInputs(
+            base_map_id=1, base_map_source_id="x",
+            random_seed=42, strip=False,
+        )
+        b = GenerationInputs(
+            base_map_id=1, base_map_source_id="x",
+            random_seed=42, strip=True,
+        )
+        assert _compute_run_id(a) != _compute_run_id(b)
+
+
+# ---------------------------------------------------------------------
 # Reject-path artifact
 # ---------------------------------------------------------------------
 

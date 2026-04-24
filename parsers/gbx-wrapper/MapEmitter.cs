@@ -15,16 +15,29 @@
 //     "base_path":   "abs path to source .Map.Gbx",
 //     "output_path": "abs path to write the new .Map.Gbx",
 //     "map_uid":     "27-char base64 UID for the new map",
-//     "map_name":    "display title for the new map"
+//     "map_name":    "display title for the new map",
+//     "keep_cells":  [[x,y,z], ...]    // optional (Level-2 strip)
 //   }
+//
+// When "keep_cells" is supplied (Level-2 strip-to-route), any
+// grid-placed CGameCtnBlock whose Coord isn't in the set is removed
+// from CGameCtnChallenge.Blocks before Save. Free-placed blocks and
+// BakedBlocks are left untouched — the former aren't grid-cell-keyed,
+// the latter are stadium scenery and shouldn't disappear just because
+// the race corridor got narrower.
+//
+// When "keep_cells" is absent (PR H copy-from-base), block filtering
+// is a no-op; the emitted map has every block the source did.
 //
 // Output (stdout, wrapper protocol v1 envelope):
 //   success → {"status":"success","parser_version":"x.y.z","output":{
 //     "base_path": "...",
 //     "output_path": "...",
 //     "new_map_uid": "...",
-//     "block_count": int,
-//     "baked_block_count": int
+//     "block_count": int,                   // final count after strip
+//     "baked_block_count": int,
+//     "source_block_count": int,            // pre-strip count
+//     "removed_block_count": int            // source - final
 //   }}
 //   error   → {"status":"error", ...}  (ErrorCodes taxonomy)
 
@@ -100,6 +113,40 @@ internal static class MapEmitter
         map.MapUid = args.MapUid;
         map.MapName = args.MapName;
 
+        int sourceCount = map.Blocks?.Count ?? 0;
+        int removedCount = 0;
+
+        // Level-2 strip: filter CGameCtnChallenge.Blocks by grid cell.
+        // Silently no-op when keep_cells isn't supplied or the source
+        // has no grid blocks. Free-placed blocks (IsFree=true) and
+        // BakedBlocks are intentionally left alone.
+        if (args.KeepCells is { Count: > 0 } && map.Blocks is not null)
+        {
+            var keep = new HashSet<(int, int, int)>();
+            foreach (var c in args.KeepCells)
+            {
+                if (c is { Count: 3 })
+                {
+                    keep.Add((c[0], c[1], c[2]));
+                }
+            }
+            var toRemove = new List<CGameCtnBlock>();
+            foreach (var b in map.Blocks)
+            {
+                if (b.IsFree) continue;
+                var coord = b.Coord;
+                if (!keep.Contains((coord.X, coord.Y, coord.Z)))
+                {
+                    toRemove.Add(b);
+                }
+            }
+            foreach (var b in toRemove)
+            {
+                map.Blocks.Remove(b);
+            }
+            removedCount = toRemove.Count;
+        }
+
         // Save back to disk.
         gbx.Save(args.OutputPath);
 
@@ -110,6 +157,8 @@ internal static class MapEmitter
             ["new_map_uid"] = map.MapUid,
             ["block_count"] = map.Blocks?.Count ?? 0,
             ["baked_block_count"] = map.BakedBlocks?.Count ?? 0,
+            ["source_block_count"] = sourceCount,
+            ["removed_block_count"] = removedCount,
         };
     }
 
@@ -124,5 +173,7 @@ internal static class MapEmitter
         public string? OutputPath { get; set; }
         public string? MapUid { get; set; }
         public string? MapName { get; set; }
+        // Optional list of [x,y,z] grid cells to keep (Level-2 strip).
+        public List<List<int>>? KeepCells { get; set; }
     }
 }

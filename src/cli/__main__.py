@@ -308,6 +308,7 @@ def _cmd_generate_map(args: argparse.Namespace) -> int:
         style_tag_filter=args.style_tag_filter,
         difficulty=args.difficulty,
         random_seed=args.random_seed,
+        strip=args.strip,
     )
     conn = open_connection(config)
     try:
@@ -1936,6 +1937,11 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_map_cmd.add_argument(
         "--output", type=str, default=None,
         help="write the artifact JSON to this path",
+    )
+    generate_map_cmd.add_argument(
+        "--strip", action="store_true", default=False,
+        help="Level-2: strip map.blocks to the chosen route + 1-cell "
+             "grid-axis halo. Output is generation-v0.1.",
     )
     generate_map_cmd.set_defaults(func=_cmd_generate_map)
 

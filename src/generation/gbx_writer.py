@@ -62,6 +62,10 @@ class GbxEmitResult:
     block_count: int
     baked_block_count: int
     subprocess_duration_ms: int
+    # Level-2 strip diagnostic. 0 on non-stripped emits.
+    source_block_count: int = 0
+    removed_block_count: int = 0
+    stripped: bool = False
 
 
 # ---------------------------------------------------------------------
@@ -202,13 +206,37 @@ def emit_gbx_from_artifact(
         base_title=base_title, run_id=run_id, seed=seed, verified=verified,
     )
 
+    # Level-2 strip-to-route. A stripped artifact carries a *subset*
+    # of the base map's grid blocks in map.blocks; forward their cells
+    # as keep_cells so the C# wrapper drops the rest before Save.
+    # Non-stripped artifacts (generation-v0 + stripped=false v0.1)
+    # emit with keep_cells=None → wrapper no-ops the filter.
+    map_block = artifact.get("map") or {}
+    keep_cells: list[tuple[int, int, int]] | None = None
+    if map_block.get("stripped") is True:
+        keep_cells = []
+        for b in map_block.get("blocks") or []:
+            x, y, z = b.get("x"), b.get("y"), b.get("z")
+            if x is None or y is None or z is None:
+                continue
+            keep_cells.append((int(x), int(y), int(z)))
+        # Anchor cells ride along so a multi-cell CP doesn't lose the
+        # cells the chosen route didn't step on.
+        for cp in map_block.get("checkpoints") or []:
+            x, y, z = cp.get("x"), cp.get("y"), cp.get("z")
+            if x is None or y is None or z is None:
+                continue
+            keep_cells.append((int(x), int(y), int(z)))
+
     out_dir = output_dir or DEFAULT_GBX_OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"base{base_map_id}-{run_id}.Map.Gbx"
 
     _LOG.info(
-        "emit_gbx: base_map_id=%d run_id=%s seed=%d verified=%s → %s",
-        base_map_id, run_id, seed, verified, out_path,
+        "emit_gbx: base_map_id=%d run_id=%s seed=%d verified=%s "
+        "stripped=%s → %s",
+        base_map_id, run_id, seed, verified,
+        keep_cells is not None, out_path,
     )
 
     result = parser.emit_map(
@@ -216,6 +244,7 @@ def emit_gbx_from_artifact(
         output_path=out_path,
         map_uid=new_map_uid,
         map_name=new_map_name,
+        keep_cells=keep_cells,
     )
     if result.status is not ParseStatus.SUCCESS:
         raise GbxEmitError(
@@ -232,6 +261,9 @@ def emit_gbx_from_artifact(
         block_count=int(payload.get("block_count") or 0),
         baked_block_count=int(payload.get("baked_block_count") or 0),
         subprocess_duration_ms=result.duration_ms,
+        source_block_count=int(payload.get("source_block_count") or 0),
+        removed_block_count=int(payload.get("removed_block_count") or 0),
+        stripped=keep_cells is not None,
     )
 
 
