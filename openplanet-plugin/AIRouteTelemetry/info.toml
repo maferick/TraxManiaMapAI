@@ -1,7 +1,7 @@
 name = "AI Route Telemetry"
 author = "TraxManiaMapAI"
 category = "Utility"
-version = "0.1.0"
+version = "0.2.0"
 
 # Works on Trackmania (2020) via the CTrackMania title. No legacy
 # ManiaPlanet support — the v0.2 AI generator scope is TM2020 only.

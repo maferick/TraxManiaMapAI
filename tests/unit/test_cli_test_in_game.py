@@ -30,6 +30,8 @@ def test_print_report_full_complete(capsys: "pytest.CaptureFixture[str]") -> Non
             "plugin_version": "plugin-v0.1",
             "driven_cells_count": 3,
             "driven_cells_head": [[0, 9, 0], [1, 9, 0], [2, 9, 0]],
+            "validation_status": None,  # v0.1 plugin — no validator
+            "author_time_ms": None,
         },
     }
     _print_test_report(job)
@@ -43,6 +45,30 @@ def test_print_report_full_complete(capsys: "pytest.CaptureFixture[str]") -> Non
     # Checkpoint times listed individually
     assert "[0] 3200 ms" in out
     assert "[1] 6400 ms" in out
+    # v0.1 plugin: no validation fields, so the lines are suppressed.
+    assert "validation_status" not in out
+    assert "author_time_ms" not in out
+
+
+def test_print_report_v02_plugin_with_validation(
+    capsys: "pytest.CaptureFixture[str]",
+) -> None:
+    # v0.2 plugin: native editor validation ran successfully.
+    job = {
+        "id": 99, "run_id": "validated", "status": "complete",
+        "agent_id": "winrig-1", "detail": "all good",
+        "report": {
+            "load_success": True, "spawn_ok": True, "finished": True,
+            "validation_status": "Validated", "author_time_ms": 18450,
+            "exit_reason": "validated",
+            "plugin_version": "plugin-v0.2",
+        },
+    }
+    _print_test_report(job)
+    out = capsys.readouterr().out
+    assert "validation_status Validated" in out
+    assert "author_time_ms    18450" in out
+    assert "finished          True" in out
 
 
 def test_print_report_load_error_path(capsys: "pytest.CaptureFixture[str]") -> None:

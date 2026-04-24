@@ -255,10 +255,16 @@ def _summarise_report(report: TelemetryReport) -> str:
         f"load={'ok' if report.load_success else 'fail'}",
         f"spawn={'ok' if report.spawn_ok else 'fail'}",
         f"finished={report.finished}",
+    ]
+    if report.validation_status is not None:
+        bits.append(f"validation={report.validation_status}")
+    if report.author_time_ms is not None:
+        bits.append(f"author_time_ms={report.author_time_ms}")
+    bits.extend([
         f"cps={len(report.checkpoint_times_ms)}",
         f"cells={len(report.driven_cells)}",
         f"exit={report.exit_reason}",
-    ]
+    ])
     if report.load_error:
         bits.append(f"load_error={report.load_error!r}")
     return " ".join(bits)
