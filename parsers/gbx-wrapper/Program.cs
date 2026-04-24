@@ -2,11 +2,13 @@
 //
 // Contract (must match src/parsers/README.md v1):
 //   argv:           "map" | "replay" | "diagnose-map" | "diagnose-replay"
-//                   | "emit-map" | "dump-block-info" | "probe-pak"
+//                   | "emit-map" | "emit-map-from-blocks"
+//                   | "dump-block-info" | "probe-pak"
 //   stdin:          single line —
 //                     • parse / diagnose / dump-block-info / probe-pak:
 //                         absolute path to artifact
 //                     • "emit-map":                JSON object, see MapEmitter
+//                     • "emit-map-from-blocks":    JSON object, see MapBuilder
 //   stdout:         a single JSON object (success or structured error)
 //   exit code:      0 for any structured outcome (including reported errors)
 //                   non-zero only for process-level failure before reporting
@@ -33,12 +35,13 @@ public static class Program
         if (args.Length != 1 ||
             (args[0] != "map" && args[0] != "replay"
              && args[0] != "diagnose-map" && args[0] != "diagnose-replay"
-             && args[0] != "emit-map" && args[0] != "dump-block-info"
+             && args[0] != "emit-map" && args[0] != "emit-map-from-blocks"
+             && args[0] != "dump-block-info"
              && args[0] != "probe-pak"))
         {
             Console.Error.WriteLine(
                 "usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay"
-                + "|emit-map|dump-block-info|probe-pak>");
+                + "|emit-map|emit-map-from-blocks|dump-block-info|probe-pak>");
             return 2;
         }
 
@@ -66,9 +69,12 @@ public static class Program
             return 0;
         }
 
-        // emit-map takes JSON on stdin; every other command takes a
-        // single path and must validate existence before dispatching.
-        if (args[0] != "emit-map" && !File.Exists(stdinLine))
+        // emit-map / emit-map-from-blocks take JSON on stdin; every
+        // other command takes a single path and must validate
+        // existence before dispatching.
+        if (args[0] != "emit-map"
+            && args[0] != "emit-map-from-blocks"
+            && !File.Exists(stdinLine))
         {
             EmitError(ErrorCodes.IoError, $"file not found: {stdinLine}");
             return 0;
@@ -83,6 +89,7 @@ public static class Program
                 "diagnose-map" => Diagnose.Inspect(stdinLine),
                 "diagnose-replay" => Diagnose.InspectReplay(stdinLine),
                 "emit-map" => MapEmitter.EmitFromStdinJson(stdinLine),
+                "emit-map-from-blocks" => MapBuilder.BuildFromStdinJson(stdinLine),
                 "dump-block-info" => BlockInfoDump.DumpFromPath(stdinLine),
                 "probe-pak" => PakProbe.ProbeFromPath(stdinLine),
                 _ => throw new InvalidOperationException("unreachable"),

@@ -250,6 +250,66 @@ class TestSubprocessParser:
             "map_name": "title bar",
         }
 
+    def test_emit_map_from_blocks_sends_block_list(self, tmp_path: Path) -> None:
+        # v0.2 AI generator path — stdin must carry a JSON envelope
+        # with base_path + output_path + map_uid + map_name + blocks[]
+        # where each block entry has block_family/block_name/x/y/z/rotation.
+        import json as _json
+        captured = tmp_path / "stdin-capture"
+        wrapper = _write_fake_wrapper(
+            tmp_path / "builder_capture.sh",
+            rf"""
+            cat > "{captured}"
+            cat <<'EOF'
+            {{"status":"success","parser_version":"1.0.0","output":{{
+              "base_path":"/b","output_path":"/o","new_map_uid":"U",
+              "input_block_count":2,"placed_block_count":2,
+              "skipped_block_count":0,"source_block_count":500,
+              "baked_block_count":1800
+            }}}}
+            EOF
+            """,
+        )
+        parser = SubprocessParser(
+            executable=wrapper, parser_version="1.0.0", timeout_seconds=5.0,
+        )
+        blocks = [
+            {
+                "block_family": "Platform",
+                "block_name": "PlatformPlasticStart",
+                "x": 0, "y": 9, "z": 0, "rotation": 0,
+                "ai_score": 0.42,  # extra key — wrapper passes it through
+            },
+            {
+                "block_family": "Road",
+                "block_name": "RoadTechStraight",
+                "x": 1, "y": 9, "z": 0, "rotation": 1,
+            },
+        ]
+        r = parser.emit_map_from_blocks(
+            base_path=Path("/base.Map.Gbx"),
+            output_path=Path("/out.Map.Gbx"),
+            map_uid="DEADBEEF", map_name="ai-1",
+            blocks=blocks,
+        )
+        assert r.status is ParseStatus.SUCCESS
+        assert r.output["placed_block_count"] == 2
+
+        payload = _json.loads(captured.read_text(encoding="utf-8").strip())
+        # The shim strips extras (ai_score) — only the schema-tracked
+        # keys reach the C# side.
+        assert payload["base_path"] == "/base.Map.Gbx"
+        assert payload["output_path"] == "/out.Map.Gbx"
+        assert payload["map_uid"] == "DEADBEEF"
+        assert payload["map_name"] == "ai-1"
+        assert len(payload["blocks"]) == 2
+        b0 = payload["blocks"][0]
+        assert b0 == {
+            "block_family": "Platform",
+            "block_name": "PlatformPlasticStart",
+            "x": 0, "y": 9, "z": 0, "rotation": 0,
+        }
+
     def test_timeout(self, tmp_path: Path) -> None:
         wrapper = _write_fake_wrapper(
             tmp_path / "wrap.sh",
