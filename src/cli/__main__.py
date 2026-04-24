@@ -334,27 +334,30 @@ def _cmd_generate_map(args: argparse.Namespace) -> int:
     return 0 if fin["route_verified"] else 1
 
 
-def _cmd_build_block_pair_counts(args: argparse.Namespace) -> int:
+def _cmd_build_block_transition_counts(args: argparse.Namespace) -> int:
     from src.constraints.block_transitions import (
-        build_block_pair_counts, reset_pair_counts,
+        build_block_transition_counts, reset_transition_counts,
     )
     config = load_config(args.config)
     conn = open_connection(config)
     try:
         if args.reset:
-            reset_pair_counts(conn)
-        report = build_block_pair_counts(
+            reset_transition_counts(conn)
+        report = build_block_transition_counts(
             conn,
             map_ids=[int(args.map_id)] if args.map_id is not None else None,
             limit=int(args.limit) if args.limit else None,
+            include_triples=not args.no_triples,
         )
     finally:
         conn.close()
     _LOG.info(
-        "build-block-pair-counts: maps=%d corridors=%d "
-        "transitions=%d pair_rows=%d errors=%d",
+        "build-block-transition-counts: maps=%d corridors=%d "
+        "pair_transitions=%d pair_rows=%d "
+        "triple_transitions=%d triple_rows=%d errors=%d",
         report.maps_seen, report.corridors_seen,
         report.transitions_counted, report.pairs_written,
+        report.triple_transitions_counted, report.triples_written,
         len(report.errors),
     )
     return 0 if not report.errors else 1
@@ -2069,27 +2072,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     fin_proof_cmd.set_defaults(func=_cmd_compute_finishability_proof)
 
-    pair_counts_cmd = sub.add_parser(
-        "build-block-pair-counts",
-        help="Phase 2 #218-1 — extract ordered (A → B) block pair "
-             "transition counts from route_corridors.path_cells into "
-             "block_pair_transitions. Soft signal for generation "
+    transition_counts_cmd = sub.add_parser(
+        "build-block-transition-counts",
+        aliases=["build-block-pair-counts"],  # #218-1 compat
+        help="Phase 2 #218-2 — extract ordered (A → B) pair and "
+             "(A → B → C) triple block transition counts from "
+             "route_corridors.path_cells into block_pair_transitions "
+             "+ block_triple_transitions. Soft signal for generation "
              "weighting; never a hard constraint.",
     )
-    pair_counts_cmd.add_argument(
+    transition_counts_cmd.add_argument(
         "--map-id", type=int, default=None,
         help="single map_id (default: scan every map with corridors)",
     )
-    pair_counts_cmd.add_argument(
+    transition_counts_cmd.add_argument(
         "--limit", type=int, default=None,
         help="cap the number of maps processed (for smoke runs)",
     )
-    pair_counts_cmd.add_argument(
+    transition_counts_cmd.add_argument(
         "--reset", action="store_true",
-        help="TRUNCATE block_pair_transitions before rebuilding "
-             "(fresh counts instead of accumulate)",
+        help="TRUNCATE both transition tables before rebuilding",
     )
-    pair_counts_cmd.set_defaults(func=_cmd_build_block_pair_counts)
+    transition_counts_cmd.add_argument(
+        "--no-triples", action="store_true",
+        help="skip triple extraction; populate pairs only",
+    )
+    transition_counts_cmd.set_defaults(func=_cmd_build_block_transition_counts)
 
     train_corridor_ranking_cmd = sub.add_parser(
         "train-corridor-ranking",

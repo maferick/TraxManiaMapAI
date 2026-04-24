@@ -16,6 +16,7 @@ overriding traversability evidence.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -39,12 +40,38 @@ class _PairKey:
     environment: str
 
 
+@dataclass(frozen=True)
+class _TripleKey:
+    family_a: str
+    name_a: str
+    family_b: str
+    name_b: str
+    family_c: str
+    name_c: str
+    environment: str
+
+    def signature(self) -> str:
+        """Client-computed PK for block_triple_transitions. The
+        natural composite key (7 varchars) overflows MariaDB's 3072-
+        byte index limit; sha256 of a joined string keeps the index
+        small while staying collision-safe for our data scale."""
+        payload = "|".join((
+            self.family_a, self.name_a,
+            self.family_b, self.name_b,
+            self.family_c, self.name_c,
+            self.environment,
+        ))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class BuildReport:
     maps_seen: int = 0
     corridors_seen: int = 0
     transitions_counted: int = 0
     pairs_written: int = 0
+    triple_transitions_counted: int = 0
+    triples_written: int = 0
     errors: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -98,6 +125,22 @@ ON DUPLICATE KEY UPDATE
     created_by_version = VALUES(created_by_version)
 """
 
+_UPSERT_TRIPLE_SQL = """
+INSERT INTO block_triple_transitions (
+    transition_signature,
+    block_family_a, block_name_a,
+    block_family_b, block_name_b,
+    block_family_c, block_name_c,
+    environment, transition_count, map_count,
+    created_by_version
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON DUPLICATE KEY UPDATE
+    transition_count = transition_count + VALUES(transition_count),
+    map_count        = map_count        + VALUES(map_count),
+    updated_at       = CURRENT_TIMESTAMP(6),
+    created_by_version = VALUES(created_by_version)
+"""
+
 
 # ---------------------------------------------------------------------
 # Extraction
@@ -141,6 +184,46 @@ def _fetch_blocks_by_cell(
                 str(family), str(name),
             )
     return out
+
+
+def extract_triple_counts_for_map(
+    conn: Connection, map_id: int,
+) -> dict[_TripleKey, int]:
+    """Per-map triple counts. For each consecutive 3-cell window in
+    every corridor's path_cells, emit one ordered (A, B, C) triple.
+    Windows containing any unknown cell are skipped silently — a
+    3-element path with one unknown cell contributes zero triples
+    rather than spreading partial evidence. Same direction-matters
+    contract as pairs."""
+    with cursor(conn) as cur:
+        cur.execute(
+            _CORRIDOR_PATHS_SQL.format(placeholders="%s"),
+            (map_id,),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return {}
+
+    cell_to_block = _fetch_blocks_by_cell(conn, map_id)
+
+    counts: dict[_TripleKey, int] = defaultdict(int)
+    for _map_id, env, path_cells_raw in rows:
+        cells = _parse_path_cells(path_cells_raw)
+        # Window of 3: cells[i], cells[i+1], cells[i+2].
+        for i in range(len(cells) - 2):
+            a = cell_to_block.get(cells[i])
+            b = cell_to_block.get(cells[i + 1])
+            c = cell_to_block.get(cells[i + 2])
+            if a is None or b is None or c is None:
+                continue
+            key = _TripleKey(
+                family_a=a[0], name_a=a[1],
+                family_b=b[0], name_b=b[1],
+                family_c=c[0], name_c=c[1],
+                environment=str(env),
+            )
+            counts[key] += 1
+    return counts
 
 
 def extract_pair_counts_for_map(
@@ -207,21 +290,50 @@ def _persist_pair_counts(
     return len(rows)
 
 
+def _persist_triple_counts(
+    conn: Connection, counts: dict[_TripleKey, int],
+) -> int:
+    """Upsert counts into ``block_triple_transitions``. PK is the
+    client-computed sha256 signature; see ``_TripleKey.signature``."""
+    if not counts:
+        return 0
+    sha = code_version()
+    rows = [
+        (
+            k.signature(),
+            k.family_a, k.name_a,
+            k.family_b, k.name_b,
+            k.family_c, k.name_c,
+            k.environment, int(n), 1, sha,
+        )
+        for k, n in counts.items()
+    ]
+    with cursor(conn) as cur:
+        cur.executemany(_UPSERT_TRIPLE_SQL, rows)
+    conn.commit()
+    return len(rows)
+
+
 # ---------------------------------------------------------------------
 # Top-level
 # ---------------------------------------------------------------------
 
-def build_block_pair_counts(
+def build_block_transition_counts(
     conn: Connection,
     *,
     map_ids: Iterable[int] | None = None,
     limit: int | None = None,
+    include_triples: bool = True,
 ) -> BuildReport:
     """Scan ``route_corridors`` for the given maps (or every map with
-    path_cells when ``map_ids`` is None) and populate
-    ``block_pair_transitions``. Existing counts are ADDED to — this
-    command is idempotent per-row but repeated runs accumulate. In
-    practice we truncate then rebuild; see CLI ``--reset``.
+    path_cells when ``map_ids`` is None) and populate the pair +
+    (optionally) triple transition tables. Existing counts ACCUMULATE
+    — use :func:`reset_transition_counts` for a clean rebuild.
+
+    Pairs and triples share an extraction pass over the corridor
+    rows: the per-map pair and triple dicts are both built from the
+    same ``cell_to_block`` lookup, so there's no extra DB traffic for
+    the triple layer.
     """
     report = BuildReport()
     if map_ids is None:
@@ -235,8 +347,7 @@ def build_block_pair_counts(
     report.maps_seen = len(target_ids)
     for mid in target_ids:
         try:
-            counts = extract_pair_counts_for_map(conn, mid)
-            # Count the corridors we saw so the report is meaningful.
+            pair_counts = extract_pair_counts_for_map(conn, mid)
             with cursor(conn) as cur:
                 cur.execute(
                     "SELECT COUNT(*) FROM route_corridors "
@@ -245,29 +356,44 @@ def build_block_pair_counts(
                 )
                 c_row = cur.fetchone()
                 report.corridors_seen += int(c_row[0]) if c_row else 0
-            written = _persist_pair_counts(conn, counts)
-            report.transitions_counted += sum(counts.values())
-            report.pairs_written += written
+            report.pairs_written += _persist_pair_counts(conn, pair_counts)
+            report.transitions_counted += sum(pair_counts.values())
+            if include_triples:
+                triple_counts = extract_triple_counts_for_map(conn, mid)
+                report.triples_written += _persist_triple_counts(
+                    conn, triple_counts,
+                )
+                report.triple_transitions_counted += sum(
+                    triple_counts.values()
+                )
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"map_id={mid}: {exc}")
-            _LOG.exception("build_block_pair_counts failed on map %d", mid)
+            _LOG.exception("build_block_transition_counts failed on map %d", mid)
 
     _LOG.info(
-        "build_block_pair_counts: maps=%d corridors=%d transitions=%d "
-        "pair_rows_upserted=%d errors=%d",
+        "build_block_transition_counts: maps=%d corridors=%d "
+        "pair_transitions=%d pair_rows=%d "
+        "triple_transitions=%d triple_rows=%d errors=%d",
         report.maps_seen, report.corridors_seen,
         report.transitions_counted, report.pairs_written,
+        report.triple_transitions_counted, report.triples_written,
         len(report.errors),
     )
     return report
 
 
-def reset_pair_counts(conn: Connection) -> None:
-    """TRUNCATE the pair-counts table. Used by the CLI ``--reset``
-    flag when the operator wants a clean rebuild rather than an
-    accumulate. Guarded behind an explicit flag so accidental
-    reruns don't zero the corpus."""
+def reset_transition_counts(conn: Connection) -> None:
+    """TRUNCATE both pair and triple transition tables. Used by the
+    CLI ``--reset`` flag when the operator wants a clean rebuild."""
     with cursor(conn) as cur:
         cur.execute("TRUNCATE TABLE block_pair_transitions")
+        cur.execute("TRUNCATE TABLE block_triple_transitions")
     conn.commit()
-    _LOG.info("block_pair_transitions: truncated")
+    _LOG.info("block pair + triple transitions: truncated")
+
+
+# Backwards-compatibility shims for the #218-1 entry points. Delete
+# these once the CLI verb is renamed away from "pair-counts" (next PR
+# in the arc: unify under `build-block-transitions`).
+build_block_pair_counts = build_block_transition_counts
+reset_pair_counts = reset_transition_counts

@@ -163,3 +163,110 @@ class TestExtractPairCountsForMap:
         )
         counts = extract_pair_counts_for_map(MagicMock(), 1)
         assert counts[_PairKey("F", "A", "F", "B", "Stadium")] == 2
+
+
+# ---------------------------------------------------------------------
+# #218-2 — triple extraction + signature stability
+# ---------------------------------------------------------------------
+
+from src.constraints.block_transitions import (
+    _TripleKey,
+    extract_triple_counts_for_map,
+)
+
+
+class TestTripleSignature:
+    def test_deterministic(self) -> None:
+        k = _TripleKey("F1", "A", "F2", "B", "F3", "C", "Stadium")
+        assert k.signature() == k.signature()
+
+    def test_is_64_hex(self) -> None:
+        sig = _TripleKey("F", "a", "F", "b", "F", "c", "E").signature()
+        assert len(sig) == 64
+        int(sig, 16)  # valid hex
+
+    def test_order_matters(self) -> None:
+        a = _TripleKey("F1", "A", "F2", "B", "F3", "C", "Stadium")
+        # Shuffling name positions must produce a different signature.
+        b = _TripleKey("F1", "A", "F3", "C", "F2", "B", "Stadium")
+        assert a.signature() != b.signature()
+
+    def test_environment_separates(self) -> None:
+        a = _TripleKey("F1", "A", "F2", "B", "F3", "C", "Stadium")
+        b = _TripleKey("F1", "A", "F2", "B", "F3", "C", "Canyon")
+        assert a.signature() != b.signature()
+
+
+class TestExtractTripleCountsForMap:
+    def test_four_cell_path_emits_two_triples(self, monkeypatch) -> None:
+        # A path of 4 cells → 2 overlapping 3-windows (A,B,C) + (B,C,D).
+        corridor_rows = [(1, "Stadium", "[[0,0,0],[1,0,0],[2,0,0],[3,0,0]]")]
+        block_rows = [
+            ("F", "A", 0, 0, 0),
+            ("F", "B", 1, 0, 0),
+            ("F", "C", 2, 0, 0),
+            ("F", "D", 3, 0, 0),
+        ]
+        ctx1 = _stub_cursor([corridor_rows])
+        ctx2 = _stub_cursor([block_rows])
+        ctx_iter = iter([ctx1, ctx2])
+        monkeypatch.setattr(
+            bt_mod, "cursor", lambda _c: next(ctx_iter),
+        )
+        counts = extract_triple_counts_for_map(MagicMock(), 1)
+        assert len(counts) == 2
+        assert counts[_TripleKey("F", "A", "F", "B", "F", "C", "Stadium")] == 1
+        assert counts[_TripleKey("F", "B", "F", "C", "F", "D", "Stadium")] == 1
+
+    def test_unknown_middle_cell_skips_both_windows(self, monkeypatch) -> None:
+        # Path A-?-C-D: the middle cell has no block. That gap means
+        # triple (A,?,C) AND (?,C,D) both have an unknown cell → both
+        # skipped. No triples emitted despite the corridor having 4
+        # cells.
+        corridor_rows = [(1, "Stadium", "[[0,0,0],[1,0,0],[2,0,0],[3,0,0]]")]
+        block_rows = [
+            ("F", "A", 0, 0, 0),
+            # (1,0,0) missing
+            ("F", "C", 2, 0, 0),
+            ("F", "D", 3, 0, 0),
+        ]
+        ctx1 = _stub_cursor([corridor_rows])
+        ctx2 = _stub_cursor([block_rows])
+        ctx_iter = iter([ctx1, ctx2])
+        monkeypatch.setattr(
+            bt_mod, "cursor", lambda _c: next(ctx_iter),
+        )
+        counts = extract_triple_counts_for_map(MagicMock(), 1)
+        assert counts == {}
+
+    def test_path_too_short_emits_nothing(self, monkeypatch) -> None:
+        # 2-cell path — no 3-window possible.
+        corridor_rows = [(1, "Stadium", "[[0,0,0],[1,0,0]]")]
+        block_rows = [
+            ("F", "A", 0, 0, 0),
+            ("F", "B", 1, 0, 0),
+        ]
+        ctx1 = _stub_cursor([corridor_rows])
+        ctx2 = _stub_cursor([block_rows])
+        ctx_iter = iter([ctx1, ctx2])
+        monkeypatch.setattr(
+            bt_mod, "cursor", lambda _c: next(ctx_iter),
+        )
+        assert extract_triple_counts_for_map(MagicMock(), 1) == {}
+
+    def test_repeat_triples_aggregate(self, monkeypatch) -> None:
+        corridor_rows = [
+            (1, "Stadium", "[[0,0,0],[1,0,0],[2,0,0]]"),
+            (1, "Stadium", "[[0,0,0],[1,0,0],[2,0,0]]"),
+        ]
+        block_rows = [
+            ("F", "A", 0, 0, 0), ("F", "B", 1, 0, 0), ("F", "C", 2, 0, 0),
+        ]
+        ctx1 = _stub_cursor([corridor_rows])
+        ctx2 = _stub_cursor([block_rows])
+        ctx_iter = iter([ctx1, ctx2])
+        monkeypatch.setattr(
+            bt_mod, "cursor", lambda _c: next(ctx_iter),
+        )
+        counts = extract_triple_counts_for_map(MagicMock(), 1)
+        assert counts[_TripleKey("F", "A", "F", "B", "F", "C", "Stadium")] == 2
