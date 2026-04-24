@@ -334,6 +334,24 @@ def _cmd_generate_map(args: argparse.Namespace) -> int:
     return 0 if fin["route_verified"] else 1
 
 
+def _cmd_build_block_geometry(args: argparse.Namespace) -> int:
+    from src.constraints.block_geometry import build_block_geometry
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        families = args.family.split(",") if args.family else None
+        report = build_block_geometry(conn, families=families)
+    finally:
+        conn.close()
+    _LOG.info(
+        "build-block-geometry: distinct=%d rows=%d",
+        report.distinct_blocks_seen, report.rows_written,
+    )
+    for sc, n in sorted(report.shape_breakdown.items(), key=lambda p: -p[1]):
+        _LOG.info("  %s: %d", sc, n)
+    return 0
+
+
 def _cmd_build_block_transition_counts(args: argparse.Namespace) -> int:
     from src.constraints.block_transitions import (
         build_block_transition_counts, reset_transition_counts,
@@ -2098,6 +2116,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="skip triple extraction; populate pairs only",
     )
     transition_counts_cmd.set_defaults(func=_cmd_build_block_transition_counts)
+
+    block_geometry_cmd = sub.add_parser(
+        "build-block-geometry",
+        help="Phase 2 #218-3 — classify every distinct (family, name) "
+             "block into the block_geometry catalogue (shape class, "
+             "surface hint, anchor-capable flag). Pattern-inferred; "
+             "mesh-level accuracy is a future classifier_version bump.",
+    )
+    block_geometry_cmd.add_argument(
+        "--family", type=str, default=None,
+        help="comma-separated block_family filter (smoke runs)",
+    )
+    block_geometry_cmd.set_defaults(func=_cmd_build_block_geometry)
 
     train_corridor_ranking_cmd = sub.add_parser(
         "train-corridor-ranking",
