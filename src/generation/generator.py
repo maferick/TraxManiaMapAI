@@ -517,16 +517,18 @@ def generate_from_base(
     stripped_blocks: list[dict[str, Any]] | None = None
     if inputs.strip and isinstance(route, AssembledRoute):
         from src.generation.stripper import (
-            STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+            STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
             strip_route,
         )
-        # PR L default: halo_axis_1_plus_anchor_radius_3. The plain
-        # halo_axis_1 policy from PR #45 dropped structural spawn /
-        # finish / CP geometry that TM2020 needs to spawn the car
-        # onto a driveable surface (see PR L diagnosis of map 1212).
+        # #217 default: halo_axis_1_plus_anchor_radius_3_vext_3 —
+        # adds a ±3 vertical extension per route cell on top of
+        # PR L's anchor cube, capturing the pillar / base / support
+        # geometry that the operator's in-game testing found missing
+        # under the previous policy. Older named policies stay
+        # available for reproducibility.
         strip_result = strip_route(
             route, base.blocks,
-            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
             anchor_cells=base.anchor_cells,
         )
         strip_metadata = {
