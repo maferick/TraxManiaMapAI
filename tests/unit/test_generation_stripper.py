@@ -250,16 +250,17 @@ class TestStripRoute:
 
     def test_result_has_expected_strip_policy(self) -> None:
         # strip_route's default policy lineage:
-        #   PR #45  halo_axis_1
-        #   PR L    halo_axis_1_plus_anchor_radius_3
-        #   #217    halo_axis_1_plus_anchor_radius_3_vext_3 (current)
+        #   PR #45   halo_axis_1
+        #   PR L     halo_axis_1_plus_anchor_radius_3
+        #   #217     halo_axis_1_plus_anchor_radius_3_vext_3
+        #   #217-b   halo_xz_cheb_1_vext_3_plus_anchor_radius_3 (current)
+        from src.generation.stripper import (
+            STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3 as CURRENT,
+        )
         route, blocks = self._sample()
         result = strip_route(route, blocks)
         assert isinstance(result, StripResult)
-        assert (
-            result.strip_policy
-            == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3
-        )
+        assert result.strip_policy == CURRENT
 
 
 # ---------------------------------------------------------------------
@@ -490,8 +491,141 @@ class TestVerticalExtensionPolicy:
         assert kept_old <= kept_new
         assert len(kept_new) > len(kept_old)   # strictly more cells
 
-    def test_strip_route_default_is_vext(self) -> None:
-        # Default policy of strip_route flipped to the new one in #217.
+    def test_strip_route_explicit_vext_still_works(self) -> None:
+        # #217's vext default was superseded by #217-b; the enum value
+        # stays valid for reproducibility runs that request it
+        # explicitly.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        route = _route([
+            IntervalAssembly(
+                index=0, src=spawn, dst=goal,
+                chosen=_corridor(
+                    corridor_id=1, src=spawn, dst=goal,
+                    cells=((0, 0, 0), (0, 0, 1)),
+                ),
+            ),
+        ])
+        result = strip_route(
+            route, [_block(0, 0, 0), _block(0, 0, 1)],
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+        )
+        assert (
+            result.strip_policy
+            == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3
+        )
+
+
+# ---------------------------------------------------------------------
+# #217-b — halo_xz_cheb_1_vext_3_plus_anchor_radius_3
+# ---------------------------------------------------------------------
+
+from src.generation.stripper import (
+    STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+)
+
+
+class TestXzCheb1Policy:
+    def test_xz_diagonals_kept_at_same_y(self) -> None:
+        # 3×3 XZ at path cell's Y → all 8 neighbours in the plane.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((5, 10, 5),),
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+        )
+        # All 9 cells of the 3×3 XZ layer at y=10 kept.
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                assert (5 + dx, 10, 5 + dz) in kept, (dx, dz)
+
+    def test_xz_diagonals_at_other_y_not_kept(self) -> None:
+        # The XZ 3×3 layer is ONLY at the path cell's Y. Diagonals
+        # at y ± 1 are NOT kept (only the straight ±Y column is,
+        # via vext). This pins the minimal scope.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((5, 10, 5),),
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+        )
+        # XZ diagonal at y+1 — NOT in halo.
+        assert (4, 11, 4) not in kept
+        assert (6, 11, 6) not in kept
+        # But the straight ±Y column IS kept (vext).
+        assert (5, 11, 5) in kept
+        assert (5, 13, 5) in kept
+
+    def test_vext_column_preserved(self) -> None:
+        # The new policy inherits vext ±3 from its predecessor.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((5, 10, 5),),
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+        )
+        for dy in range(-3, 4):
+            assert (5, 10 + dy, 5) in kept, f"dy={dy}"
+
+    def test_new_policy_is_strict_superset_of_previous_default(self) -> None:
+        # Everything halo_axis_1_plus_anchor_radius_3_vext_3 keeps
+        # must also be kept under the new policy (we're ADDING XZ
+        # diagonals, not replacing anything).
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        cp = Anchor("Checkpoint", 1, (10, 5, 10))
+        goal = Anchor("Goal", 0, (15, 5, 15))
+        route = _route([
+            IntervalAssembly(
+                index=0, src=spawn, dst=cp,
+                chosen=_corridor(
+                    corridor_id=1, src=spawn, dst=cp,
+                    cells=((0, 0, 0), (5, 3, 5), (10, 5, 10)),
+                ),
+            ),
+            IntervalAssembly(
+                index=1, src=cp, dst=goal,
+                chosen=_corridor(
+                    corridor_id=2, src=cp, dst=goal,
+                    cells=((10, 5, 10), (13, 5, 13), (15, 5, 15)),
+                ),
+            ),
+        ])
+        anchor_cells = frozenset({(0, 0, 0), (10, 5, 10), (15, 5, 15)})
+        kept_prev = compute_kept_cells(
+            route,
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+            anchor_cells=anchor_cells,
+        )
+        kept_new = compute_kept_cells(
+            route,
+            policy=STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=anchor_cells,
+        )
+        assert kept_prev <= kept_new
+        assert len(kept_new) > len(kept_prev)
+
+    def test_strip_route_default_is_xz_cheb1(self) -> None:
         spawn = Anchor("Spawn", 0, (0, 0, 0))
         goal = Anchor("Goal", 0, (0, 0, 1))
         route = _route([
@@ -506,5 +640,5 @@ class TestVerticalExtensionPolicy:
         result = strip_route(route, [_block(0, 0, 0), _block(0, 0, 1)])
         assert (
             result.strip_policy
-            == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3
+            == STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3
         )
