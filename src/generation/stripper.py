@@ -53,6 +53,9 @@ STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3: str = (
 STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3: str = (
     "halo_xz_cheb_1_vext_3_plus_anchor_radius_3"
 )
+STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3: str = (
+    "halo_prism_3x7x3_plus_anchor_radius_3"
+)
 STRIP_POLICY_NONE: str = "none"
 
 # Radius of the anchor-preservation cube used by
@@ -160,6 +163,7 @@ def compute_kept_cells(
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
         STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+        STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
     )
     uses_path_axis_halo = (
         policy == STRIP_POLICY_HALO_AXIS_1
@@ -172,6 +176,9 @@ def compute_kept_cells(
     uses_vertical_ext = policy in (
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
         STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+    )
+    uses_prism = (
+        policy == STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3
     )
 
     for iv in route.intervals:
@@ -198,6 +205,24 @@ def compute_kept_cells(
                     if dy == 0:
                         continue  # path cell itself already added
                     kept.add((x, y + dy, z))
+            if uses_prism:
+                # Full 3×7×3 prism: the 3×3 XZ neighbourhood at every
+                # Y in the ±3 range around the path cell. Subsumes
+                # xz_cheb_1 + vext_3 into one volume so that wall /
+                # transition / slope blocks sitting at *XZ-diagonal
+                # AND ±Y* from the route cell are captured too.
+                # Previous policy's per-path-cell cell count ≈ 15;
+                # this one is 63 → ~4× growth, with corresponding
+                # increase in total kept cells. Use only when the
+                # map's structural envelope genuinely needs it
+                # (in-game testing of map 1212 after #217-b showed
+                # y±1 XZ-diagonal drops still breaking drivability).
+                for dx in (-1, 0, 1):
+                    for dy in range(
+                        -_PATH_VERTICAL_EXT, _PATH_VERTICAL_EXT + 1
+                    ):
+                        for dz in (-1, 0, 1):
+                            kept.add((x + dx, y + dy, z + dz))
 
     # Anchor cells from Anchor.cell (grid anchors only — free anchors
     # arrive via the ``anchor_cells`` arg below).
@@ -280,7 +305,7 @@ def strip_route(
     route: AssembledRoute,
     base_blocks: list[dict[str, Any]],
     *,
-    policy: str = STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+    policy: str = STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
     anchor_cells: frozenset[Cell] | None = None,
 ) -> StripResult:
     """Apply ``policy`` to ``base_blocks`` given the chosen ``route``.
@@ -298,6 +323,7 @@ def strip_route(
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
         STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+        STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
         STRIP_POLICY_NONE,
     )
     if policy not in known_policies:

@@ -517,20 +517,18 @@ def generate_from_base(
     stripped_blocks: list[dict[str, Any]] | None = None
     if inputs.strip and isinstance(route, AssembledRoute):
         from src.generation.stripper import (
-            STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+            STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
             strip_route,
         )
-        # #217-b default: the map-1212 in-game diagnostic (PR #56)
-        # showed that axis-1 at path cells was dropping wall /
-        # transition / slope blocks sitting at XZ-diagonal offsets.
-        # This policy swaps axis-1 for full 3×3 XZ neighbourhood at
-        # each path cell's Y (catches diagonals), keeps the ±3
-        # vertical extension (#217), and keeps anchor cube radius 3
-        # (PR L). Older named policies stay available for
-        # reproducibility.
+        # #217-c default: a full 3×7×3 prism per path cell. #217-b's
+        # XZ-cheb-1 at same Y still left 16 blocks dropped at y±1
+        # from route cell (31, 13, 22) on map 1212; in-game test
+        # kept failing. Prism = the 3×3 XZ neighbourhood at every Y
+        # in the ±3 range. Subsumes xz_cheb_1 + vext_3 into one
+        # volume. Earlier policies stay available for reproducibility.
         strip_result = strip_route(
             route, base.blocks,
-            policy=STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+            policy=STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
             anchor_cells=base.anchor_cells,
         )
         strip_metadata = {

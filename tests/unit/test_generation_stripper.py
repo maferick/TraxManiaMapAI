@@ -253,9 +253,10 @@ class TestStripRoute:
         #   PR #45   halo_axis_1
         #   PR L     halo_axis_1_plus_anchor_radius_3
         #   #217     halo_axis_1_plus_anchor_radius_3_vext_3
-        #   #217-b   halo_xz_cheb_1_vext_3_plus_anchor_radius_3 (current)
+        #   #217-b   halo_xz_cheb_1_vext_3_plus_anchor_radius_3
+        #   #217-c   halo_prism_3x7x3_plus_anchor_radius_3 (current)
         from src.generation.stripper import (
-            STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3 as CURRENT,
+            STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3 as CURRENT,
         )
         route, blocks = self._sample()
         result = strip_route(route, blocks)
@@ -625,7 +626,124 @@ class TestXzCheb1Policy:
         assert kept_prev <= kept_new
         assert len(kept_new) > len(kept_prev)
 
-    def test_strip_route_default_is_xz_cheb1(self) -> None:
+    def test_strip_route_explicit_xz_cheb1_still_works(self) -> None:
+        # The prism became default in #217-c; xz_cheb_1 is still in
+        # the enum + code path for reproducibility.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        route = _route([
+            IntervalAssembly(
+                index=0, src=spawn, dst=goal,
+                chosen=_corridor(
+                    corridor_id=1, src=spawn, dst=goal,
+                    cells=((0, 0, 0), (0, 0, 1)),
+                ),
+            ),
+        ])
+        result = strip_route(
+            route, [_block(0, 0, 0), _block(0, 0, 1)],
+            policy=STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+        )
+        assert (
+            result.strip_policy
+            == STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3
+        )
+
+
+# ---------------------------------------------------------------------
+# #217-c — halo_prism_3x7x3_plus_anchor_radius_3
+# ---------------------------------------------------------------------
+
+from src.generation.stripper import (
+    STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
+)
+
+
+class TestPrism3x7x3Policy:
+    def test_full_prism_kept(self) -> None:
+        # 3×7×3 per path cell = 63 cells. Test every cell in the
+        # prism around (5, 10, 5) is kept.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((5, 10, 5),),
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
+        )
+        for dx in (-1, 0, 1):
+            for dy in range(-3, 4):
+                for dz in (-1, 0, 1):
+                    assert (5 + dx, 10 + dy, 5 + dz) in kept, (dx, dy, dz)
+
+    def test_cells_outside_prism_not_kept(self) -> None:
+        # Prism is strictly bounded — ±1 in X/Z, ±3 in Y.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((20, 20, 20),),  # well away from spawn/goal cubes
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
+        )
+        # ±2 in X is outside the prism.
+        assert (22, 20, 20) not in kept
+        assert (18, 20, 20) not in kept
+        # ±4 in Y is outside.
+        assert (20, 24, 20) not in kept
+        assert (20, 16, 20) not in kept
+        # ±2 in Z is outside.
+        assert (20, 20, 22) not in kept
+
+    def test_subsumes_previous_default(self) -> None:
+        # Every cell the previous default kept, the prism must keep.
+        from src.generation.stripper import (
+            STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+        )
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        cp = Anchor("Checkpoint", 1, (10, 5, 10))
+        goal = Anchor("Goal", 0, (15, 5, 15))
+        route = _route([
+            IntervalAssembly(
+                index=0, src=spawn, dst=cp,
+                chosen=_corridor(
+                    corridor_id=1, src=spawn, dst=cp,
+                    cells=((0, 0, 0), (5, 3, 5), (10, 5, 10)),
+                ),
+            ),
+            IntervalAssembly(
+                index=1, src=cp, dst=goal,
+                chosen=_corridor(
+                    corridor_id=2, src=cp, dst=goal,
+                    cells=((10, 5, 10), (13, 5, 13), (15, 5, 15)),
+                ),
+            ),
+        ])
+        anchor_cells = frozenset({(0, 0, 0), (10, 5, 10), (15, 5, 15)})
+        kept_xz = compute_kept_cells(
+            route,
+            policy=STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=anchor_cells,
+        )
+        kept_prism = compute_kept_cells(
+            route,
+            policy=STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=anchor_cells,
+        )
+        assert kept_xz <= kept_prism
+        assert len(kept_prism) > len(kept_xz)
+
+    def test_strip_route_default_is_prism(self) -> None:
         spawn = Anchor("Spawn", 0, (0, 0, 0))
         goal = Anchor("Goal", 0, (0, 0, 1))
         route = _route([
@@ -640,5 +758,5 @@ class TestXzCheb1Policy:
         result = strip_route(route, [_block(0, 0, 0), _block(0, 0, 1)])
         assert (
             result.strip_policy
-            == STRIP_POLICY_HALO_XZ_CHEB_1_VEXT_3_PLUS_ANCHOR_RADIUS_3
+            == STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3
         )

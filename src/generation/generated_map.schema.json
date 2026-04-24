@@ -86,7 +86,8 @@
             "halo_axis_1",
             "halo_axis_1_plus_anchor_radius_3",
             "halo_axis_1_plus_anchor_radius_3_vext_3",
-            "halo_xz_cheb_1_vext_3_plus_anchor_radius_3"
+            "halo_xz_cheb_1_vext_3_plus_anchor_radius_3",
+            "halo_prism_3x7x3_plus_anchor_radius_3"
           ]
         },
         "kept_block_count":  { "type": "integer", "minimum": 0 },
