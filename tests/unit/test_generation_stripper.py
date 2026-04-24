@@ -14,6 +14,7 @@ from src.generation import (
 from src.generation.stripper import (
     STRIP_POLICY_HALO_AXIS_1,
     STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+    STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
     STRIP_POLICY_NONE,
     StripResult,
     _cheb_cube,
@@ -248,12 +249,17 @@ class TestStripRoute:
             strip_route(route, blocks, policy="mystery_halo")
 
     def test_result_has_expected_strip_policy(self) -> None:
-        # strip_route's default is halo_axis_1_plus_anchor_radius_3
-        # as of PR L.
+        # strip_route's default policy lineage:
+        #   PR #45  halo_axis_1
+        #   PR L    halo_axis_1_plus_anchor_radius_3
+        #   #217    halo_axis_1_plus_anchor_radius_3_vext_3 (current)
         route, blocks = self._sample()
         result = strip_route(route, blocks)
         assert isinstance(result, StripResult)
-        assert result.strip_policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3
+        assert (
+            result.strip_policy
+            == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3
+        )
 
 
 # ---------------------------------------------------------------------
@@ -394,3 +400,111 @@ class TestComputeKeptCellsWithAnchorRadius:
                 assert (20 + dx, 3, 4 + dz) in kept_cells
         # Far-away block dropped.
         assert (200, 200, 200) not in kept_cells
+
+
+# ---------------------------------------------------------------------
+# #217 — halo_axis_1_plus_anchor_radius_3_vext_3
+# ---------------------------------------------------------------------
+
+class TestVerticalExtensionPolicy:
+    def test_vertical_extension_keeps_pillar_column(self) -> None:
+        # A single path cell at (5, 10, 5). The vertical extension
+        # should keep (5, y, 5) for y in [7..13] — a column of 7
+        # cells centred on the path.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((5, 10, 5),),
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+        )
+        for dy in range(-3, 4):
+            assert (5, 10 + dy, 5) in kept, f"dy={dy} missing"
+
+    def test_vertical_extension_does_not_widen_horizontally(self) -> None:
+        # The vext is Y-axis only — it must NOT keep cells at
+        # (x ± 2, y, z) or (x, y ± 3, z ± 2) beyond what axis-1
+        # already provides. Defends against a future "oh just
+        # widen everything" refactor creep.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        iv = IntervalAssembly(
+            index=0, src=spawn, dst=goal,
+            chosen=_corridor(
+                corridor_id=1, src=spawn, dst=goal,
+                cells=((5, 10, 5),),
+            ),
+        )
+        kept = compute_kept_cells(
+            _route([iv]),
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+        )
+        # Vert-extended cells MUST be X=5, Z=5. Horizontally-offset
+        # cells at non-±1 y are not kept by vext.
+        assert (7, 10, 5) not in kept     # 2 cells X away
+        assert (5, 13, 7) not in kept     # 3 up vert, but Z offset 2
+        # Diagonal-vertical (5, y, 6) at y=12 is NOT added by vext
+        # (Z offset 1, Y offset 2 — neither axis-1 nor vext keeps it).
+        assert (5, 12, 6) not in kept
+
+    def test_vext_is_superset_of_anchor_radius_3(self) -> None:
+        # The new policy must keep at least everything its parent
+        # keeps (anchor cube + path halo) for the same inputs —
+        # otherwise switching default drops cells in-game.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        cp = Anchor("Checkpoint", 1, (10, 5, 10))
+        goal = Anchor("Goal", 0, (15, 5, 15))
+        route = _route([
+            IntervalAssembly(
+                index=0, src=spawn, dst=cp,
+                chosen=_corridor(
+                    corridor_id=1, src=spawn, dst=cp,
+                    cells=((0, 0, 0), (5, 3, 5), (10, 5, 10)),
+                ),
+            ),
+            IntervalAssembly(
+                index=1, src=cp, dst=goal,
+                chosen=_corridor(
+                    corridor_id=2, src=cp, dst=goal,
+                    cells=((10, 5, 10), (13, 5, 13), (15, 5, 15)),
+                ),
+            ),
+        ])
+        anchor_cells = frozenset({(0, 0, 0), (10, 5, 10), (15, 5, 15)})
+        kept_old = compute_kept_cells(
+            route,
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=anchor_cells,
+        )
+        kept_new = compute_kept_cells(
+            route,
+            policy=STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
+            anchor_cells=anchor_cells,
+        )
+        assert kept_old <= kept_new
+        assert len(kept_new) > len(kept_old)   # strictly more cells
+
+    def test_strip_route_default_is_vext(self) -> None:
+        # Default policy of strip_route flipped to the new one in #217.
+        spawn = Anchor("Spawn", 0, (0, 0, 0))
+        goal = Anchor("Goal", 0, (0, 0, 1))
+        route = _route([
+            IntervalAssembly(
+                index=0, src=spawn, dst=goal,
+                chosen=_corridor(
+                    corridor_id=1, src=spawn, dst=goal,
+                    cells=((0, 0, 0), (0, 0, 1)),
+                ),
+            ),
+        ])
+        result = strip_route(route, [_block(0, 0, 0), _block(0, 0, 1)])
+        assert (
+            result.strip_policy
+            == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3
+        )

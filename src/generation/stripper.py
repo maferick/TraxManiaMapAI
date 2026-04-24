@@ -47,6 +47,9 @@ STRIP_POLICY_HALO_AXIS_1: str = "halo_axis_1"
 STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3: str = (
     "halo_axis_1_plus_anchor_radius_3"
 )
+STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3: str = (
+    "halo_axis_1_plus_anchor_radius_3_vext_3"
+)
 STRIP_POLICY_NONE: str = "none"
 
 # Radius of the anchor-preservation cube used by
@@ -57,6 +60,17 @@ STRIP_POLICY_NONE: str = "none"
 # PlatformPlasticLoopOutStartCurve1 cluster is the canonical example —
 # see PR L diagnosis).
 _ANCHOR_RADIUS_CHEB: int = 3
+
+# Vertical extension around every route path cell for
+# ``halo_axis_1_plus_anchor_radius_3_vext_3``. Covers support /
+# pillar / base geometry sitting below or above the drivable surface:
+# straightforward road tracks typically have pillar columns 1-3 cells
+# below the drive cell, and the earlier policy missed those because
+# the axis-1 halo only reached ±1 and the anchor cube only covers
+# anchor-proximal cells. +/-3 in Y extends the per-path-cell halo
+# specifically along the vertical axis without widening the whole
+# Chebyshev cube (that'd add far too many cells).
+_PATH_VERTICAL_EXT: int = 3
 
 # Axis-only 6-neighbourhood (no diagonals). Matches scope-v0.1
 # §Level-2 "1-cell grid-axis halo only."
@@ -127,21 +141,34 @@ def compute_kept_cells(
     For the other policies the arg may be None.
     """
     kept: set[Cell] = set()
-    uses_anchor_radius = (
-        policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3
+    uses_anchor_radius = policy in (
+        STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+        STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
     )
     uses_path_halo = (
         policy == STRIP_POLICY_HALO_AXIS_1
         or uses_anchor_radius
     )
+    uses_vertical_ext = (
+        policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3
+    )
 
     for iv in route.intervals:
         for cell in iv.chosen.path_cells:
             kept.add(cell)
+            x, y, z = cell
             if uses_path_halo:
-                x, y, z = cell
                 for dx, dy, dz in _AXIS_NEIGHBORS:
                     kept.add((x + dx, y + dy, z + dz))
+            if uses_vertical_ext:
+                # Vertical-only column around this path cell, ±N cells
+                # on Y. Captures pillars / bases / structural supports
+                # that sit directly below or above the drivable surface
+                # but outside both the axis-1 halo and any anchor cube.
+                for dy in range(-_PATH_VERTICAL_EXT, _PATH_VERTICAL_EXT + 1):
+                    if dy == 0:
+                        continue  # path cell itself already added
+                    kept.add((x, y + dy, z))
 
     # Anchor cells from Anchor.cell (grid anchors only — free anchors
     # arrive via the ``anchor_cells`` arg below).
@@ -224,7 +251,7 @@ def strip_route(
     route: AssembledRoute,
     base_blocks: list[dict[str, Any]],
     *,
-    policy: str = STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+    policy: str = STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
     anchor_cells: frozenset[Cell] | None = None,
 ) -> StripResult:
     """Apply ``policy`` to ``base_blocks`` given the chosen ``route``.
@@ -240,6 +267,7 @@ def strip_route(
     known_policies = (
         STRIP_POLICY_HALO_AXIS_1,
         STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+        STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3_VEXT_3,
         STRIP_POLICY_NONE,
     )
     if policy not in known_policies:

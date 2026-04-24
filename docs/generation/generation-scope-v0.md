@@ -477,7 +477,7 @@ car to spawn above nothing. PR L adds
 comparative analysis but **isn't the recommended default for
 in-game use**.
 
-### Strip policy `halo_axis_1_plus_anchor_radius_3` (default)
+### Strip policy `halo_axis_1_plus_anchor_radius_3`
 
 Everything `halo_axis_1` does, plus:
 
@@ -488,11 +488,32 @@ Everything `halo_axis_1` does, plus:
    (grid-placed or snapped-from-free) is kept unconditionally — a
    7×7×7 cube (343 cells) per anchor.
 
-This covers multi-block start-curve / finish-gate / CP-ramp
-assemblies (radial span ≤ 3 cells in the corpus we've seen). Anchor
-cubes overlap where anchors are near each other, so total cell
-counts stay modest (map 1212's 8 grid anchors + 3 snapped ≈ 1-2k
-cells before the route halo).
+Covers multi-block start-curve / finish-gate / CP-ramp assemblies
+(radial span ≤ 3 cells in the corpus we've seen). Anchor cubes
+overlap where anchors are near each other, so total cell counts
+stay modest. `halo_axis_1` stays as a reproducibility-only option.
+
+**Known limitation** — captures only anchor-proximal structural
+geometry. Mid-route pillars / bases / vertical supports that sit
+below or above the drivable surface but far from any anchor get
+dropped, producing visible "floating road / missing pillar" gaps
+in-game. Operator in-game testing of map 1212 surfaced this
+pattern after PR L shipped — see #217.
+
+### Strip policy `halo_axis_1_plus_anchor_radius_3_vext_3` (default)
+
+Everything `halo_axis_1_plus_anchor_radius_3` does, plus:
+
+3. **Vertical extension per route path cell** — for every cell in
+   every chosen corridor's `path_cells`, also keep the cells at
+   `(x, y ± {1, 2, 3}, z)`. A ±3 column along the Y axis.
+
+Captures support / pillar / base geometry directly beneath or above
+drivable cells, which the previous policy dropped whenever the
+route's mid-section was far from any anchor. Vertical-only (not a
+full 3D cube) so we don't widen horizontal coverage beyond the
+axis-1 halo — the original point of the policy was to keep the
+ribbon narrow.
 
 Free-placed blocks and `BakedBlocks` remain untouched.
 
@@ -595,12 +616,14 @@ When reviewing a generation implementation PR, verify:
       `_plan_intervals` and the assembler's `_detect_and_order_anchors`.
 - [ ] Level-2 strip (if present): `schema_version = "generation-v0.1"`,
       `map.stripped = true`, `map.strip_policy ∈ {"halo_axis_1",
-      "halo_axis_1_plus_anchor_radius_3"}`, `map.kept_block_count`
-      matches `len(map.blocks)`, anchor cells kept even when not on
-      the chosen path. Artifact + GBX are written even when
-      `reject_reason = "stripped_route_broken"`. Default policy for
-      `--strip` is `halo_axis_1_plus_anchor_radius_3` from PR L
-      onward; `halo_axis_1` stays available for reproducibility.
+      "halo_axis_1_plus_anchor_radius_3",
+      "halo_axis_1_plus_anchor_radius_3_vext_3"}`,
+      `map.kept_block_count` matches `len(map.blocks)`, anchor cells
+      kept even when not on the chosen path. Artifact + GBX are
+      written even when `reject_reason = "stripped_route_broken"`.
+      Default policy for `--strip` is
+      `halo_axis_1_plus_anchor_radius_3_vext_3` from #217 onward;
+      earlier policies stay available for reproducibility.
 - [ ] Provenance block is complete.
 - [ ] No field surfaced in the JSON artifact is computed from
       data that could drift (e.g. no "map quality" score computed
