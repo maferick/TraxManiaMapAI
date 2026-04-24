@@ -70,6 +70,15 @@
             {{ 'verified' if g.route_verified else 'rejected' }}
           </span>
           <span class="generated-base">base #{{ g.base_map_id }}</span>
+          {% if g.proof and g.proof.proof_badge %}
+            <span class="generated-proof-badge proof-{{ g.proof.proof_source }}"
+                  title="base map proof_source={{ g.proof.proof_source }}
+{%- if g.proof.has_author_time %}; author_time={{ g.proof.author_time_ms }}ms{% endif %}
+{%- if g.proof.has_world_record %}; WR={{ g.proof.world_record_time_ms }}ms{% endif -%}
+">
+              {{ g.proof.proof_badge }}
+            </span>
+          {% endif %}
           <span class="generated-run-id">run {{ g.run_id }}</span>
           <span class="generated-at">{{ g.generated_at }}</span>
         </div>

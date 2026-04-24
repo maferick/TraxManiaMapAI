@@ -84,7 +84,28 @@ internal static class MapParser
             ["blocks"] = blocks,
             ["waypoints"] = waypoints,
             ["scenery"] = scenery,
+            // PR M — finishability-proof metadata. Medal times live on
+            // the map chunk itself (set by the author in the editor).
+            // GBX.NET surfaces them as TimeInt32?; we unwrap to plain
+            // milliseconds for JSON. Author not setting a medal time
+            // leaves it null.
+            ["author_time_ms"] = TimeMs(map.AuthorTime),
+            ["bronze_time_ms"] = TimeMs(map.BronzeTime),
+            ["silver_time_ms"] = TimeMs(map.SilverTime),
+            ["gold_time_ms"] = TimeMs(map.GoldTime),
         };
+    }
+
+    // GBX.NET's medal-time fields are nullable TimeSpan-like structs;
+    // convert to plain millisecond ints for JSON serialization.
+    // `dynamic` avoids pinning the exact TimeInt32 type name which
+    // has moved across GBX.NET 2.x minors.
+    private static object? TimeMs(dynamic? t)
+    {
+        if (t is null) return null;
+        // TimeInt32 in GBX.NET has a TotalMilliseconds property
+        // (double). Cast to int for JSON compactness.
+        return (int)t.TotalMilliseconds;
     }
 
     // TM2020 checkpoint/start/finish metadata lives on CGameCtnBlock via

@@ -443,3 +443,21 @@ footer a:hover { text-decoration: underline; }
 .gbx-export-status a { color: #6fb7ff; text-decoration: none; }
 .gbx-export-status a:hover { text-decoration: underline; }
 .gbx-export-status .gbx-meta { color: #5d626a; font-size: 0.8rem; }
+
+/* PR M — finishability-proof badges on the Generated maps panel.
+ * Tints the badge differently per proof_source so the operator can
+ * tell "player-driven" from "author-stated" from "only our gate"
+ * at a glance. Hover title carries raw times. */
+.generated-proof-badge {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  cursor: help;
+}
+.proof-replay         { background: #1e3d24; color: #6fcf7f; }
+.proof-author_time    { background: #1e2d3d; color: #6fb7ff; }
+.proof-world_record   { background: #3d351e; color: #ffce6a; }
+.proof-internal_route { background: #2b2f36; color: #c7cdd4; }
+.proof-none           { display: none; }
