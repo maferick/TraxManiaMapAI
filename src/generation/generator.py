@@ -75,12 +75,20 @@ _TOP_K_CANDIDATES: int = 3
 class GenerationInputs:
     """Operator-facing knobs for a single generation run. Matches the
     ``inputs`` block of the v0 artifact 1:1 so serialization is a
-    pass-through."""
+    pass-through.
+
+    ``strip`` toggles Level-2 strip-to-route (scope-v0.1): when True,
+    the artifact carries only the blocks along the chosen route + a
+    small halo rather than a full copy of the base. Flows into the
+    run_id hash so ``(seed=42, strip=False)`` and ``(seed=42, strip=True)``
+    produce distinct artifacts.
+    """
     base_map_id: int | None
     base_map_source_id: str | None
     style_tag_filter: str | None = None
     difficulty: str = "medium"
     random_seed: int = 42
+    strip: bool = False
 
     def __post_init__(self) -> None:
         if self.style_tag_filter not in _ALLOWED_STYLE:
@@ -104,6 +112,7 @@ def _compute_run_id(inputs: GenerationInputs) -> str:
         "style_tag_filter": inputs.style_tag_filter,
         "difficulty": inputs.difficulty,
         "random_seed": inputs.random_seed,
+        "strip": inputs.strip,
     }
     body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
@@ -306,11 +315,20 @@ def _build_artifact(
     gate: FinishabilityResult,
     config_hash: str,
     sha: str,
+    strip_metadata: dict[str, Any] | None = None,
+    stripped_blocks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the full v0 JSON artifact. Always produces a schema-
+    """Assemble the full JSON artifact. Always produces a schema-
     conforming structure — even on reject, the artifact lists the
     base map's blocks/checkpoints (so the operator can still inspect
-    what was attempted)."""
+    what was attempted).
+
+    ``strip_metadata`` + ``stripped_blocks`` ride the Level-2 path:
+    when provided, ``map.blocks`` is the stripped subset, the schema
+    version bumps to ``generation-v0.1``, and the strip bookkeeping
+    (``stripped`` / ``strip_policy`` / ``kept_block_count`` /
+    ``base_block_count``) lands on the ``map`` object.
+    """
     if route is None or isinstance(route, AssemblyError):
         cells_total = 0
         intervals_produced: list[dict[str, Any]] = []
@@ -331,8 +349,22 @@ def _build_artifact(
         }
         interval_count = max(1, len(logical_anchors) - 1)
 
+    schema_version = "generation-v0.1" if strip_metadata else "generation-v0"
+    blocks_out = (
+        stripped_blocks if stripped_blocks is not None else base.blocks
+    )
+
+    map_block: dict[str, Any] = {
+        "waypoint_order_style": "linked",
+        "interval_count": interval_count,
+        "blocks": blocks_out,
+        "checkpoints": base.checkpoints,
+    }
+    if strip_metadata is not None:
+        map_block.update(strip_metadata)
+
     return {
-        "schema_version": "generation-v0",
+        "schema_version": schema_version,
         "run_id": _compute_run_id(inputs),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
         "inputs": {
@@ -341,6 +373,7 @@ def _build_artifact(
             "style_tag_filter": inputs.style_tag_filter,
             "difficulty": inputs.difficulty,
             "random_seed": inputs.random_seed,
+            "strip": inputs.strip,
         },
         "provenance": {
             "model_hash": base.model_hash or ("0" * 64),
@@ -351,12 +384,7 @@ def _build_artifact(
             "code_version": sha,
             "classification_version": CLASSIFICATION_VERSION,
         },
-        "map": {
-            "waypoint_order_style": "linked",
-            "interval_count": interval_count,
-            "blocks": base.blocks,
-            "checkpoints": base.checkpoints,
-        },
+        "map": map_block,
         "route": {
             "intervals": intervals_produced,
             "cells_total": cells_total,
@@ -413,6 +441,7 @@ def generate_from_base(
             style_tag_filter=inputs.style_tag_filter,
             difficulty=inputs.difficulty,
             random_seed=inputs.random_seed,
+            strip=inputs.strip,
         )
 
     route = assemble_route(
@@ -422,6 +451,39 @@ def generate_from_base(
     )
     gate = run_finishability_gate(route)
 
+    # Level-2 strip-to-route. Only runs on a successful assembly
+    # (AssembledRoute, not AssemblyError); reject-path artifacts have
+    # no chosen corridors to strip around, so they ship with the full
+    # base unchanged and schema_version stays generation-v0.
+    strip_metadata: dict[str, Any] | None = None
+    stripped_blocks: list[dict[str, Any]] | None = None
+    if inputs.strip and isinstance(route, AssembledRoute):
+        from src.generation.stripper import STRIP_POLICY_HALO_AXIS_1, strip_route
+        strip_result = strip_route(
+            route, base.blocks, policy=STRIP_POLICY_HALO_AXIS_1,
+        )
+        strip_metadata = {
+            "stripped": True,
+            "strip_policy": strip_result.strip_policy,
+            "kept_block_count": strip_result.kept_block_count,
+            "base_block_count": strip_result.base_block_count,
+        }
+        stripped_blocks = strip_result.stripped_blocks
+        # Gate re-run on the stripped shape. Override the gate verdict
+        # if the halo wasn't wide enough to preserve the chosen path —
+        # route still drives under the FULL map, but once we strip,
+        # the ribbon we save is no longer finishable. Surface that as
+        # a distinct reject_reason so the operator can diagnose.
+        if not strip_result.route_intact:
+            gate = FinishabilityResult(
+                route_verified=False,
+                estimated_time_ms=gate.estimated_time_ms,
+                ai_confidence=gate.ai_confidence,
+                reject_reason="stripped_route_broken",
+                gate_version=gate.gate_version,
+                detail=strip_result.broken_detail,
+            )
+
     artifact = _build_artifact(
         inputs=effective_inputs,
         base=base,
@@ -429,6 +491,8 @@ def generate_from_base(
         gate=gate,
         config_hash=config_hash,
         sha=sha,
+        strip_metadata=strip_metadata,
+        stripped_blocks=stripped_blocks,
     )
 
     err = validate_generated_map(artifact)

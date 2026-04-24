@@ -57,22 +57,34 @@ class SubprocessParser(ParserClient):
         output_path: Path,
         map_uid: str,
         map_name: str,
+        keep_cells: list[tuple[int, int, int]] | None = None,
     ) -> ParseResult:
         """Invoke the wrapper's ``emit-map`` command.
 
         PR H / copy-from-base: loads ``base_path``'s .Map.Gbx, rewrites
-        MapUid + MapName, saves to ``output_path``. Returns a
-        :class:`ParseResult` shaped the same as the parse commands so
-        callers can treat the subprocess contract uniformly — ``output``
-        dict carries ``output_path`` + ``new_map_uid`` + block counts.
+        MapUid + MapName, saves to ``output_path``.
+
+        Level-2 strip-to-route: when ``keep_cells`` is supplied, the
+        wrapper drops every grid block whose Coord isn't in the set
+        before Save. Free blocks + BakedBlocks are untouched.
+
+        Returns a :class:`ParseResult` shaped the same as the parse
+        commands so callers can treat the subprocess contract
+        uniformly — ``output`` dict carries ``output_path`` +
+        ``new_map_uid`` + block counts (+ ``removed_block_count`` when
+        stripping).
         """
-        payload = json.dumps({
+        payload_dict: dict[str, Any] = {
             "base_path": str(base_path),
             "output_path": str(output_path),
             "map_uid": map_uid,
             "map_name": map_name,
-        })
-        return self._invoke("emit-map", payload + "\n")
+        }
+        if keep_cells is not None:
+            payload_dict["keep_cells"] = [
+                [int(c[0]), int(c[1]), int(c[2])] for c in keep_cells
+            ]
+        return self._invoke("emit-map", json.dumps(payload_dict) + "\n")
 
     def _invoke(self, kind: str, stdin: str) -> ParseResult:
         start = time.monotonic()

@@ -23,6 +23,7 @@ RejectReason = Literal[
     "confidence_below_floor",
     "unknown_block",
     "invalid_schema",
+    "stripped_route_broken",
 ]
 
 

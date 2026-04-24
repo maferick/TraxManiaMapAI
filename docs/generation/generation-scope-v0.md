@@ -424,6 +424,59 @@ After this doc lands, the implementation sequence is:
   semantics, regeneration loops. Each gets its own design-doc
   revision before implementation.
 
+## Level-2: strip-to-route (schema v0.1)
+
+This section extends scope-v0 with the first geometrically-meaningful
+mutation shipped under the bumped `schema_version: "generation-v0.1"`.
+v0 output is a full copy of the base map's blocks; v0.1 (with
+`strip=true`) emits only the blocks the chosen route actually needs.
+
+### What changes
+
+- **`inputs.strip`** — new boolean field, `false` by default. When
+  true, assembly runs as v0 (same learned-score selection,
+  seed-driven top-K pick) but the emitted `map.blocks` is filtered
+  down to the route's cells.
+- **`map.stripped`** — mirrors `inputs.strip` in the output so
+  readers don't have to cross-reference.
+- **`map.strip_policy`** — enum: `none` / `halo_axis_1`. v0.1 ships
+  `halo_axis_1` only; tighter / looser policies are v0.2+.
+- **`map.kept_block_count`** + **`map.base_block_count`** — diagnostic
+  counts so the operator can see "we stripped 541 → N blocks."
+- **`schema_version`** bumps to `generation-v0.1` *only* when stripping.
+  Non-stripped runs stay on `generation-v0` for backwards compatibility.
+- **`reject_reason`** enum gains `stripped_route_broken`.
+- **`inputs`** participates in `run_id` — so `(seed=42, strip=false)`
+  and `(seed=42, strip=true)` have distinct run_ids + GBX paths.
+
+### Strip policy `halo_axis_1`
+
+For every cell in every chosen corridor's `path_cells`:
+1. Keep the cell itself.
+2. Keep its 6 grid-axis neighbours (±x, ±y, ±z).
+
+Anchor cells are kept unconditionally (multi-cell CPs have cells the
+route didn't step on; the game still registers them as the same
+waypoint, so dropping them would break in-game race structure).
+
+Free-placed blocks (NULL grid coords) and `BakedBlocks` (stadium
+scenery) are untouched.
+
+### Reject path is preserved
+
+If the stripped cell-set doesn't preserve the chosen route (tighter
+future policies might drop path cells), the gate re-run sets
+`route_verified=false` + `reject_reason=stripped_route_broken` +
+`detail` pointing at the failing interval. The artifact and GBX are
+**still written** — the diagnostic signal is the whole point.
+
+### What this section does NOT decide
+
+- **Block substitution** (replace route cells with alternate families)
+  — deferred to scope-v0.2+.
+- **Cross-map corridor splicing** — that's Level-3, a bigger scope
+  revision.
+
 ## What this doc does NOT decide
 
 Explicit open questions that are **not** v0 decisions. Follow-up
@@ -467,6 +520,11 @@ When reviewing a generation implementation PR, verify:
 - [ ] Multi-cell CPs are deduped by `(tag, waypoint_order)` when
       building the anchor chain — both in the enumerator's
       `_plan_intervals` and the assembler's `_detect_and_order_anchors`.
+- [ ] Level-2 strip (if present): `schema_version = "generation-v0.1"`,
+      `map.stripped = true`, `map.strip_policy ∈ {"halo_axis_1"}`,
+      `map.kept_block_count` matches `len(map.blocks)`, anchor cells
+      kept even when not on the chosen path. Artifact + GBX are
+      written even when `reject_reason = "stripped_route_broken"`.
 - [ ] Provenance block is complete.
 - [ ] No field surfaced in the JSON artifact is computed from
       data that could drift (e.g. no "map quality" score computed
