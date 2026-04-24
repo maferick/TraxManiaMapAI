@@ -454,6 +454,160 @@ def _cmd_compute_finishability_proof(args: argparse.Namespace) -> int:
     return 0 if not errors else 1
 
 
+def _cmd_diagnose_strip(args: argparse.Namespace) -> int:
+    import json as _json
+    from src.generation.strip_diagnostics import (
+        diagnose_strip, format_report_markdown,
+    )
+    from src.generation.gbx_writer import _lookup_base_gbx  # reuse helper
+    from src.generation.finishability_proof import (  # noqa: F401 warm import
+        fetch_proof,
+    )
+    config = load_config(args.config)
+    gbx_cfg = (config.get("parsers") or {}).get("gbx") or {}
+    executable = Path(
+        args.parser_executable
+        or gbx_cfg.get("executable")
+        or "./parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper"
+    )
+    parser_version = gbx_cfg.get("parser_version", "0.1.0")
+    parser = SubprocessParser(
+        executable=executable,
+        parser_version=parser_version,
+        timeout_seconds=float(gbx_cfg.get("timeout_seconds", 30.0)),
+    )
+
+    # Load the generator artifact first — we need its base_map_id,
+    # run_id, chosen-corridor cells, anchor cells, and the strip
+    # policy it ran under for provenance.
+    artifact = _json.loads(Path(args.artifact).read_text(encoding="utf-8"))
+    base_map_id = int(artifact["inputs"]["base_map_id"])
+    run_id = str(artifact.get("run_id") or "")
+    strip_policy = str(
+        (artifact.get("map") or {}).get("strip_policy") or "(none)"
+    )
+
+    # Chosen corridor IDs from the artifact's intervals. path_cells
+    # don't live in the artifact (the IntervalEntry shape carries
+    # corridor_id + path_length but not the cell list), so fetch from
+    # route_corridors keyed on those ids.
+    chosen_ids = [
+        int(iv["chosen_corridor_id"])
+        for iv in (artifact.get("route") or {}).get("intervals") or []
+        if iv.get("chosen_corridor_id") is not None
+    ]
+    chosen_cells: list[tuple[int, int, int]] = []
+    if chosen_ids:
+        placeholders = ",".join(["%s"] * len(chosen_ids))
+        conn = open_connection(config)
+        try:
+            from src.storage.mariadb import cursor as cursor_ctx
+            with cursor_ctx(conn) as cur:
+                cur.execute(
+                    f"SELECT path_cells FROM route_corridors "
+                    f"WHERE id IN ({placeholders})",
+                    tuple(chosen_ids),
+                )
+                for (raw,) in cur.fetchall():
+                    try:
+                        data = _json.loads(raw) if raw else []
+                    except (TypeError, _json.JSONDecodeError):
+                        data = []
+                    for c in data:
+                        if isinstance(c, (list, tuple)) and len(c) == 3:
+                            try:
+                                chosen_cells.append(
+                                    (int(c[0]), int(c[1]), int(c[2]))
+                                )
+                            except (TypeError, ValueError):
+                                continue
+        finally:
+            conn.close()
+
+    # Anchor cells from the artifact's map.checkpoints (grid-only) +
+    # snapped free-placed anchors from map_checkpoints so the Spawn
+    # neighbourhood shows up in the report.
+    anchor_cells: list[tuple[str, int, tuple[int, int, int] | None]] = []
+    for cp in (artifact.get("map") or {}).get("checkpoints") or []:
+        tag = str(cp.get("tag") or "")
+        order = int(cp.get("waypoint_order") or 0)
+        x, y, z = cp.get("x"), cp.get("y"), cp.get("z")
+        cell = (
+            (int(x), int(y), int(z))
+            if all(v is not None for v in (x, y, z))
+            else None
+        )
+        anchor_cells.append((tag, order, cell))
+    # Include free-placed anchors via the generator's snapping helper.
+    from src.generation.generator import (
+        _BLOCK_SIZE_X, _BLOCK_SIZE_Y, _BLOCK_SIZE_Z,
+    )
+    conn = open_connection(config)
+    try:
+        from src.storage.mariadb import cursor as cursor_ctx
+        with cursor_ctx(conn) as cur:
+            cur.execute(
+                "SELECT tag, waypoint_order, abs_x, abs_y, abs_z "
+                "FROM map_checkpoints "
+                "WHERE map_id = %s AND placement = 'free' "
+                "  AND abs_x IS NOT NULL",
+                (base_map_id,),
+            )
+            for tag, order, ax, ay, az in cur.fetchall():
+                snapped = (
+                    int(float(ax) // _BLOCK_SIZE_X),
+                    int(float(ay) // _BLOCK_SIZE_Y),
+                    int(float(az) // _BLOCK_SIZE_Z),
+                )
+                anchor_cells.append((str(tag), int(order), snapped))
+    finally:
+        conn.close()
+
+    # Fetch base GBX path + parse both GBX files via the wrapper.
+    conn = open_connection(config)
+    try:
+        _title, base_path = _lookup_base_gbx(conn, base_map_id)
+    finally:
+        conn.close()
+    stripped_path = Path(args.stripped_gbx)
+    if not stripped_path.exists():
+        _LOG.error("stripped GBX missing: %s", stripped_path)
+        return 1
+
+    base_result = parser.parse_map(base_path)
+    if base_result.output is None:
+        _LOG.error("failed parsing base: %s", base_result.error_detail)
+        return 1
+    stripped_result = parser.parse_map(stripped_path)
+    if stripped_result.output is None:
+        _LOG.error("failed parsing stripped: %s", stripped_result.error_detail)
+        return 1
+
+    report = diagnose_strip(
+        base_map_id=base_map_id,
+        base_map=base_result.output,
+        stripped_map=stripped_result.output,
+        chosen_corridor_cells=chosen_cells or None,
+        anchor_cells=anchor_cells or None,
+    )
+
+    md = format_report_markdown(
+        report, run_id=run_id, strip_policy=strip_policy,
+    )
+    out_dir = Path("reports") / "strip-diagnostics"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"map{base_map_id}-{run_id or 'unknown'}.md"
+    out_path.write_text(md, encoding="utf-8")
+    _LOG.info(
+        "diagnose-strip: wrote %s (%d drop(s), %d multicell candidates)",
+        out_path,
+        report.base_block_count - report.stripped_block_count,
+        len(report.multicell_candidate_drops),
+    )
+    print(str(out_path))
+    return 0
+
+
 def _cmd_emit_gbx(args: argparse.Namespace) -> int:
     from src.generation.gbx_writer import (
         DEFAULT_GBX_OUTPUT_DIR,
@@ -2087,6 +2241,26 @@ def _build_parser() -> argparse.ArgumentParser:
              "(default from config.parsers.gbx.executable)",
     )
     emit_gbx_cmd.set_defaults(func=_cmd_emit_gbx)
+
+    diag_strip_cmd = sub.add_parser(
+        "diagnose-strip",
+        help="#217 follow-up — compare base GBX vs a stripped emit "
+             "and emit reports/strip-diagnostics/map<id>-<run_id>.md "
+             "with per-anchor drops, multi-cell candidates, and a "
+             "likely-reason hypothesis block. Evidence only; no fix.",
+    )
+    diag_strip_cmd.add_argument(
+        "--artifact", type=str, required=True,
+        help="path to the generator's generation-v0.1 JSON artifact",
+    )
+    diag_strip_cmd.add_argument(
+        "--stripped-gbx", type=str, required=True,
+        help="path to the stripped .Map.Gbx produced by emit-gbx",
+    )
+    diag_strip_cmd.add_argument(
+        "--parser-executable", type=str, default=None,
+    )
+    diag_strip_cmd.set_defaults(func=_cmd_diagnose_strip)
 
     fin_proof_cmd = sub.add_parser(
         "compute-finishability-proof",
