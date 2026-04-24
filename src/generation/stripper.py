@@ -44,7 +44,19 @@ from src.generation.types import AssembledRoute, Cell
 _LOG = logging.getLogger(__name__)
 
 STRIP_POLICY_HALO_AXIS_1: str = "halo_axis_1"
+STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3: str = (
+    "halo_axis_1_plus_anchor_radius_3"
+)
 STRIP_POLICY_NONE: str = "none"
+
+# Radius of the anchor-preservation cube used by
+# ``halo_axis_1_plus_anchor_radius_3``. Chebyshev distance from each
+# anchor cell: 3 → a 7×7×7 = 343-cell cube per anchor. Sized to cover
+# TM2020's multi-block start-curve / finish-gate / checkpoint-ramp
+# assemblies which span 3-5 cells radially (map 1212's
+# PlatformPlasticLoopOutStartCurve1 cluster is the canonical example —
+# see PR L diagnosis).
+_ANCHOR_RADIUS_CHEB: int = 3
 
 # Axis-only 6-neighbourhood (no diagonals). Matches scope-v0.1
 # §Level-2 "1-cell grid-axis halo only."
@@ -53,6 +65,18 @@ _AXIS_NEIGHBORS: tuple[tuple[int, int, int], ...] = (
     ( 0, +1,  0), ( 0, -1,  0),
     ( 0,  0, +1), ( 0,  0, -1),
 )
+
+
+def _cheb_cube(centre: Cell, radius: int) -> set[Cell]:
+    """Every grid cell within Chebyshev distance ``radius`` of
+    ``centre``, inclusive. ``radius=3`` → 343 cells."""
+    cx, cy, cz = centre
+    out: set[Cell] = set()
+    for dx in range(-radius, radius + 1):
+        for dy in range(-radius, radius + 1):
+            for dz in range(-radius, radius + 1):
+                out.add((cx + dx, cy + dy, cz + dz))
+    return out
 
 
 @dataclass(frozen=True)
@@ -77,23 +101,58 @@ def compute_kept_cells(
     route: AssembledRoute,
     *,
     policy: str = STRIP_POLICY_HALO_AXIS_1,
+    anchor_cells: frozenset[Cell] | None = None,
 ) -> frozenset[Cell]:
-    """Union of cells the strip policy keeps: every chosen-corridor
-    path cell + halo, plus every anchor cell (multi-cell CPs contribute
-    cells the assembler didn't route through but the game still
-    registers as the same waypoint)."""
+    """Union of cells the strip policy keeps.
+
+    Always included:
+    - Every chosen-corridor path cell (so the route itself survives).
+    - Every anchor cell carried on :class:`Anchor.cell`
+      (multi-cell grid anchors contribute cells the assembler didn't
+      route through but the game still registers as the same waypoint).
+
+    Policy-specific additions:
+
+    - ``halo_axis_1`` (scope-v0.1 default in PR #45): 1-cell grid-axis
+      halo around every path cell. Conservative; loses multi-block
+      start-ramp / finish-gate geometry when the assembly doesn't step
+      through all the block's cells (map 1212 Spawn bug — see PR L).
+    - ``halo_axis_1_plus_anchor_radius_3`` (new, default from PR L):
+      everything above PLUS a 7×7×7 Chebyshev cube around every cell
+      in ``anchor_cells`` (which includes grid anchors and
+      snapped-to-grid free-placed anchors). Covers multi-block anchor
+      assemblies; preserves spawn / CP / finish ramp geometry.
+
+    ``anchor_cells`` is only consulted when the active policy uses it.
+    For the other policies the arg may be None.
+    """
     kept: set[Cell] = set()
+    uses_anchor_radius = (
+        policy == STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3
+    )
+    uses_path_halo = (
+        policy == STRIP_POLICY_HALO_AXIS_1
+        or uses_anchor_radius
+    )
+
     for iv in route.intervals:
         for cell in iv.chosen.path_cells:
             kept.add(cell)
-            if policy == STRIP_POLICY_HALO_AXIS_1:
+            if uses_path_halo:
                 x, y, z = cell
                 for dx, dy, dz in _AXIS_NEIGHBORS:
                     kept.add((x + dx, y + dy, z + dz))
-    # Anchor cells always preserved, halo or not.
+
+    # Anchor cells from Anchor.cell (grid anchors only — free anchors
+    # arrive via the ``anchor_cells`` arg below).
     for anchor in route.anchors:
         if anchor.cell is not None:
             kept.add(anchor.cell)
+
+    if uses_anchor_radius and anchor_cells:
+        for anchor_cell in anchor_cells:
+            kept.update(_cheb_cube(anchor_cell, _ANCHOR_RADIUS_CHEB))
+
     return frozenset(kept)
 
 
@@ -165,12 +224,25 @@ def strip_route(
     route: AssembledRoute,
     base_blocks: list[dict[str, Any]],
     *,
-    policy: str = STRIP_POLICY_HALO_AXIS_1,
+    policy: str = STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+    anchor_cells: frozenset[Cell] | None = None,
 ) -> StripResult:
     """Apply ``policy`` to ``base_blocks`` given the chosen ``route``.
     Returns a :class:`StripResult` with the filtered block list +
-    continuity verdict. Raises ``ValueError`` on unknown policy."""
-    if policy not in (STRIP_POLICY_HALO_AXIS_1, STRIP_POLICY_NONE):
+    continuity verdict. Raises ``ValueError`` on unknown policy.
+
+    ``anchor_cells`` is the union of every waypoint's grid cell —
+    grid-placed anchors directly, free-placed anchors after snapping
+    via TM2020's fixed block dimensions (caller's responsibility).
+    The ``halo_axis_1_plus_anchor_radius_3`` policy uses it to grow
+    a preservation cube around every anchor; other policies ignore it.
+    """
+    known_policies = (
+        STRIP_POLICY_HALO_AXIS_1,
+        STRIP_POLICY_HALO_AXIS_1_PLUS_ANCHOR_RADIUS_3,
+        STRIP_POLICY_NONE,
+    )
+    if policy not in known_policies:
         raise ValueError(f"unknown strip policy: {policy!r}")
 
     if policy == STRIP_POLICY_NONE:
@@ -185,12 +257,16 @@ def strip_route(
             broken_detail=None,
         )
 
-    kept_cells = compute_kept_cells(route, policy=policy)
+    kept_cells = compute_kept_cells(
+        route, policy=policy, anchor_cells=anchor_cells,
+    )
     stripped = filter_blocks_by_cells(base_blocks, kept_cells)
     intact, detail = verify_route_on_kept_cells(route, kept_cells)
     _LOG.info(
-        "strip_route: policy=%s base_blocks=%d kept_blocks=%d kept_cells=%d intact=%s",
-        policy, len(base_blocks), len(stripped), len(kept_cells), intact,
+        "strip_route: policy=%s base_blocks=%d kept_blocks=%d "
+        "kept_cells=%d anchor_cells=%d intact=%s",
+        policy, len(base_blocks), len(stripped), len(kept_cells),
+        len(anchor_cells or ()), intact,
     )
     return StripResult(
         stripped_blocks=stripped,

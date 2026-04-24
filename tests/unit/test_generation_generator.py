@@ -118,6 +118,7 @@ def _happy_base() -> _BaseMapData:
             {"waypoint_index": 2, "waypoint_order": 0, "tag": "Goal",
              "x": 0, "y": 0, "z": 10},
         ],
+        anchor_cells=frozenset({(0, 0, 0), (0, 0, 5), (0, 0, 10)}),
         model_hash="a" * 64,
         learned_score_version="time_envelope_v2_weighted@0.1.0",
     )
