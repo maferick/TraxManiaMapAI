@@ -372,6 +372,110 @@ def _cmd_generate_ai_map(args: argparse.Namespace) -> int:
     return 0 if fin["route_verified"] else 1
 
 
+def _cmd_remote_test_serve(args: argparse.Namespace) -> int:
+    """Launch the Linux-side queue server (PR1 of the remote-test rig)."""
+    from src.remote_test.server import create_app, resolve_auth_token
+    from src.remote_test.storage import JobStore
+
+    db_path = Path(args.db)
+    artifacts_root = Path(args.artifacts_root)
+    token = resolve_auth_token(args.token)
+    store = JobStore(db_path)
+    app = create_app(
+        store=store, artifacts_root=artifacts_root,
+        auth_token=token, allow_insecure=args.allow_insecure,
+    )
+    host = args.host
+    port = int(args.port)
+    _LOG.info(
+        "remote-test-serve starting on %s:%d (db=%s artifacts=%s "
+        "auth=%s)",
+        host, port, db_path, artifacts_root,
+        "disabled" if args.allow_insecure else "enabled",
+    )
+    try:
+        app.run(host=host, port=port, threaded=True, use_reloader=False)
+    finally:
+        store.close()
+    return 0
+
+
+def _cmd_remote_test_enqueue(args: argparse.Namespace) -> int:
+    """Push a .Map.Gbx + metadata onto the queue."""
+    import json as _json
+
+    import requests
+    artifact = Path(args.artifact)
+    if not artifact.exists():
+        _LOG.error("artifact not found: %s", artifact)
+        return 2
+    metadata: dict[str, Any] = {}
+    if args.metadata:
+        metadata = _json.loads(Path(args.metadata).read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            _LOG.error("metadata file must contain a JSON object")
+            return 2
+    if args.run_id is None and "run_id" in metadata:
+        run_id = str(metadata["run_id"])
+    else:
+        run_id = args.run_id or artifact.stem
+    headers = {"Authorization": f"Bearer {args.token}"} if args.token else {}
+    with artifact.open("rb") as fh:
+        resp = requests.post(
+            f"{args.server.rstrip('/')}/jobs",
+            headers=headers,
+            files={"artifact": (artifact.name, fh, "application/octet-stream")},
+            data={
+                "run_id": run_id,
+                "metadata": _json.dumps(metadata, sort_keys=True),
+                "timeout_seconds": str(args.timeout_seconds),
+            },
+            timeout=30,
+        )
+    if resp.status_code != 201:
+        _LOG.error("enqueue failed: %d %s", resp.status_code, resp.text)
+        return 1
+    body = resp.json()
+    _LOG.info(
+        "enqueued job_id=%d run_id=%s sha256=%s size=%d",
+        body["id"], body["run_id"],
+        body["artifact_sha256"][:12] + "…",
+        body["artifact_size"],
+    )
+    print(body["id"])
+    return 0
+
+
+def _cmd_remote_test_status(args: argparse.Namespace) -> int:
+    """Query the queue for job(s). --job-id → one; --list N → recent."""
+    import json as _json
+
+    import requests
+    headers = {"Authorization": f"Bearer {args.token}"} if args.token else {}
+    if args.job_id is not None:
+        resp = requests.get(
+            f"{args.server.rstrip('/')}/jobs/{int(args.job_id)}",
+            headers=headers, timeout=15,
+        )
+        if resp.status_code == 404:
+            _LOG.error("no such job: %d", args.job_id)
+            return 2
+        resp.raise_for_status()
+        print(_json.dumps(resp.json(), indent=2))
+        return 0
+    resp = requests.get(
+        f"{args.server.rstrip('/')}/jobs",
+        headers=headers, params={"limit": int(args.list)}, timeout=15,
+    )
+    resp.raise_for_status()
+    for j in resp.json().get("jobs", []):
+        print(
+            f"  {j['id']:>5}  {j['status']:<10}  run={j['run_id']:<18}  "
+            f"agent={j['agent_id'] or '-':<16}  detail={j['detail'] or ''}"
+        )
+    return 0
+
+
 def _cmd_validate_generation(args: argparse.Namespace) -> int:
     from src.generation.generator import validate_artifact_file
     config = load_config(args.config)
@@ -2345,6 +2449,83 @@ def _build_parser() -> argparse.ArgumentParser:
         help="skip writing <artifact>.validation.json",
     )
     validate_gen_cmd.set_defaults(func=_cmd_validate_generation)
+
+    # ---- Remote in-game test rig (Option A+ PR1/PR1 server) ----
+    rt_serve = sub.add_parser(
+        "remote-test-serve",
+        help="Run the Linux-side queue/report server for the remote "
+             "in-game test rig. Windows agents pull jobs + .Map.Gbx "
+             "artifacts from this server and POST telemetry back.",
+    )
+    rt_serve.add_argument("--host", default="0.0.0.0")
+    rt_serve.add_argument("--port", type=int, default=8787)
+    rt_serve.add_argument(
+        "--db", default="data/remote_test/jobs.db",
+        help="SQLite database path (auto-created).",
+    )
+    rt_serve.add_argument(
+        "--artifacts-root", default="data/remote_test/artifacts",
+        help="Directory where uploaded .Map.Gbx files live.",
+    )
+    rt_serve.add_argument(
+        "--token", default=None,
+        help="Bearer token. Falls back to REMOTE_TEST_TOKEN env var.",
+    )
+    rt_serve.add_argument(
+        "--allow-insecure", action="store_true", default=False,
+        help="Disable bearer auth. Dev-only; do NOT use on a LAN.",
+    )
+    rt_serve.set_defaults(func=_cmd_remote_test_serve)
+
+    rt_enqueue = sub.add_parser(
+        "remote-test-enqueue",
+        help="Push a .Map.Gbx + metadata onto the queue via HTTP.",
+    )
+    rt_enqueue.add_argument(
+        "--server", default="http://localhost:8787",
+        help="Queue server URL.",
+    )
+    rt_enqueue.add_argument(
+        "--token", default=None,
+        help="Bearer token sent as Authorization header.",
+    )
+    rt_enqueue.add_argument(
+        "--artifact", required=True,
+        help="Path to the .Map.Gbx to enqueue.",
+    )
+    rt_enqueue.add_argument(
+        "--run-id", default=None,
+        help="Run id to tag this job with. Defaults to artifact stem "
+             "or metadata.run_id.",
+    )
+    rt_enqueue.add_argument(
+        "--metadata", default=None,
+        help="Path to a JSON file with metadata (e.g. the generation "
+             "artifact itself).",
+    )
+    rt_enqueue.add_argument(
+        "--timeout-seconds", type=int, default=300,
+    )
+    rt_enqueue.set_defaults(func=_cmd_remote_test_enqueue)
+
+    rt_status = sub.add_parser(
+        "remote-test-status",
+        help="Query the queue for a job (by --job-id) or list recent "
+             "jobs (default).",
+    )
+    rt_status.add_argument(
+        "--server", default="http://localhost:8787",
+    )
+    rt_status.add_argument("--token", default=None)
+    rt_status.add_argument(
+        "--job-id", type=int, default=None,
+        help="Print full JSON for one job instead of the table.",
+    )
+    rt_status.add_argument(
+        "--list", type=int, default=20,
+        help="Number of recent jobs to list.",
+    )
+    rt_status.set_defaults(func=_cmd_remote_test_status)
 
     emit_gbx_cmd = sub.add_parser(
         "emit-gbx",
