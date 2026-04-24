@@ -44,6 +44,10 @@ from pymysql.connections import Connection
 from src.corridor.traversability.classification import CLASSIFICATION_VERSION
 from src.generation.assembly import assemble_route
 from src.generation.finishability import run_finishability_gate
+from src.generation.preemit import (
+    PreEmitValidationSummary,
+    run_preemit_validation,
+)
 from src.generation.schema import validate_generated_map
 from src.generation.types import (
     AssembledRoute,
@@ -570,6 +574,25 @@ def generate_from_base(
             f"generated artifact failed schema validation: {err}"
         )
 
+    # Pre-emit validation: run structural + jump validators against
+    # the shape we'd hand to emit-gbx. Log-only here — does not block
+    # return, does not mutate the artifact, does not touch the gate.
+    # Callers that want the full summary use the validate-generation
+    # CLI (or call :func:`run_preemit_validation_for_artifact` directly).
+    try:
+        _run_preemit_validation_inline(
+            conn=conn,
+            base=base,
+            route=route,
+            stripped_blocks=stripped_blocks,
+            run_id=artifact["run_id"],
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        # A validation bug must never break generation. Log + swallow.
+        _LOG.warning(
+            "generate_from_base: pre-emit validation failed: %s", exc,
+        )
+
     _LOG.info(
         "generate_from_base: run_id=%s base_map_id=%d "
         "route_verified=%s reject=%s ai_confidence=%s",
@@ -580,3 +603,150 @@ def generate_from_base(
         f"{gate.ai_confidence:.3f}" if gate.ai_confidence is not None else "n/a",
     )
     return artifact
+
+
+def _run_preemit_validation_inline(
+    *,
+    conn: Connection,
+    base: _BaseMapData,
+    route: AssembledRoute | AssemblyError,
+    stripped_blocks: list[dict[str, Any]] | None,
+    run_id: str,
+) -> PreEmitValidationSummary | None:
+    """Inline hook: run validators, emit a single INFO log, return.
+
+    Skips entirely when assembly rejected (no route cells to validate)
+    or when the catalogue is empty (fresh DB / integration tests) —
+    validation on an empty lookup is noise.
+    """
+    if not isinstance(route, AssembledRoute):
+        return None
+
+    from src.generation.geom_validator import load_geometry_lookup
+    geometry_lookup = load_geometry_lookup(conn)
+    if not geometry_lookup:
+        _LOG.info(
+            "generate_from_base: skipping pre-emit validation — "
+            "block_geometry catalogue is empty (run build-block-geometry)",
+        )
+        return None
+
+    route_cells: list[tuple[int, int, int]] = []
+    spawn_cell: tuple[int, int, int] | None = None
+    for iv in route.intervals:
+        if iv.chosen.path_cells:
+            if not route_cells:
+                spawn_cell = iv.chosen.path_cells[0]
+            for cell in iv.chosen.path_cells:
+                route_cells.append(cell)
+
+    blocks_for_check = (
+        stripped_blocks if stripped_blocks is not None else base.blocks
+    )
+    summary = run_preemit_validation(
+        blocks=blocks_for_check,
+        geometry_lookup=geometry_lookup,
+        route_cells=route_cells,
+        spawn_cell=spawn_cell,
+    )
+    _LOG.info(
+        "preemit[%s] run_id=%s fail=%d warn=%d info=%d "
+        "(map_id=%d stripped=%s)",
+        summary.version, run_id,
+        summary.fail_count, summary.warn_count, summary.info_count,
+        route.map_id, stripped_blocks is not None,
+    )
+    return summary
+
+
+def validate_artifact_file(
+    conn: Connection,
+    *,
+    artifact_path: str,
+    config: dict[str, Any],
+    write_sidecar: bool = True,
+) -> PreEmitValidationSummary | None:
+    """Re-run pre-emit validators against an on-disk artifact JSON.
+
+    Reads ``inputs.base_map_id``, ``inputs.random_seed``, and
+    ``inputs.strip`` from the artifact; re-fetches the base map,
+    re-assembles the route (deterministic on seed), re-applies strip
+    if requested, then calls :func:`run_preemit_validation`.
+
+    When ``write_sidecar`` is True, writes
+    ``<artifact_path>.validation.json`` alongside the artifact. This
+    is the supported surface the CLI's ``validate-generation``
+    subcommand wraps.
+
+    Returns ``None`` if the artifact rejected at assembly (no route
+    cells → nothing for the route-level checks to verify).
+    """
+    import json
+    from pathlib import Path
+
+    from src.generation.schema import validate_generated_map
+
+    path = Path(artifact_path)
+    with path.open(encoding="utf-8") as fh:
+        artifact = json.load(fh)
+
+    err = validate_generated_map(artifact)
+    if err is not None:
+        raise ValueError(
+            f"artifact at {artifact_path} failed schema validation: {err}"
+        )
+
+    inputs_block = artifact.get("inputs") or {}
+    base_map_id = inputs_block.get("base_map_id")
+    if base_map_id is None:
+        raise ValueError(
+            f"artifact at {artifact_path} has no base_map_id; "
+            "validate-generation requires a base-bound run"
+        )
+    random_seed = int(inputs_block.get("random_seed") or 0)
+    strip = bool(inputs_block.get("strip") or False)
+
+    base = _fetch_base_map(conn, int(base_map_id))
+    route = assemble_route(
+        conn, int(base_map_id),
+        random_seed=random_seed,
+        top_k_candidates=_TOP_K_CANDIDATES,
+    )
+
+    stripped_blocks: list[dict[str, Any]] | None = None
+    if strip and isinstance(route, AssembledRoute):
+        from src.generation.stripper import (
+            STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
+            strip_route,
+        )
+        strip_result = strip_route(
+            route, base.blocks,
+            policy=STRIP_POLICY_HALO_PRISM_3X7X3_PLUS_ANCHOR_RADIUS_3,
+            anchor_cells=base.anchor_cells,
+        )
+        stripped_blocks = strip_result.stripped_blocks
+
+    summary = _run_preemit_validation_inline(
+        conn=conn,
+        base=base,
+        route=route,
+        stripped_blocks=stripped_blocks,
+        run_id=str(artifact.get("run_id", "")),
+    )
+
+    if summary is not None and write_sidecar:
+        sidecar_path = path.with_suffix(path.suffix + ".validation.json")
+        with sidecar_path.open("w", encoding="utf-8") as fh:
+            payload = {
+                "artifact_path": str(path),
+                "run_id": artifact.get("run_id"),
+                "base_map_id": base_map_id,
+                "strip": strip,
+                "summary": summary.to_dict(),
+            }
+            json.dump(payload, fh, indent=2, sort_keys=True)
+        _LOG.info(
+            "validate_artifact_file: wrote sidecar %s", sidecar_path,
+        )
+
+    return summary

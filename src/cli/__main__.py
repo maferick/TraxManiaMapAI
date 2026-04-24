@@ -334,6 +334,36 @@ def _cmd_generate_map(args: argparse.Namespace) -> int:
     return 0 if fin["route_verified"] else 1
 
 
+def _cmd_validate_generation(args: argparse.Namespace) -> int:
+    from src.generation.generator import validate_artifact_file
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        summary = validate_artifact_file(
+            conn,
+            artifact_path=args.artifact,
+            config=config,
+            write_sidecar=not args.no_sidecar,
+        )
+    finally:
+        conn.close()
+    if summary is None:
+        _LOG.info(
+            "validate-generation: artifact %s has no assembled route "
+            "(rejected at gate) — nothing to validate",
+            args.artifact,
+        )
+        return 0
+    _LOG.info(
+        "validate-generation: %s fail=%d warn=%d info=%d codes=%s",
+        args.artifact,
+        summary.fail_count, summary.warn_count, summary.info_count,
+        summary.code_counts or "-",
+    )
+    # Non-zero exit only on fail-severity findings; warns don't block.
+    return 1 if summary.fail_count > 0 else 0
+
+
 def _cmd_score_corridor_sequences(args: argparse.Namespace) -> int:
     from src.constraints.sequence_scoring import score_all_corridors
     config = load_config(args.config)
@@ -2218,6 +2248,24 @@ def _build_parser() -> argparse.ArgumentParser:
              "grid-axis halo. Output is generation-v0.1.",
     )
     generate_map_cmd.set_defaults(func=_cmd_generate_map)
+
+    validate_gen_cmd = sub.add_parser(
+        "validate-generation",
+        help="Re-run geom + jump validators against a generation-v0 "
+             "artifact JSON. Writes <artifact>.validation.json next "
+             "to the input unless --no-sidecar. Exits non-zero when "
+             "FAIL-severity findings are present; WARN-severity "
+             "findings are informational.",
+    )
+    validate_gen_cmd.add_argument(
+        "--artifact", type=str, required=True,
+        help="path to a generation-v0 JSON artifact",
+    )
+    validate_gen_cmd.add_argument(
+        "--no-sidecar", action="store_true", default=False,
+        help="skip writing <artifact>.validation.json",
+    )
+    validate_gen_cmd.set_defaults(func=_cmd_validate_generation)
 
     emit_gbx_cmd = sub.add_parser(
         "emit-gbx",

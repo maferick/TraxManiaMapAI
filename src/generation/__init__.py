@@ -26,7 +26,16 @@ from src.generation.finishability import (
     AI_CONFIDENCE_FLOOR,
     run_finishability_gate,
 )
-from src.generation.generator import GenerationInputs, generate_from_base
+from src.generation.generator import (
+    GenerationInputs,
+    generate_from_base,
+    validate_artifact_file,
+)
+from src.generation.preemit import (
+    PREEMIT_VERSION,
+    PreEmitValidationSummary,
+    run_preemit_validation,
+)
 from src.generation.schema import load_schema, validate_generated_map
 from src.generation.types import (
     Anchor,
@@ -50,11 +59,15 @@ __all__ = [
     "GATE_VERSION",
     "GenerationInputs",
     "IntervalAssembly",
+    "PREEMIT_VERSION",
+    "PreEmitValidationSummary",
     "RejectReason",
     "assemble_route",
     "assemble_route_from_inputs",
     "generate_from_base",
     "load_schema",
     "run_finishability_gate",
+    "run_preemit_validation",
+    "validate_artifact_file",
     "validate_generated_map",
 ]
