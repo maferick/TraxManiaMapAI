@@ -71,7 +71,10 @@ _LOG = logging.getLogger(__name__)
 #   v0.2 — beam search (width>=1); greedy v0.1 = beam_width=1 special
 #          case. Beams that dead-end are pruned; winning beam merges
 #          its cells back into the occupancy set on interval close.
-AI_GENERATOR_VERSION: str = "ai-generator-v0.2"
+#   v0.3 — sequence-score tier: per-(prev, cand) geometry compatibility
+#          using shape_class + surface_hint from block_geometry. Fills
+#          the v0.0–v0.2 zero stub in score_candidate's sequence tier.
+AI_GENERATOR_VERSION: str = "ai-generator-v0.3"
 
 # Fixed Stadium-ground Y. Same convention as geom_validator's
 # default ground_y. Multi-env support is a later phase.
@@ -196,6 +199,82 @@ def _load_candidate_catalogue(
         ))
     _LOG.info("ai_generator: candidate catalogue size=%d", len(out))
     return out
+
+
+# Shape-class pair compatibility — same set
+# src.constraints.sequence_scoring uses. Imported to avoid drift: a
+# future edit to the pair set should only touch one file.
+from src.constraints.sequence_scoring import (
+    _SHAPE_COMPATIBLE_PAIRS as _SEQ_SHAPE_PAIRS,
+)
+
+
+@dataclass(frozen=True)
+class _ShapeSurface:
+    """Lean (shape_class, surface_hint) tuple the scorer reads on
+    every candidate pair. Kept separate from GeometryInfo because
+    GeometryInfo deliberately omits surface_hint (that attribute
+    is validator-irrelevant, scorer-relevant)."""
+    shape_class: str
+    surface_hint: str
+
+
+def _load_shape_surface_lookup(
+    conn: Connection,
+) -> dict[tuple[str, str], _ShapeSurface]:
+    """Load (shape_class, surface_hint) for every block in the
+    catalogue — INCLUDING anchors, since the scorer needs them for
+    the first step's prev_block lookup (Start / Checkpoint /
+    Finish are classified with is_anchor_capable=1 and thus absent
+    from the drivable catalogue)."""
+    with cursor(conn) as cur:
+        cur.execute(
+            "SELECT block_family, block_name, shape_class, surface_hint "
+            "FROM block_geometry"
+        )
+        rows = cur.fetchall()
+    out: dict[tuple[str, str], _ShapeSurface] = {}
+    for family, name, shape, surface in rows:
+        out[(str(family), str(name))] = _ShapeSurface(
+            shape_class=str(shape or "unknown"),
+            surface_hint=str(surface or ""),
+        )
+    _LOG.info(
+        "ai_generator: shape_surface lookup size=%d (all blocks)", len(out),
+    )
+    return out
+
+
+def _sequence_pair_score(
+    prev: _ShapeSurface | None,
+    cand: _ShapeSurface,
+) -> float:
+    """In-memory sequence-score per (prev, cand) pair. Mirrors the
+    spirit of :func:`src.constraints.sequence_scoring._geometry_score_for`
+    but drops the DB roundtrip (we don't need ``reasoning`` /
+    ``detail`` strings in the hot loop).
+
+    Baseline 0.4 when both blocks have a known shape; +0.3 when the
+    shape pair is in the compatibility set; +0.3 when same surface;
+    -0.1 for unknown on either side. Clamped to [0, 1].
+
+    Returns 0.0 when prev is None (interval start) — the tier
+    requires both sides to be meaningful.
+    """
+    if prev is None:
+        return 0.0
+    if prev.shape_class == "unknown" or cand.shape_class == "unknown":
+        score = 0.4 - 0.1
+    else:
+        score = 0.4
+        if (prev.shape_class, cand.shape_class) in _SEQ_SHAPE_PAIRS:
+            score += 0.3
+        if (
+            prev.surface_hint and cand.surface_hint
+            and prev.surface_hint == cand.surface_hint
+        ):
+            score += 0.3
+    return max(0.0, min(1.0, score))
 
 
 def _load_triple_priors(
@@ -380,6 +459,9 @@ def score_candidate(
             Mapping[tuple[str, str], float],
         ] | None
     ) = None,
+    shape_surface_lookup: (
+        Mapping[tuple[str, str], _ShapeSurface] | None
+    ) = None,
     path_so_far: list[dict[str, Any]],
     occupied_cells: set[Cell] | None = None,
     weights: Mapping[str, float],
@@ -435,11 +517,16 @@ def score_candidate(
     # tier so a future edge-level check slots in here.
     breakdown["traversability"] = 1.0 if breakdown["pair_prior"] > 0 else 0.0
 
-    # Sequence score — stub for v0.1; ships as a separate PR once
-    # in-memory geometry pair scoring is plumbed through (the
-    # current src.constraints.sequence_scoring.score_pair does
-    # one DB roundtrip per call, unacceptable in the hot loop).
-    breakdown["sequence"] = 0.0
+    # v0.3 sequence score — in-memory (prev, cand) geometry pair
+    # match via shape_class + surface_hint. Mirrors the spirit of
+    # src.constraints.sequence_scoring._geometry_score_for without
+    # the DB roundtrip. Fires from step 2 onwards (needs a prev
+    # block); step 1 falls back to 0.0 cleanly.
+    if shape_surface_lookup is not None and prev_block is not None:
+        prev_ss = shape_surface_lookup.get(prev_block)
+        cand_ss = shape_surface_lookup.get((cand.family, cand.name))
+        if cand_ss is not None:
+            breakdown["sequence"] = _sequence_pair_score(prev_ss, cand_ss)
 
     # Diversity penalty: count this block's recurrence in the path.
     if path_so_far:
@@ -547,6 +634,9 @@ def _expand_beam(
             Mapping[tuple[str, str], float],
         ] | None
     ),
+    shape_surface_lookup: (
+        Mapping[tuple[str, str], _ShapeSurface] | None
+    ),
     occupied_cells: set[Cell],
     weights: Mapping[str, float],
     top_n_children: int,
@@ -576,6 +666,7 @@ def _expand_beam(
             prev_prev_block=beam.prev_prev_block,
             pair_priors=pair_priors,
             triple_priors=triple_priors,
+            shape_surface_lookup=shape_surface_lookup,
             path_so_far=path_list,
             occupied_cells=combined_occupancy,
             weights=weights,
@@ -626,6 +717,9 @@ def _generate_interval(
     weights: Mapping[str, float],
     beam_width: int = 1,
     top_n_children: int = DEFAULT_TOP_N_CANDIDATES,
+    shape_surface_lookup: (
+        Mapping[tuple[str, str], _ShapeSurface] | None
+    ) = None,
 ) -> _IntervalResult:
     """Beam search from ``src_cell`` toward ``dst_cell``.
 
@@ -681,6 +775,7 @@ def _generate_interval(
                 catalogue=catalogue,
                 pair_priors=pair_priors,
                 triple_priors=triple_priors,
+                shape_surface_lookup=shape_surface_lookup,
                 occupied_cells=occupied_cells,
                 weights=weights,
                 top_n_children=top_n_children,
@@ -1019,6 +1114,7 @@ def generate_ai_map(
     catalogue = _load_candidate_catalogue(conn)
     pair_priors = _load_pair_priors(conn)
     triple_priors = _load_triple_priors(conn)
+    shape_surface_lookup = _load_shape_surface_lookup(conn)
 
     # Occupied set seeded with anchor cells so the walk never
     # overwrites Spawn / CP / Goal.
@@ -1047,6 +1143,7 @@ def generate_ai_map(
             max_depth=inputs.max_interval_depth,
             weights=AI_GENERATOR_WEIGHTS,
             beam_width=max(1, inputs.beam_width),
+            shape_surface_lookup=shape_surface_lookup,
         )
         if result.reject_reason is not None:
             return _build_v0_2_artifact(
