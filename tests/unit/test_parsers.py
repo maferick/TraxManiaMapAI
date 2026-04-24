@@ -264,3 +264,62 @@ class TestSubprocessParser:
         r = parser.parse_map(tmp_path / "fake.gbx")
         assert r.error_code is ParseErrorCode.WRAPPER_TIMEOUT
         assert r.status is ParseStatus.FAILED_TRANSIENT
+
+
+class TestSubprocessParserDumpBlockInfo:
+    """M1 — dump-block-info sits on the same envelope contract as
+    the parse-side commands. Full round-trip through a fake wrapper;
+    real .Block.Gbx parses need the operator's TM2020 install."""
+
+    def test_success_payload_round_trips(self, tmp_path: Path) -> None:
+        wrapper = _write_fake_wrapper(
+            tmp_path / "block_wrap.sh",
+            r"""
+            read line
+            cat <<'EOF'
+            {"status":"success","parser_version":"1.0.0","output":{
+              "block_id":"PlatformPlasticWallStraight4",
+              "name":"PlatformPlasticWallStraight4",
+              "collection":"Stadium","author":"Nadeo",
+              "has_ground":true,"has_air":false,
+              "ground_units":[[0,0,0],[1,0,0],[2,0,0],[3,0,0]],
+              "air_units":[],
+              "ground_variant_count":1,"air_variant_count":0
+            }}
+            EOF
+            """,
+        )
+        parser = SubprocessParser(
+            executable=wrapper, parser_version="1.0.0", timeout_seconds=5.0,
+        )
+        r = parser.dump_block_info(Path("/some/block.Block.Gbx"))
+        assert r.status is ParseStatus.SUCCESS
+        assert r.output["block_id"] == "PlatformPlasticWallStraight4"
+        assert r.output["ground_units"] == [
+            [0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0],
+        ]
+        assert r.output["has_ground"] is True
+        assert r.output["has_air"] is False
+
+    def test_io_error_for_missing_file(self, tmp_path: Path) -> None:
+        # Echo back a structured io_error (mimics the real wrapper's
+        # behaviour when the caller points at a nonexistent path).
+        wrapper = _write_fake_wrapper(
+            tmp_path / "missing_wrap.sh",
+            r"""
+            read line
+            cat <<'EOF'
+            {"status":"error","parser_version":"1.0.0","error_code":"io_error","error_detail":"file not found: /x"}
+            EOF
+            """,
+        )
+        parser = SubprocessParser(
+            executable=wrapper, parser_version="1.0.0", timeout_seconds=5.0,
+        )
+        r = parser.dump_block_info(Path("/x"))
+        # IO errors classify transient in the existing taxonomy
+        # (missing paths are operator-fixable by re-ingest or by
+        # supplying a valid input path); the load-bearing assertion
+        # here is the error_code.
+        assert r.error_code is ParseErrorCode.IO_ERROR
+        assert r.status is ParseStatus.FAILED_TRANSIENT

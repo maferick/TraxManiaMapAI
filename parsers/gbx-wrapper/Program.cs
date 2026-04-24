@@ -32,10 +32,11 @@ public static class Program
         if (args.Length != 1 ||
             (args[0] != "map" && args[0] != "replay"
              && args[0] != "diagnose-map" && args[0] != "diagnose-replay"
-             && args[0] != "emit-map"))
+             && args[0] != "emit-map" && args[0] != "dump-block-info"))
         {
             Console.Error.WriteLine(
-                "usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay|emit-map>");
+                "usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay"
+                + "|emit-map|dump-block-info>");
             return 2;
         }
 
@@ -80,6 +81,7 @@ public static class Program
                 "diagnose-map" => Diagnose.Inspect(stdinLine),
                 "diagnose-replay" => Diagnose.InspectReplay(stdinLine),
                 "emit-map" => MapEmitter.EmitFromStdinJson(stdinLine),
+                "dump-block-info" => BlockInfoDump.DumpFromPath(stdinLine),
                 _ => throw new InvalidOperationException("unreachable"),
             };
             EmitSuccess(payload);
