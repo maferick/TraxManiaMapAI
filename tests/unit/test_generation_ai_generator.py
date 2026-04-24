@@ -16,6 +16,7 @@ from src.generation.ai_generator import (
     _ShapeSurface,
     _advance,
     _direction_toward,
+    _footprint_cells,
     _generate_interval,
     _sequence_pair_score,
     _shadow_cells_clear,
@@ -420,6 +421,83 @@ class TestScoreSequenceIntegration:
             path_so_far=[], weights=AI_GENERATOR_WEIGHTS,
         )
         assert breakdown["sequence"] == 0.0
+
+
+class TestFootprintCells:
+    def test_unit_footprint_returns_origin(self) -> None:
+        assert _footprint_cells((5, 9, 3), 0, 1) == [(5, 9, 3)]
+
+    def test_multi_cell_rotation_0(self) -> None:
+        assert _footprint_cells((5, 9, 3), 0, 4) == [
+            (5, 9, 3), (6, 9, 3), (7, 9, 3), (8, 9, 3),
+        ]
+
+    def test_multi_cell_rotation_1(self) -> None:
+        assert _footprint_cells((5, 9, 3), 1, 4) == [
+            (5, 9, 3), (5, 9, 4), (5, 9, 5), (5, 9, 6),
+        ]
+
+    def test_multi_cell_rotation_2(self) -> None:
+        assert _footprint_cells((5, 9, 3), 2, 4) == [
+            (5, 9, 3), (4, 9, 3), (3, 9, 3), (2, 9, 3),
+        ]
+
+    def test_multi_cell_rotation_3(self) -> None:
+        assert _footprint_cells((5, 9, 3), 3, 4) == [
+            (5, 9, 3), (5, 9, 2), (5, 9, 1), (5, 9, 0),
+        ]
+
+
+class TestOccupancyTracksFullFootprint:
+    """v0.4 fix: placing a Wall4 at C must mark C..C+3 occupied, not
+    just C. Otherwise the next step lands at C+1 (inside the mesh).
+    This is the direct driver of the operator's 'blocks inside each
+    other' in-game report."""
+
+    def _cat_with_wall4(self) -> list[_CatalogueEntry]:
+        return [
+            _CatalogueEntry(
+                family="Platform", name="PlatformPlasticWallStraight4",
+                info=GeometryInfo(
+                    footprint_x=4, shape_class="straight",
+                    connector_hint="straight_x",
+                ),
+            ),
+        ]
+
+    def test_wall4_placed_at_step1_blocks_steps_2_3_4(self) -> None:
+        # Walker starts at (0,9,0), dst at (10,9,0). With ONLY a Wall4
+        # in the catalogue, step 1 places Wall4 at (1,9,0). Its
+        # footprint (1..4,9,0) must be marked occupied so step 2's
+        # advance to (2,9,0) fails — the walker then rejects with
+        # no_valid_candidates for this interval. (A richer catalogue
+        # would pick a unit block instead; this test pins the
+        # occupancy-tracking invariant specifically.)
+        occ: set = {(0, 9, 0), (10, 9, 0)}
+        result = _generate_interval(
+            src_cell=(0, 9, 0), dst_cell=(10, 9, 0),
+            src_block=None,
+            catalogue=self._cat_with_wall4(),
+            pair_priors={}, triple_priors=None,
+            occupied_cells=occ,
+            max_depth=12, weights=AI_GENERATOR_WEIGHTS,
+            beam_width=1,
+        )
+        # Walker placed Wall4 at (1,9,0); tries (2,9,0) next but that
+        # cell now sits in the winning beam's interval_cells. With
+        # only Wall4 in the catalogue every beam dead-ends at step 2,
+        # so the run rejects — beam-exhausted (walked some, didn't
+        # reach dst) OR no_valid_candidates (if exactly one step then
+        # collision on the shadow).
+        assert result.reject_reason in (
+            "beam_exhausted", "no_valid_candidates",
+        )
+        # Load-bearing assertion: no block in the partial result
+        # lands at (2,9,0), (3,9,0), (4,9,0) — those are inside
+        # Wall4's mesh and must have been blocked by occupancy.
+        placed_cells = {(b["x"], b["y"], b["z"]) for b in result.blocks}
+        shadow_cells = {(2, 9, 0), (3, 9, 0), (4, 9, 0)}
+        assert placed_cells.isdisjoint(shadow_cells)
 
 
 class TestBeamSearch:
