@@ -194,7 +194,8 @@
         "learned_corridor_score":  { "type": "number", "minimum": 0, "maximum": 1 },
         "corridor_confidence":     { "type": ["number", "null"] },
         "contains_virtual_edge":   { "type": "boolean" },
-        "path_length_cells":       { "type": "integer", "minimum": 0 }
+        "path_length_cells":       { "type": "integer", "minimum": 0 },
+        "combined_sequence_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
       }
     }
   }

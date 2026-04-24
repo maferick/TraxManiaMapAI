@@ -334,6 +334,25 @@ def _cmd_generate_map(args: argparse.Namespace) -> int:
     return 0 if fin["route_verified"] else 1
 
 
+def _cmd_score_corridor_sequences(args: argparse.Namespace) -> int:
+    from src.constraints.sequence_scoring import score_all_corridors
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        counts = score_all_corridors(
+            conn,
+            map_id=int(args.map_id) if args.map_id is not None else None,
+            limit=int(args.limit) if args.limit else None,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "score-corridor-sequences: corridors=%d scored=%d null=%d",
+        counts["corridors_seen"], counts["scored"], counts["null_scores"],
+    )
+    return 0
+
+
 def _cmd_build_block_geometry(args: argparse.Namespace) -> int:
     from src.constraints.block_geometry import build_block_geometry
     config = load_config(args.config)
@@ -2129,6 +2148,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="comma-separated block_family filter (smoke runs)",
     )
     block_geometry_cmd.set_defaults(func=_cmd_build_block_geometry)
+
+    seq_score_cmd = sub.add_parser(
+        "score-corridor-sequences",
+        help="Phase 2 #218-5 — compute combined_sequence_score "
+             "(pattern × geometry) per route_corridors row. "
+             "Assembly uses it as a tier-below tie-break after "
+             "learned_corridor_score.",
+    )
+    seq_score_cmd.add_argument(
+        "--map-id", type=int, default=None,
+        help="single map_id (default: every corridor)",
+    )
+    seq_score_cmd.add_argument(
+        "--limit", type=int, default=None,
+        help="cap the number of corridors (for smoke runs)",
+    )
+    seq_score_cmd.set_defaults(func=_cmd_score_corridor_sequences)
 
     train_corridor_ranking_cmd = sub.add_parser(
         "train-corridor-ranking",
