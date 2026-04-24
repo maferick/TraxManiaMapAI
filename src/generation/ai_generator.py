@@ -74,7 +74,12 @@ _LOG = logging.getLogger(__name__)
 #   v0.3 — sequence-score tier: per-(prev, cand) geometry compatibility
 #          using shape_class + surface_hint from block_geometry. Fills
 #          the v0.0–v0.2 zero stub in score_candidate's sequence tier.
-AI_GENERATOR_VERSION: str = "ai-generator-v0.3"
+#   v0.4 — occupancy tracks multi-cell footprint (origin + shadow cells)
+#          not just placement cell, so later steps can't land inside a
+#          prior multi-cell block's mesh. Catalogue filters 33% of
+#          candidates that are user-imported custom blocks — won't load
+#          on a fresh TM2020 install.
+AI_GENERATOR_VERSION: str = "ai-generator-v0.4"
 
 # Fixed Stadium-ground Y. Same convention as geom_validator's
 # default ground_y. Multi-env support is a later phase.
@@ -174,6 +179,25 @@ def _load_candidate_catalogue(
     blocks. Drops anchors / deco / support / unknown / gate /
     free_only. The remaining set is what the greedy loop scores."""
     with cursor(conn) as cur:
+        # v0.4 filters:
+        #
+        # 1. User-imported custom blocks. TMX maps frequently embed or
+        #    reference custom .Block.Gbx files the community has
+        #    authored — those block-model strings can't be placed on a
+        #    fresh TM2020 install (the game looks them up by name and
+        #    fails silently, producing the hidden / load-error blocks
+        #    the operator saw in-game). Heuristic: path-separator or
+        #    _CustomBlock / .Block.Gbx marker in the block_name.
+        #
+        # 2. Multi-cell blocks (footprint_x > 1). A multi-cell Wall4
+        #    at cell C occupies C..C+3 and expects the C+1..C+3 cells
+        #    to be 'under' its mesh (filled by BakedBlocks or scenery
+        #    on the base map). The v0 AI walker doesn't synthesise
+        #    those fillers — it places unit blocks along a 1-cell-
+        #    per-step path — so multi-cell choices leave shadow cells
+        #    empty and read as partial_multicell FAILs post-synth.
+        #    Defer multi-cell support to the mesh-aware placement
+        #    phase (M1/M2 workstream); v0 stays unit-only.
         cur.execute(
             "SELECT block_family, block_name, shape_class, "
             "       is_anchor_capable, footprint_x, footprint_y, "
@@ -183,7 +207,12 @@ def _load_candidate_catalogue(
             "  AND is_deco = 0 "
             "  AND shape_class IN ('straight','curve','ramp','loop','platform') "
             "  AND placement_mode IN ('grid_only', 'mixed', 'unknown') "
-            "  AND connector_hint <> ''"
+            "  AND connector_hint <> '' "
+            "  AND footprint_x = 1 "
+            "  AND block_name NOT LIKE '%\\\\%' "
+            "  AND block_name NOT LIKE '%/%' "
+            "  AND block_name NOT LIKE '%.Block.Gbx%' "
+            "  AND block_name NOT LIKE '%_CustomBlock%'"
         )
         rows = cur.fetchall()
     out: list[_CatalogueEntry] = []
@@ -406,6 +435,30 @@ def _direction_toward(src: Cell, dst: Cell) -> int:
 # Scorer
 # ---------------------------------------------------------------------
 
+def _footprint_cells(
+    origin: Cell, rotation: int, footprint_x: int,
+) -> list[Cell]:
+    """Cells the block's mesh occupies at placement.
+
+    Origin + shadow. Multi-cell block meshes extend from the origin
+    along the rotation axis; tracking the full footprint in the
+    occupancy set stops later walker steps from landing inside the
+    mesh (the map-1212 in-game failure from operator feedback).
+    Unit-footprint blocks return [origin].
+    """
+    x, y, z = origin
+    if footprint_x <= 1:
+        return [origin]
+    rot = rotation & 0b11
+    if rot == 0:
+        return [(x + i, y, z) for i in range(footprint_x)]
+    if rot == 1:
+        return [(x, y, z + i) for i in range(footprint_x)]
+    if rot == 2:
+        return [(x - i, y, z) for i in range(footprint_x)]
+    return [(x, y, z - i) for i in range(footprint_x)]
+
+
 def _shadow_cells_clear(
     *,
     cand: _CandidateBlock,
@@ -429,18 +482,10 @@ def _shadow_cells_clear(
     fx = cand.info.footprint_x
     if fx <= 1:
         return 0.0
-    # Shadow cells — same convention as geom_validator._footprint_shadow_cells
-    # but inlined here to avoid a circular import into the hot path.
-    rot = cand.rotation & 0b11
-    cx, cy, cz = cand.cell
-    if rot == 0:
-        shadow = [(cx + i, cy, cz) for i in range(1, fx)]
-    elif rot == 1:
-        shadow = [(cx, cy, cz + i) for i in range(1, fx)]
-    elif rot == 2:
-        shadow = [(cx - i, cy, cz) for i in range(1, fx)]
-    else:
-        shadow = [(cx, cy, cz - i) for i in range(1, fx)]
+    # Shadow = footprint minus origin (origin is this block's OWN cell,
+    # can't "collide" with self). Reuse _footprint_cells so the
+    # rotation math stays in one place.
+    shadow = _footprint_cells(cand.cell, cand.rotation, fx)[1:]
     if not shadow:
         return 0.0
     collisions = sum(1 for c in shadow if c in occupied_cells)
@@ -653,7 +698,12 @@ def _expand_beam(
         return []
 
     combined_occupancy = occupied_cells | beam.interval_cells
-    scored: list[tuple[float, dict[str, Any], dict[str, float]]] = []
+    # Keep the catalogue entry alongside the score so we know the
+    # footprint when building the child beam — avoids an O(catalogue)
+    # re-lookup per child.
+    scored: list[
+        tuple[float, dict[str, Any], dict[str, float], _CatalogueEntry]
+    ] = []
     path_list = list(beam.blocks)
     for entry in catalogue:
         cand = _CandidateBlock(
@@ -679,18 +729,23 @@ def _expand_beam(
             "ai_score": round(score, 6),
             "ai_score_breakdown": {k: round(v, 6) for k, v in breakdown.items()},
         }
-        scored.append((score, block, breakdown))
+        scored.append((score, block, breakdown, entry))
 
     if not scored:
         return []
     # Descending by score; take top_n_children.
     scored.sort(key=lambda t: -t[0])
     children: list[_Beam] = []
-    for score, block, _ in scored[:top_n_children]:
+    for score, block, _, entry in scored[:top_n_children]:
+        # v0.4: mark the whole footprint as occupied so a later step
+        # can't land inside this block's mesh.
+        fp_cells = _footprint_cells(
+            next_cell, block["rotation"], entry.info.footprint_x,
+        )
         children.append(_Beam(
             blocks=beam.blocks + (block,),
             path_cells=beam.path_cells + (next_cell,),
-            interval_cells=beam.interval_cells | frozenset({next_cell}),
+            interval_cells=beam.interval_cells | frozenset(fp_cells),
             score_sum=beam.score_sum + score,
             current_cell=next_cell,
             prev_block=(block["block_family"], block["block_name"]),
