@@ -10,6 +10,7 @@ import pytest
 
 from src.generation.finishability_proof import (
     PROOF_SOURCE_AUTHOR_TIME,
+    PROOF_SOURCE_CORPUS_PUBLISHED,
     PROOF_SOURCE_INTERNAL_ROUTE,
     PROOF_SOURCE_NONE,
     PROOF_SOURCE_REPLAY,
@@ -53,13 +54,36 @@ class TestDeriveProofSource:
             has_internal_route=True,
         ) == PROOF_SOURCE_INTERNAL_ROUTE
 
-    def test_none_when_no_evidence(self) -> None:
+    def test_corpus_published_when_no_other_evidence_but_corpus_map(self) -> None:
+        # v0 axiom: every ingested map is finishable by virtue of being
+        # in our corpus (TMX-published, downloaded, parsed cleanly).
+        # That's the new floor — strictly above 'none'.
         assert derive_proof_source(
             has_author_time=False,
             has_clean_replay=False,
             has_any_replay=False,
             has_internal_route=False,
+        ) == PROOF_SOURCE_CORPUS_PUBLISHED
+
+    def test_none_only_for_non_corpus_rows(self) -> None:
+        # Reserved for fixture / orphan rows that aren't backed by an
+        # ingested map at all.
+        assert derive_proof_source(
+            has_author_time=False,
+            has_clean_replay=False,
+            has_any_replay=False,
+            has_internal_route=False,
+            is_corpus_map=False,
         ) == PROOF_SOURCE_NONE
+
+    def test_internal_route_beats_corpus_published(self) -> None:
+        # Anything we computed is strictly above the bare-axiom floor.
+        assert derive_proof_source(
+            has_author_time=False,
+            has_clean_replay=False,
+            has_any_replay=False,
+            has_internal_route=True,
+        ) == PROOF_SOURCE_INTERNAL_ROUTE
 
     def test_author_time_beats_internal_route(self) -> None:
         # Author-declared evidence outranks our own internal gate.

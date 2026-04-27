@@ -1,0 +1,11 @@
+name = "AI Replay Telemetry"
+author = "TraxManiaMapAI"
+category = "Utility"
+version = "0.1.0"
+
+# TM2020 only. The plugin uses CTrackMania-specific APIs and the
+# CSmPlayer telemetry surface (position / velocity / inputs).
+siteid = 0
+
+[script]
+dependencies = []

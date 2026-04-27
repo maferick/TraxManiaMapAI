@@ -636,23 +636,35 @@ class TestBeamSearch:
 
 
 class TestCatalogueFilters:
-    """v0.5: catalogue SQL excludes custom blocks, multi-cell blocks,
-    and rare blocks (< _MIN_MAP_COUNT_THRESHOLD distinct maps).
-    Full SQL integration is exercised by the live smoke; here we pin
-    the module-level constants that gate behaviour."""
+    """v0.6: catalogue SQL excludes custom blocks, multi-cell blocks,
+    rare blocks (< _MIN_MAP_COUNT_THRESHOLD distinct maps), and
+    non-'straight' shape classes (curve/ramp/loop/platform — the
+    unit-cell walker can't honor their geometry, so admitting them
+    produced visibly meshed in-game placements). Full SQL integration
+    is exercised by the live smoke; here we pin the module-level
+    constants that gate behaviour."""
 
-    def test_min_map_count_threshold_is_set(self) -> None:
+    def test_min_map_count_threshold_is_one(self) -> None:
+        # v0.6: under the corpus-finishable axiom every ingested map is
+        # finishable + loaded, so a block appearing in even ONE corpus
+        # map is title-pack-safe within that pack. The base_families
+        # filter scopes us to the right pack; the count threshold's
+        # only job now is "non-zero corpus evidence."
         from src.generation.ai_generator import _MIN_MAP_COUNT_THRESHOLD
-        # Regression guard: raising this unilaterally would starve the
-        # candidate pool on maps with narrow vocabulary; dropping it
-        # to 1 reintroduces the legacy-block load errors.
-        assert 5 <= _MIN_MAP_COUNT_THRESHOLD <= 100
+        assert _MIN_MAP_COUNT_THRESHOLD == 1
 
-    def test_version_bumped_to_v05(self) -> None:
+    def test_allowed_shapes_is_straight_only(self) -> None:
+        # v0.6: the unit-cell, axis-aligned walker can't honor curve /
+        # ramp / loop exit-direction or vertical extent. Re-admit when
+        # the multi-cell walker (M2 workstream) lands.
+        from src.generation.ai_generator import _ALLOWED_SHAPES
+        assert _ALLOWED_SHAPES == frozenset({"straight"})
+
+    def test_version_bumped_to_v06(self) -> None:
         # Any algorithm change must bump the version so A/B diffs and
         # run_id deterministic re-hash work.
         from src.generation.ai_generator import AI_GENERATOR_VERSION
-        assert AI_GENERATOR_VERSION == "ai-generator-v0.5"
+        assert AI_GENERATOR_VERSION == "ai-generator-v0.6"
 
 
 class TestPositiveWeightKeys:
