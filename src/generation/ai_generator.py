@@ -86,7 +86,24 @@ _LOG = logging.getLogger(__name__)
 #          which caused operator's 'missing resources' load error).
 #          Catalogue is ALSO filtered to the base map's block families
 #          — guarantees the picks share the base's title-pack scope.
-AI_GENERATOR_VERSION: str = "ai-generator-v0.5"
+#   v0.6 — corpus-finishable axiom (docs/learning/corpus-finishable-axiom.md).
+#          Two changes:
+#            * Catalogue restricted to shape_class='straight'. The v0
+#              walker is a unit-cell, XZ-axis-aligned stepper that
+#              never honors a curve/ramp/loop's exit direction or
+#              vertical extent. Admitting those classes produced
+#              chains of CurveN segments laid in a straight line whose
+#              3D meshes overlap in-game ("blocks meshed" — operator
+#              report on map 1212, run 514d4257…).
+#            * _MIN_MAP_COUNT_THRESHOLD: 20 → 1. Under the axiom every
+#              ingested map is finishable + loaded → a block appearing
+#              in even one corpus map is title-pack-safe within that
+#              pack. The base_families filter still scopes us to the
+#              right title pack; the count threshold was an over-strict
+#              second filter that was dropping legitimate variants.
+#          Curve / ramp / loop support is deferred to the multi-cell-
+#          aware walker (M2 workstream).
+AI_GENERATOR_VERSION: str = "ai-generator-v0.6"
 
 # Fixed Stadium-ground Y. Same convention as geom_validator's
 # default ground_y. Multi-env support is a later phase.
@@ -98,14 +115,15 @@ DEFAULT_BEAM_WIDTH: int = 3        # v0.2 default; pass 1 to force greedy
 DEFAULT_MAX_INTERVAL_DEPTH: int = 12
 DEFAULT_TOP_N_CANDIDATES: int = 8  # per step, before beam prune
 
-# v0.5 titlepack-safety: a block must appear in at least this many
-# distinct corpus maps to make it into the candidate catalogue. This
-# drops one-off blocks from TMX legacy uploads whose model strings
-# TM2020 can't resolve on a fresh install. 20 = "appears in a
-# meaningful slice of the corpus"; adjustable per-run via
-# AIGenerationInputs.min_block_map_count if a specific base map has a
-# very narrow vocabulary.
-_MIN_MAP_COUNT_THRESHOLD: int = 20
+# v0.6 (was 20 in v0.5): under the corpus-finishable axiom every
+# ingested map is loaded + finished → a block that appears in even one
+# corpus map is title-pack-safe within that map's pack. The
+# base_families filter is what enforces title-pack scope; this
+# threshold's job is just to drop blocks with zero corpus evidence at
+# all, which an integer ≥ 1 already does. The old 20 was throwing out
+# legitimate variants the v0.6 catalogue needs to populate adequately
+# after dropping curves/ramps/loops.
+_MIN_MAP_COUNT_THRESHOLD: int = 1
 
 # Scoring weights. Additive linear combination; see the doc.
 AI_GENERATOR_WEIGHTS = {
@@ -176,9 +194,20 @@ class _IntervalResult:
 # Shapes the candidate-filter keeps. Anchors are excluded outright —
 # they come from the base map verbatim. Support / deco / unknown /
 # gate drop (gate = checkpoint gate block; that's an anchor class).
-_ALLOWED_SHAPES: frozenset[str] = frozenset({
-    "straight", "curve", "ramp", "loop", "platform",
-})
+#
+# v0.6 narrows this to 'straight' only. The v0 walker is a unit-cell,
+# XZ-axis-aligned stepper (_advance + _direction_toward); it never
+# tracks a curve / ramp / loop's exit direction or vertical extent.
+# Admitting those shape classes produced chains of CurveN segments
+# laid down a straight line whose 3D meshes overlap visibly in-game
+# (operator report on map 1212). Re-enable when the walker grows
+# multi-cell + exit-direction awareness (M2 workstream).
+#
+# 'platform' is also dropped because most platform blocks here are
+# anchor-only (already excluded via is_anchor_capable=1) or wide
+# tiles that don't connect on the rotation axis the walker is
+# stepping along.
+_ALLOWED_SHAPES: frozenset[str] = frozenset({"straight"})
 
 
 @dataclass(frozen=True)
@@ -242,7 +271,10 @@ def _load_candidate_catalogue(
             "FROM block_geometry bg "
             "WHERE bg.is_anchor_capable = 0 "
             "  AND bg.is_deco = 0 "
-            "  AND bg.shape_class IN ('straight','curve','ramp','loop','platform') "
+            # v0.6: restrict to 'straight' only — the unit-cell walker
+            # can't honor curve/ramp/loop exit-direction or vertical
+            # extent. See _ALLOWED_SHAPES doc + minimal-ai-generator-v0.md.
+            "  AND bg.shape_class = 'straight' "
             "  AND bg.placement_mode IN ('grid_only', 'mixed', 'unknown') "
             "  AND bg.connector_hint <> '' "
             "  AND bg.footprint_x = 1 "

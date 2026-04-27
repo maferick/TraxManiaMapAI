@@ -22,16 +22,25 @@ Derivation precedence for ``proof_source`` (strongest → weakest):
 - ``world_record`` — replays exist on the map but none are marked
   clean; we still carry the fastest finish as a soft signal.
 - ``internal_route`` — only our corridor gate says so.
-- ``none`` — no evidence of any kind yet.
+- ``corpus_published`` — the corpus-finishable axiom (see
+  ``docs/learning/corpus-finishable-axiom.md``). Maps in our corpus
+  came off TMX and parsed cleanly: someone published them, someone
+  downloaded them, the GBX is intact. That's weak finishability
+  evidence on its own but strictly stronger than ``none`` and
+  separates "we have the map" from "we have nothing." Default tier
+  for any successfully-ingested map.
+- ``none`` — reserved for rows that aren't backed by an ingested
+  map at all (orphan / pre-ingestion fixtures).
 
 The renderer picks one of these to show as a badge; the badge maps
 to operator-readable labels:
 
-    replay         → "Player validated"
-    author_time    → "Author validated"
-    world_record   → "Player validated (unverified)"
-    internal_route → "Internally verified"
-    none           → (no badge)
+    replay           → "Player validated"
+    author_time      → "Author validated"
+    world_record     → "Player validated (unverified)"
+    internal_route   → "Internally verified"
+    corpus_published → "Published map (axiom)"
+    none             → (no badge)
 """
 from __future__ import annotations
 
@@ -55,6 +64,7 @@ PROOF_SOURCE_REPLAY: str = "replay"
 PROOF_SOURCE_AUTHOR_TIME: str = "author_time"
 PROOF_SOURCE_WORLD_RECORD: str = "world_record"
 PROOF_SOURCE_INTERNAL_ROUTE: str = "internal_route"
+PROOF_SOURCE_CORPUS_PUBLISHED: str = "corpus_published"
 PROOF_SOURCE_NONE: str = "none"
 
 
@@ -84,10 +94,18 @@ def derive_proof_source(
     has_clean_replay: bool,
     has_any_replay: bool,
     has_internal_route: bool,
+    is_corpus_map: bool = True,
 ) -> str:
-    """Pure function — pick the strongest proof source from the four
-    flags the caller can compute cheaply. Order matches the module
-    docstring's precedence."""
+    """Pure function — pick the strongest proof source from the flags
+    the caller can compute cheaply. Order matches the module docstring's
+    precedence.
+
+    ``is_corpus_map`` is True by default because every caller in the
+    pipeline operates on rows that already exist in our ``maps`` table
+    (i.e. the map IS in the corpus). Setting it False is reserved for
+    fixture / orphan rows that aren't backed by an ingested map; those
+    fall through to ``none``.
+    """
     if has_clean_replay:
         return PROOF_SOURCE_REPLAY
     if has_author_time:
@@ -96,6 +114,8 @@ def derive_proof_source(
         return PROOF_SOURCE_WORLD_RECORD
     if has_internal_route:
         return PROOF_SOURCE_INTERNAL_ROUTE
+    if is_corpus_map:
+        return PROOF_SOURCE_CORPUS_PUBLISHED
     return PROOF_SOURCE_NONE
 
 
