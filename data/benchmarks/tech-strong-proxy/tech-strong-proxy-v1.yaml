@@ -4,7 +4,7 @@ version: 1
 category: strong_tech
 ingestion_snapshot: 2026-04-scale-1k
 released_at: '2026-04-22'
-author: gijs.vanderlaken@gmail.com
+author: maferick
 rationale: Auto-selected proxy set, NOT hand-curated. Pulled from the 2026-04-scale-1k
   ingestion snapshot as the top-20 TMX Tech-tagged maps by AwardCount (TMX v2 community-upvote
   count, the v2 equivalent of the old star system). This conflates popularity with

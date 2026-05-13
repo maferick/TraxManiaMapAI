@@ -4,7 +4,7 @@ version: 1
 category: mediocre_tech
 ingestion_snapshot: 2026-04-scale-1k
 released_at: '2026-04-22'
-author: gijs.vanderlaken@gmail.com
+author: maferick
 rationale: Auto-selected proxy set, NOT hand-curated. Pulled from the 2026-04-scale-1k
   ingestion snapshot as 20 TMX Tech-tagged maps with AwardCount = 0 (zero community
   upvotes), ordered deterministically by TMX id. 'Zero awards' means low popularity,
