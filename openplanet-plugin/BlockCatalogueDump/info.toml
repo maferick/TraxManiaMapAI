@@ -1,0 +1,12 @@
+name = "Block Catalogue Dump"
+author = "TraxManiaMapAI"
+category = "Utility"
+version = "0.1.0"
+
+# TM2020 only, same as the rig plugins. Reads the map-editor block
+# inventory (CGameCtnBlockInfo variants, units, clips) and writes an
+# NDJSON catalogue to PluginStorage. Read-only; never touches the map.
+siteid = 0
+
+[script]
+dependencies = []
