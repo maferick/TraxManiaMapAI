@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from src.catalogue.loader import (
     FACE_DELTAS,
+    FACE_NORTH,
     SIDE_FACES,
     BlockDef,
     opposite_face,
@@ -39,6 +40,14 @@ GRID_MAX = 42
 # blocks hand-placed in the editor land at y=9 (AutoSave.Map.Gbx,
 # 2026-07-25).
 GROUND_Y = 9
+
+# A gate's arrow points out of its local NORTH face. Empirical:
+# seed-42 run had three RoadTechCheckpoints; the two satisfying
+# rotate_face(north, d) == travel direction rendered correct arrows,
+# the one violating it rendered backwards (user-arbitrated,
+# 2026-07-25). Road-symmetric gates mesh at d and d+2 equally, so
+# alignment must be enforced, not left to candidate order.
+GATE_FORWARD_LOCAL_FACE = FACE_NORTH
 
 
 @dataclass(frozen=True)
@@ -193,6 +202,10 @@ class ClipWalker:
                     return True
                 if len(exits) != 1:
                     continue  # v0 walks linear routes only
+                if cand.waypoint in ("Checkpoint", "StartFinish"):
+                    # Gates must face the direction of travel.
+                    if rotate_face(GATE_FORWARD_LOCAL_FACE, cand.rotation) != exits[0][0]:
+                        continue
                 placements.append(Placement(cand.block_id, *target, cand.rotation))
                 occupied.add((target[0], target[2]))
                 next_face, next_clip = exits[0]

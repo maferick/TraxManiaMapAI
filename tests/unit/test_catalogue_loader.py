@@ -59,13 +59,34 @@ def _block(block_id: str, waypoint: str, clips: dict[str, list[str]]) -> dict:
 
 class TestRotationMath:
     def test_rotate_face_full_circle(self):
-        # Sign is empirical (game-verified 2026-07-25): one rotation
-        # step moves a north-looking face to WEST in our delta frame.
-        assert rotate_face(FACE_NORTH, 1) == FACE_WEST
-        assert rotate_face(FACE_EAST, 1) == FACE_NORTH
+        assert rotate_face(FACE_NORTH, 1) == FACE_EAST
+        assert rotate_face(FACE_WEST, 1) == FACE_NORTH
         assert rotate_face(FACE_SOUTH, 2) == FACE_NORTH
         for face in range(4):
             assert rotate_face(face, 4) == face
+
+    def test_ingame_calibration_table(self):
+        """Pin the RotationCalibration measurement (2026-07-25).
+
+        Isolated RoadTechCurve1 (catalogue local faces n+e) showed
+        its dead-end caps on these world directions per rotation.
+        This table came from in-game screenshots — if a refactor
+        breaks it, the refactor is wrong, not the table.
+        """
+        from src.catalogue.loader import FACE_DELTAS
+
+        observed = {
+            0: {(-1, 0, 0), (0, 0, 1)},
+            1: {(-1, 0, 0), (0, 0, -1)},
+            2: {(1, 0, 0), (0, 0, -1)},
+            3: {(1, 0, 0), (0, 0, 1)},
+        }
+        for d, expected in observed.items():
+            opened = {
+                FACE_DELTAS[rotate_face(f, d)]
+                for f in (FACE_NORTH, FACE_EAST)
+            }
+            assert opened == expected, f"rotation {d}: {opened} != {expected}"
 
     def test_opposite_face(self):
         assert opposite_face(FACE_NORTH) == FACE_SOUTH

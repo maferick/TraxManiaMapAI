@@ -76,6 +76,21 @@ def _assert_route_closed(placements: list[Placement]) -> None:
         )
 
 
+def _assert_gates_face_travel(placements: list[Placement], gate_ids: set[str]) -> None:
+    """Every gate's local-north face must point at the NEXT placement."""
+    from src.generation.clip_walker import GATE_FORWARD_LOCAL_FACE
+    from src.catalogue.loader import rotate_face
+
+    for a, b in zip(placements, placements[1:]):
+        if a.block_id not in gate_ids:
+            continue
+        forward = rotate_face(GATE_FORWARD_LOCAL_FACE, a.rotation)
+        delta = FACE_DELTAS[forward]
+        assert (a.x + delta[0], a.z + delta[2]) == (b.x, b.z), (
+            f"gate {a} arrow does not face next block {b}"
+        )
+
+
 class TestClipWalker:
     def test_route_closes_start_to_finish(self, synthetic_catalogue):
         walker = ClipWalker(
@@ -89,6 +104,7 @@ class TestClipWalker:
         assert any(p.block_id == "Checkpoint" for p in placements)
         assert len(placements) >= 20
         _assert_route_closed(placements)
+        _assert_gates_face_travel(placements, {"Checkpoint"})
 
     def test_deterministic_for_seed(self, synthetic_catalogue):
         ids = ["Start", "Finish", "Straight", "Curve"]
@@ -135,3 +151,4 @@ class TestRealCatalogueSmoke:
         assert placements[0].block_id == "RoadTechStart"
         assert placements[-1].block_id == "RoadTechFinish"
         _assert_route_closed(placements)
+        _assert_gates_face_travel(placements, {"RoadTechCheckpoint"})

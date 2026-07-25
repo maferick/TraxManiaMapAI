@@ -8,23 +8,28 @@ clips carry the same clip id — this module exposes exactly that
 relation, plus the rotation math needed to ask it for a block
 placed at any of the four grid directions.
 
-Face convention (world space, matching the Gbx ``Direction`` enum
-order North=0, East=1, South=2, West=3):
+Face convention — EMPIRICAL, calibrated in-game 2026-07-25 with the
+RotationCalibration map (isolated Curve1 at rotations 0..3; the
+game's yellow dead-end caps mark open faces):
 
-    face 0 = north = -z
-    face 1 = east  = +x
-    face 2 = south = +z
-    face 3 = west  = -x
+    rotation:              0        1        2        3
+    Curve1 (local n,e):  -x,+z    -x,-z    +x,-z    +x,+z
 
-A block placed with rotation ``d`` has its local face ``f`` looking
-at world face ``(f - d) % 4``. The sign is EMPIRICAL: the first
-in-game proof (2026-07-25, ClipWalkProof seed 42) placed with
-``(f + d)`` and produced the chirality signature — straights
-chained, half the curves opened into grass — proving the game's
-Direction enum rotates opposite to this module's face order in
-this delta frame. Multi-cell unit offsets rotate the same way,
-re-anchored so offsets stay non-negative (the placement coord
-stays the min corner).
+Which pins the model: a local face ``f`` at rotation ``d`` looks at
+world face ``(f + d) % 4``, where the world deltas are
+
+    face 0 = "north" = +z
+    face 1 = "east"  = -x
+    face 2 = "south" = -z
+    face 3 = "west"  = +x
+
+(The face NAMES follow the catalogue's clip keys; their world
+directions are the game's local-frame convention as measured — do
+not "correct" them to intuition. Two earlier wrong guesses shipped:
+``+d`` with mirrored deltas broke every curve, ``-d`` broke curves
+at even rotations only.) Multi-cell unit offsets rotate one ring
+step per ``d`` in the same sense, re-anchored so offsets stay
+non-negative (the placement coord stays the min corner).
 """
 from __future__ import annotations
 
@@ -43,12 +48,13 @@ FACE_SOUTH = 2
 FACE_WEST = 3
 SIDE_FACES = ("n", "e", "s", "w")
 
-# World-space cell delta for each side face.
+# World-space cell delta for each side face. EMPIRICAL — see module
+# docstring; calibrated against the game, not a naming intuition.
 FACE_DELTAS: dict[int, tuple[int, int, int]] = {
-    FACE_NORTH: (0, 0, -1),
-    FACE_EAST: (1, 0, 0),
-    FACE_SOUTH: (0, 0, 1),
-    FACE_WEST: (-1, 0, 0),
+    FACE_NORTH: (0, 0, 1),
+    FACE_EAST: (-1, 0, 0),
+    FACE_SOUTH: (0, 0, -1),
+    FACE_WEST: (1, 0, 0),
 }
 
 
@@ -58,7 +64,7 @@ def opposite_face(face: int) -> int:
 
 def rotate_face(face: int, direction: int) -> int:
     """World face a local side face looks at after rotating by ``direction``."""
-    return (face - direction) % 4
+    return (face + direction) % 4
 
 
 def rotate_offset(
@@ -77,11 +83,12 @@ def rotate_offset(
     if d == 0:
         return (x, y, z)
     if d == 1:
-        # Matches rotate_face's empirical sign (see module docstring).
-        return (z, y, sx - 1 - x)
+        # One ring step in the calibrated face sense (n->e means the
+        # +z-looking face turns to look at -x): (vx, vz) -> (-vz, vx).
+        return (sz - 1 - z, y, x)
     if d == 2:
         return (sx - 1 - x, y, sz - 1 - z)
-    return (sz - 1 - z, y, x)
+    return (z, y, sx - 1 - x)
 
 
 def rotated_size(size: tuple[int, int, int], direction: int) -> tuple[int, int, int]:
