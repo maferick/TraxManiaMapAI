@@ -37,9 +37,11 @@ _LOG = logging.getLogger(__name__)
 
 STAGE_VERSION = "face-transitions-v0.1"
 
-# Same route-clip scope as the walker: wall/scenery clips join
-# scenery, not road. Extend deliberately, family by family.
-DEFAULT_ROUTE_CLIPS = frozenset({"RoadTechFC"})
+# By default ALL clip families are counted — rows are keyed by
+# clip_id, so road priors (RoadTechFC, ...) and scenery priors
+# (DecoCliffVFC, ...) stay cleanly separable at query time. Pass an
+# explicit frozenset to restrict a build.
+ALL_CLIPS: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -104,19 +106,23 @@ def reset_face_transitions(conn: Connection) -> None:
 
 def _port_index(
     catalogue: dict[str, BlockDef],
-    route_clips: frozenset[str],
+    route_clips: frozenset[str] | None,
 ) -> dict[str, list[tuple[tuple[int, int, int], int, str]]]:
     """(block_id, rotation) -> list of (cell_offset, world_face, clip).
 
     Flattened to ``block_id -> per-rotation lists`` keyed
     ``f"{block_id}\\x00{rotation}"`` to keep lookups dict-simple.
+    ``route_clips=None`` indexes every clip family.
     """
     index: dict[str, list[tuple[tuple[int, int, int], int, str]]] = {}
     for block_id, block in catalogue.items():
         variant = block.variant("ground", 0)
         if variant is None:
             continue
-        local = [p for p in variant.side_ports() if p.clip_id in route_clips]
+        local = [
+            p for p in variant.side_ports()
+            if route_clips is None or p.clip_id in route_clips
+        ]
         if not local:
             continue
         for rotation in range(4):
@@ -136,7 +142,7 @@ def build_face_transitions(
     conn: Connection,
     catalogue: dict[str, BlockDef],
     limit: int | None = None,
-    route_clips: frozenset[str] = DEFAULT_ROUTE_CLIPS,
+    route_clips: frozenset[str] | None = ALL_CLIPS,
 ) -> FaceTransitionReport:
     report = FaceTransitionReport()
     ports_by_block_rot = _port_index(catalogue, route_clips)
@@ -166,7 +172,10 @@ def build_face_transitions(
             key = f"{block_type}\x00{int(rotation) % 4}"
             ports = ports_by_block_rot.get(key)
             if ports is None:
-                if f"{block_type}\x000" not in ports_by_block_rot:
+                # Unknown = truly absent from the catalogue (community
+                # custom blocks). Catalogue blocks without indexed
+                # clips are merely portless here, not unknown.
+                if str(block_type) not in catalogue:
                     report.placements_unknown_block += 1
                 continue
             for cell, face, clip in ports:
