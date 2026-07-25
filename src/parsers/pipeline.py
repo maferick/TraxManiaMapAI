@@ -211,7 +211,12 @@ def _block_row(
         yaw,
         pitch,
         roll,
-        json.dumps(dict(block)),
+        # raw_blob retired (2026-07): it duplicated the typed columns
+        # as JSON on every row — ~160 B x millions of placements, ~40%
+        # of the table. Provenance lives in the raw artifact file plus
+        # source_artifact_ids, per the storage-layout rule; re-deriving
+        # any field is a re-parse of the referenced artifact.
+        None,
         created_by_version,
         json.dumps(dict(source_artifact_ids)),
     )
