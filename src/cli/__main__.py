@@ -789,6 +789,35 @@ def _cmd_build_block_transition_counts(args: argparse.Namespace) -> int:
     return 0 if not report.errors else 1
 
 
+def _cmd_build_face_transitions(args: argparse.Namespace) -> int:
+    from src.catalogue.loader import load_catalogue
+    from src.constraints.face_transitions import (
+        build_face_transitions, reset_face_transitions,
+    )
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        catalogue = load_catalogue(args.catalogue)
+        if args.reset:
+            reset_face_transitions(conn)
+        report = build_face_transitions(
+            conn,
+            catalogue=catalogue,
+            limit=int(args.limit) if args.limit else None,
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "build-face-transitions: maps=%d placements=%d unknown_blocks=%d "
+        "transitions=%d rows=%d errors=%d",
+        report.maps_seen, report.placements_seen,
+        report.placements_unknown_block,
+        report.transitions_counted, report.rows_written,
+        len(report.errors),
+    )
+    return 0 if not report.errors else 1
+
+
 def _cmd_compute_finishability_proof(args: argparse.Namespace) -> int:
     from src.generation.finishability_proof import compute_for_map
     config = load_config(args.config)
@@ -2888,6 +2917,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="skip triple extraction; populate pairs only",
     )
     transition_counts_cmd.set_defaults(func=_cmd_build_block_transition_counts)
+
+    face_transitions_cmd = sub.add_parser(
+        "build-face-transitions",
+        help="Catalogue-era transition priors: count clip-matched port "
+             "meetings between grid placements (the game's own join "
+             "relation) into block_face_transitions. Covers every "
+             "parsed map via the corpus-finishable axiom. Soft signal "
+             "for generation weighting; never a hard constraint.",
+    )
+    face_transitions_cmd.add_argument(
+        "--catalogue", type=str, default="data/catalogue/catalogue.ndjson",
+        help="path to the block catalogue NDJSON",
+    )
+    face_transitions_cmd.add_argument(
+        "--limit", type=int, default=None,
+        help="cap the number of maps processed (for smoke runs)",
+    )
+    face_transitions_cmd.add_argument(
+        "--reset", action="store_true",
+        help="TRUNCATE block_face_transitions before rebuilding",
+    )
+    face_transitions_cmd.set_defaults(func=_cmd_build_face_transitions)
 
     block_geometry_cmd = sub.add_parser(
         "build-block-geometry",
