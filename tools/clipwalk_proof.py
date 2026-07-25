@@ -34,6 +34,14 @@ ROADTECH_SET = [
     "RoadTechCheckpoint",
     "RoadTechStraight",
     "RoadTechCurve1",
+    "RoadTechCurve2",
+    "RoadTechCurve3",
+    "RoadTechChicaneX2Left",
+    "RoadTechChicaneX2Right",
+    "RoadTechChicaneX3Left",
+    "RoadTechChicaneX3Right",
+    "RoadTechSlopeBase",
+    "RoadTechSlopeBase2",
 ]
 
 _UID_ALPHABET = (
