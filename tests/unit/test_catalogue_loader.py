@@ -59,8 +59,10 @@ def _block(block_id: str, waypoint: str, clips: dict[str, list[str]]) -> dict:
 
 class TestRotationMath:
     def test_rotate_face_full_circle(self):
-        assert rotate_face(FACE_NORTH, 1) == FACE_EAST
-        assert rotate_face(FACE_WEST, 1) == FACE_NORTH
+        # Sign is empirical (game-verified 2026-07-25): one rotation
+        # step moves a north-looking face to WEST in our delta frame.
+        assert rotate_face(FACE_NORTH, 1) == FACE_WEST
+        assert rotate_face(FACE_EAST, 1) == FACE_NORTH
         assert rotate_face(FACE_SOUTH, 2) == FACE_NORTH
         for face in range(4):
             assert rotate_face(face, 4) == face

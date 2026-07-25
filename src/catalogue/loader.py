@@ -17,11 +17,14 @@ order North=0, East=1, South=2, West=3):
     face 3 = west  = -x
 
 A block placed with rotation ``d`` has its local face ``f`` looking
-at world face ``(f + d) % 4``. Multi-cell unit offsets rotate
-clockwise about the footprint's own bounding box, re-anchored so
-offsets stay non-negative (the placement coord stays the min
-corner) — the same convention the game's editor uses for grid
-placement.
+at world face ``(f - d) % 4``. The sign is EMPIRICAL: the first
+in-game proof (2026-07-25, ClipWalkProof seed 42) placed with
+``(f + d)`` and produced the chirality signature — straights
+chained, half the curves opened into grass — proving the game's
+Direction enum rotates opposite to this module's face order in
+this delta frame. Multi-cell unit offsets rotate the same way,
+re-anchored so offsets stay non-negative (the placement coord
+stays the min corner).
 """
 from __future__ import annotations
 
@@ -55,7 +58,7 @@ def opposite_face(face: int) -> int:
 
 def rotate_face(face: int, direction: int) -> int:
     """World face a local side face looks at after rotating by ``direction``."""
-    return (face + direction) % 4
+    return (face - direction) % 4
 
 
 def rotate_offset(
@@ -74,10 +77,11 @@ def rotate_offset(
     if d == 0:
         return (x, y, z)
     if d == 1:
-        return (sz - 1 - z, y, x)
+        # Matches rotate_face's empirical sign (see module docstring).
+        return (z, y, sx - 1 - x)
     if d == 2:
         return (sx - 1 - x, y, sz - 1 - z)
-    return (z, y, sx - 1 - x)
+    return (sz - 1 - z, y, x)
 
 
 def rotated_size(size: tuple[int, int, int], direction: int) -> tuple[int, int, int]:
