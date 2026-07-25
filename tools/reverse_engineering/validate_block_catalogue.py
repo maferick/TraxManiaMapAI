@@ -90,6 +90,11 @@ def main(path_arg: str) -> int:
             fail(f"expected block missing: {block_id}")
 
     # --- soft stats -------------------------------------------------
+    # Runtime dumps carry the raw EWayPointType int; offline (GBX.NET)
+    # dumps carry the enum name. Normalise to names for the gate.
+    wp_names = {0: "Start", 1: "Finish", 2: "Checkpoint", 3: "None",
+                4: "StartFinish", 5: "Dispenser"}
+
     n_variants = 0
     n_units = 0
     with_clips = 0
@@ -97,7 +102,8 @@ def main(path_arg: str) -> int:
     waypoints = Counter()
     clip_ids = Counter()
     for rec in blocks.values():
-        waypoints[rec.get("waypoint")] += 1
+        wp = rec.get("waypoint")
+        waypoints[wp_names.get(wp, wp)] += 1
         block_has_clip = False
         for var in rec.get("variants", []):
             n_variants += 1
@@ -125,9 +131,8 @@ def main(path_arg: str) -> int:
         fail("no block carries any clip — clip buffers were not read")
     if multi_cell == 0:
         fail("no multi-cell variant found — Size was not read correctly")
-    # waypoint enum: 0=Start 1=Finish 2=Checkpoint
-    for wp, label in ((0, "Start"), (1, "Finish"), (2, "Checkpoint")):
-        if waypoints.get(wp, 0) == 0:
+    for label in ("Start", "Finish", "Checkpoint"):
+        if waypoints.get(label, 0) == 0:
             fail(f"no {label} blocks in catalogue")
 
     if fail.count:  # type: ignore[attr-defined]

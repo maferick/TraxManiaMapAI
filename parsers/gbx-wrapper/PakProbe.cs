@@ -67,7 +67,9 @@ internal static class PakProbe
         // With a derived key, Pak.Parse decrypts the directory. Without
         // one, we still open best-effort — some paks expose metadata
         // under the library's built-in header key even when private.
-        var pak = Pak.Parse(stream, key: pakKey, computeKey: true);
+        // (`computeKey` was dropped from the GBX.NET.PAK 2.x API after
+        // this file was written; key derivation is automatic now.)
+        var pak = Pak.Parse(stream, key: pakKey);
 
         string? titleId = null;
         bool isDataPrivate = false;
