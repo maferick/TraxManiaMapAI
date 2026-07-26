@@ -67,3 +67,6 @@ packlist.dat
 /packlist.dat
 .claude/
 data/catalogue/
+
+# scratch corpus dumps
+*.tsv
