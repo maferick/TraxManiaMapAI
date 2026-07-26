@@ -183,16 +183,17 @@ def build_supports(
             want = _footprint(pillar, p.x, y, p.z, rotation, catalogue)
             if not want or any(c in occupied for c in want):
                 continue
-            if single_cell:
-                if y == ground_y:
-                    variant = PILLAR_VARIANT_FOOT
-                elif y == ground_y + 1:
-                    variant = PILLAR_VARIANT_TRANSITION
-                else:
-                    variant = PILLAR_VARIANT_SHAFT
+            # The variant stack is a function of HEIGHT, not
+            # footprint, so it applies to wide pillars too. Leaving
+            # them unset defaulted every one to variant 0 — i.e. a
+            # column of "foot" pieces, which is what produced the
+            # mismatched panelling seen in-game on curve supports.
+            if y == ground_y:
+                variant = PILLAR_VARIANT_FOOT
+            elif y == ground_y + 1:
+                variant = PILLAR_VARIANT_TRANSITION
             else:
-                # Variant pattern unverified for wide pillars.
-                variant = None
+                variant = PILLAR_VARIANT_SHAFT
             supports.append(
                 Placement(pillar, p.x, y, p.z, rotation, variant=variant)
             )
