@@ -853,6 +853,66 @@ def _cmd_mine_placement_grammar(args: argparse.Namespace) -> int:
     return 0 if not report.errors else 1
 
 
+def _cmd_import_connection_probes(args: argparse.Namespace) -> int:
+    """Load probe_connections.py output into block_connection_probes."""
+    import hashlib
+    import json as _json
+
+    from src.storage.mariadb import cursor as _cursor
+
+    rows: list[dict] = []
+    meta: dict = {}
+    with Path(args.probes).open(encoding="utf-8") as fh:
+        for line in fh:
+            rec = _json.loads(line)
+            if rec.get("type") == "meta":
+                meta = rec
+            else:
+                rows.append(rec)
+    if not rows:
+        _LOG.error("no probe rows in %s", args.probes)
+        return 1
+    version = str(meta.get("schema", "connection-probes-v1"))
+    base_y = int(meta.get("base_y", 0))
+    environment = str(meta.get("environment", "Stadium2020"))
+
+    sql = (
+        "INSERT INTO block_connection_probes (probe_signature, block_a, "
+        "block_b, dx, dy, dz, rel_rotation, environment, map_count, "
+        "clip_matched, editor_a_placed, editor_b_placed, "
+        "offline_predicts_ok, base_y, created_by_version) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        "ON DUPLICATE KEY UPDATE "
+        "editor_a_placed=VALUES(editor_a_placed), "
+        "editor_b_placed=VALUES(editor_b_placed), "
+        "offline_predicts_ok=VALUES(offline_predicts_ok), "
+        "map_count=VALUES(map_count), "
+        "created_by_version=VALUES(created_by_version)"
+    )
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        with _cursor(conn) as cur:
+            for r in rows:
+                payload = "|".join(str(r[k]) for k in (
+                    "block_a", "block_b", "dx", "dy", "dz", "rel_rotation",
+                )) + f"|{environment}|{base_y}"
+                cur.execute(sql, (
+                    hashlib.sha256(payload.encode()).hexdigest(),
+                    r["block_a"], r["block_b"], r["dx"], r["dy"], r["dz"],
+                    r["rel_rotation"], environment, int(r["map_count"]),
+                    int(bool(r["clip_matched"])),
+                    int(bool(r["editor_a_placed"])),
+                    int(bool(r["editor_b_placed"])),
+                    int(bool(r["offline_predicts_ok"])), base_y, version,
+                ))
+        conn.commit()
+    finally:
+        conn.close()
+    _LOG.info("import-connection-probes: %d rows from %s", len(rows), args.probes)
+    return 0
+
+
 def _cmd_export_placement_grammar(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -3126,6 +3186,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="TRUNCATE block_placement_grammar before rebuilding",
     )
     grammar_cmd.set_defaults(func=_cmd_mine_placement_grammar)
+
+    probes_cmd = sub.add_parser(
+        "import-connection-probes",
+        help="Load tools/probe_connections.py output into "
+             "block_connection_probes, so the game's verdict on a pair "
+             "sits alongside the corpus count and the clip flag. Those "
+             "are three different questions and the table keeps them "
+             "in three columns.",
+    )
+    probes_cmd.add_argument(
+        "--probes", type=str,
+        default="data/catalogue/connection_probes.jsonl")
+    probes_cmd.set_defaults(func=_cmd_import_connection_probes)
 
     export_grammar_cmd = sub.add_parser(
         "export-placement-grammar",
