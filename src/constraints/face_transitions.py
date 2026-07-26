@@ -155,8 +155,17 @@ def build_face_transitions(
     counts: dict[_TransitionKey, int] = defaultdict(int)
     map_hits: dict[_TransitionKey, int] = defaultdict(int)
 
+    total_maps = len(maps)
     for map_id, environment in maps:
         report.maps_seen += 1
+        # Corpus-scale runs take tens of minutes; without this the
+        # stage is a black box until it finishes.
+        if report.maps_seen % 2000 == 0:
+            _LOG.info(
+                "face-transitions: %d/%d maps, %d transitions, %d keys",
+                report.maps_seen, total_maps,
+                report.transitions_counted, len(counts),
+            )
         with cursor(conn) as cur:
             cur.execute(_PLACEMENTS_SQL, (map_id,))
             rows = cur.fetchall()
