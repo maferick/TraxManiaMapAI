@@ -48,6 +48,26 @@ STAGE_VERSION = "route-jumps-v1"
 # structure, not air.
 MAX_JUMP_GAP = 6
 
+# A jump's take-off and landing must be DRIVABLE SURFACE. Without this
+# the table fills with scenery: the first run over 4000 maps returned
+# DecoPlatformBase -> DecoPlatformBase as its best-attested "jump" in
+# 323 maps, along with DecoHillSlope2Straight and WaterBase — scattered
+# decoration whose open faces happen to point at each other. Same
+# coincidence that made proximity useless, wearing a different hat.
+#
+# These are the game's own surface families (verified when the
+# transition table was mapped), not a guess at names.
+_SURFACE_PREFIXES = (
+    "RoadTech", "RoadDirt", "RoadBump", "RoadIce", "RoadWater",
+    "PlatformTech", "PlatformDirt", "PlatformIce", "PlatformGrass",
+    "PlatformPlastic", "PlatformWater", "OpenTechRoad", "OpenDirtRoad",
+    "Gate",
+)
+
+
+def _IS_ROUTE_SURFACE(name: str) -> bool:
+    return name.startswith(_SURFACE_PREFIXES) and "Wall" not in name
+
 
 @dataclass
 class JumpReport:
@@ -84,7 +104,8 @@ def extract_jumps(
     """Open-end-to-open-end gaps in one map. Returns (jumps, open_ends)."""
     placements = [
         (str(r[0]), int(r[1]) % 4, int(r[2]), int(r[3]), int(r[4]))
-        for r in rows if not _IS_SUPPORT(str(r[0]))
+        for r in rows
+        if not _IS_SUPPORT(str(r[0])) and _IS_ROUTE_SURFACE(str(r[0]))
     ]
     owner: dict[tuple[int, int, int], int] = {}
     cells_of: dict[int, list[tuple[int, int, int]]] = {}
