@@ -165,13 +165,13 @@ class TestJumps:
         )
         walker = GrammarWalker(
             catalogue, grammar, pool=["Start", "Tile", "Finish"],
-            seed=1, min_maps=1,
+            seed=1, min_maps=1, allow_jumps=True, gap_min_maps=1,
         )
         route = walker.generate(length=2, checkpoint_every=0)
         assert [p.z for p in route] == [route[0].z, route[0].z + 2,
                                         route[0].z + 4]
 
-    def test_jumps_can_be_switched_off(self, catalogue, tmp_path):
+    def test_jumps_are_off_by_default(self, catalogue, tmp_path):
         grammar = _grammar(
             tmp_path,
             {"Start": [["Tile", 2, 0, 500, 500, 0]],
@@ -179,10 +179,27 @@ class TestJumps:
         )
         walker = GrammarWalker(
             catalogue, grammar, pool=["Start", "Tile", "Finish"],
-            seed=1, min_maps=1, allow_jumps=False,
+            seed=1, min_maps=1,
         )
         with pytest.raises(RouteDeadEnd):
             walker.generate(length=2, checkpoint_every=0)
+
+    def test_a_thin_gap_move_is_refused_even_when_jumps_are_on(
+        self, catalogue, tmp_path
+    ):
+        """A real jump and a coincidence look identical bar breadth."""
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Tile", 2, 0, 40, 40, 0], ["Finish", 0, 0, 40, 40, 0]],
+             "Tile": [["Finish", 2, 0, 40, 40, 0]]},
+        )
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Finish"],
+            seed=1, min_maps=10, allow_jumps=True,  # gap bar becomes 100
+        )
+        # Only the adjacent Start -> Finish move clears the gap bar.
+        route = walker.generate(length=1, checkpoint_every=0)
+        assert [p.block_id for p in route] == ["Start", "Finish"]
 
 
 class TestDirectionalBlocks:

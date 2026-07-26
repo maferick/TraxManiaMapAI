@@ -73,8 +73,12 @@ def main() -> int:
     ap.add_argument("--min-maps", type=int, default=20,
                     help="grammar walker: a move must appear in this "
                          "many distinct corpus maps to be buildable")
-    ap.add_argument("--no-jumps", action="store_true",
-                    help="grammar walker: refuse moves with a gap")
+    ap.add_argument("--jumps", action="store_true",
+                    help="grammar walker: allow gap moves. Off by "
+                         "default — a real jump and two unrelated "
+                         "blocks three cells apart are the same row, "
+                         "and the second kind dominates. Enabling this "
+                         "raises the evidence bar for gaps tenfold")
     ap.add_argument("--priors", default="data/catalogue/face_priors.json")
     ap.add_argument("--rules", default="data/catalogue/pillar_rules.json")
     ap.add_argument("--template", default="data/catalogue/template48.Map.Gbx")
@@ -142,7 +146,7 @@ def main() -> int:
         walker = GrammarWalker(
             catalogue, PlacementGrammar.from_json(args.grammar), pool,
             seed=spec.seed, min_maps=args.min_maps,
-            allow_jumps=not args.no_jumps, block_bias=spec.bias,
+            allow_jumps=args.jumps, block_bias=spec.bias,
         )
     else:
         block_ids, clips = resolve(

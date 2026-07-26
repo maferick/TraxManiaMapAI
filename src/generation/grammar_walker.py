@@ -68,6 +68,14 @@ WALKER_VERSION = "grammar-walker-v0.1"
 # happened to land three cells apart), not to police style.
 DEFAULT_MIN_MAPS = 20
 
+# Gap moves (a target 2-3 cells away in XZ) need their own, much
+# higher bar. A real jump looks exactly like two unrelated blocks that
+# happen to sit three cells apart, and the second kind vastly
+# outnumbers the first: in a 50-map smoke run, 81% of surviving rows
+# were gaps. Breadth is the only thing separating them, so demand a
+# lot more of it, and stay off by default.
+GAP_MIN_MAPS_FACTOR = 10
+
 Cell = tuple[int, int, int]
 
 
@@ -145,13 +153,18 @@ class GrammarWalker:
         pool: list[str],
         seed: int,
         min_maps: int = DEFAULT_MIN_MAPS,
-        allow_jumps: bool = True,
+        allow_jumps: bool = False,
+        gap_min_maps: int | None = None,
         block_bias: dict[str, float] | None = None,
     ) -> None:
         self._rng = random.Random(seed)
         self._grammar = grammar
         self._min_maps = min_maps
         self._allow_jumps = allow_jumps
+        self._gap_min_maps = (
+            gap_min_maps if gap_min_maps is not None
+            else min_maps * GAP_MIN_MAPS_FACTOR
+        )
         self._bias = dict(block_bias or {})
         self._allow = frozenset(pool)
 
@@ -238,6 +251,8 @@ class GrammarWalker:
                 continue
             if incoming is not None and move.offset == incoming:
                 # No U-turn: the move that undoes the one just made.
+                continue
+            if move.is_gap and move.map_count < self._gap_min_maps:
                 continue
             out.append(move)
         return out
