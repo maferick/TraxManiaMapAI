@@ -36,6 +36,7 @@ holds up.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import random
 from dataclasses import dataclass
@@ -77,6 +78,22 @@ DEFAULT_MIN_MAPS = 20
 # were gaps. Breadth is the only thing separating them, so demand a
 # lot more of it, and stay off by default.
 GAP_MIN_MAPS_FACTOR = 10
+
+# How often a racing line may pass over ground it has already used.
+#
+# Measured over 201 corpus maps (route blocks only, walls and pillars
+# excluded): 95.2% of XZ columns under a racing line carry exactly ONE
+# route level, 4.2% carry two — a bridge crossing over an earlier
+# section — 0.5% three, 0.1% four. A real route almost never stacks on
+# itself; median distinct columns per route block is 0.98.
+#
+# Left unconstrained the walker produced 48% of its columns carrying
+# 2-4 levels, crammed into a 20x5 patch. Every block was connected and
+# no cell overlapped, and it still read as a heap of slabs rather than
+# a track, because nothing was pushing it to go anywhere. The cap is
+# the hard limit; the penalty reproduces the corpus's rate.
+MAX_LEVELS_PER_COLUMN = 2
+COLUMN_REUSE_PENALTY = 0.05
 
 Cell = tuple[int, int, int]
 
@@ -256,7 +273,7 @@ class GrammarWalker:
         w = float(move.map_count) * self._bias_for(move.block)
         return w * (1.5 if move.clip_matched else 1.0)
 
-    def _order(self, moves: list[Move]) -> list[Move]:
+    def _order(self, scored: list[tuple]) -> list:
         """Weighted order without replacement.
 
         Same rule as the clip walker's prior handling: weights decide
@@ -264,8 +281,8 @@ class GrammarWalker:
         keeps a turn, so a rare-but-legal move can still close a route
         the common ones dead-end on.
         """
-        items = [(m, self._weight(m)) for m in moves]
-        out: list[Move] = []
+        items = list(scored)
+        out: list = []
         while items:
             total = sum(w for _, w in items)
             if total <= 0:
@@ -321,6 +338,11 @@ class GrammarWalker:
         occupied: set[Cell] = {
             _shift(origin, c) for c in self._cells[(start_id, start_rot)]
         }
+        # How many route levels stand over each XZ column. Keeps the
+        # line from coiling into a pile — see MAX_LEVELS_PER_COLUMN.
+        columns: collections.Counter = collections.Counter(
+            (c[0], c[2]) for c in occupied
+        )
         expansions = 0
 
         def in_bounds(cells: list[Cell]) -> bool:
@@ -359,7 +381,8 @@ class GrammarWalker:
                 for c in self._cells[(prev.block_id, prev.rotation)]
             }
 
-            for move in self._order(moves):
+            scored: list[tuple] = []
+            for move in moves:
                 anchor, rotation = move.apply(here, prev.rotation)
                 cells = self._cells.get((move.block, rotation))
                 if cells is None:
@@ -383,16 +406,31 @@ class GrammarWalker:
                     rotation, travel
                 ):
                     continue
+                cols = {(c[0], c[2]) for c in footprint}
+                if any(
+                    columns[col] >= MAX_LEVELS_PER_COLUMN for col in cols
+                ):
+                    continue
+                weight = self._weight(move)
+                if any(columns[col] for col in cols):
+                    # Passing back over ground the line already covers.
+                    # Legal — 4.2% of corpus columns are a bridge — but
+                    # it should stay that rare.
+                    weight *= COLUMN_REUSE_PENALTY
+                scored.append(((move, anchor, rotation, footprint, cols), weight))
 
+            for move, anchor, rotation, footprint, cols in self._order(scored):
                 nxt = Placement(move.block, *anchor, rotation)
                 placements.append(nxt)
                 if want == "Finish":
                     return True
                 occupied.update(footprint)
+                columns.update(cols)
                 if dfs(nxt, _reverse_offset(move), steps + 1):
                     return True
                 placements.pop()
                 occupied.difference_update(footprint)
+                columns.subtract(cols)
             return False
 
         if not dfs(placements[0], None, 1):

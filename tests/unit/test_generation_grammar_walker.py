@@ -404,3 +404,60 @@ class TestFootprintContact:
         )
         route = walker.generate(length=1, checkpoint_every=0)
         assert route[1].y == route[0].y + 1
+
+
+class TestRouteSpread:
+    """A racing line should not pile up on itself.
+
+    Measured over 201 corpus maps: 95.2% of XZ columns under a route
+    carry exactly one route level, 4.2% carry two (a bridge), 0.5%
+    three. An unconstrained walker produced 48% of its columns carrying
+    2-4 — every block connected, nothing overlapping, and it read as a
+    heap of slabs rather than a track.
+    """
+
+    def test_a_column_is_never_used_more_than_twice(
+        self, catalogue, tmp_path
+    ):
+        import collections
+
+        # Every move continues straight or turns, so an unconstrained
+        # walker is free to coil back over itself.
+        grammar = _grammar(
+            tmp_path,
+            {b: [[t, o, r, 900, 900, 0]
+                 for t in ("Tile", "Finish") for o in (0,) for r in range(4)]
+             for b in ("Start", "Tile")},
+        )
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Finish"],
+            seed=4, min_maps=1, route_only=False,
+        )
+        route = walker.generate(length=40, checkpoint_every=0)
+        columns = collections.Counter((p.x, p.z) for p in route)
+        assert max(columns.values()) <= 2, (
+            f"column {columns.most_common(1)} carries too many levels"
+        )
+
+    def test_reuse_stays_rare(self, catalogue, tmp_path):
+        import collections
+
+        grammar = _grammar(
+            tmp_path,
+            {b: [[t, o, r, 900, 900, 0]
+                 for t in ("Tile", "Finish") for o in (0,) for r in range(4)]
+             for b in ("Start", "Tile")},
+        )
+        reused = total = 0
+        for seed in range(6):
+            walker = GrammarWalker(
+                catalogue, grammar, pool=["Start", "Tile", "Finish"],
+                seed=seed, min_maps=1, route_only=False,
+            )
+            route = walker.generate(length=30, checkpoint_every=0)
+            columns = collections.Counter((p.x, p.z) for p in route)
+            reused += sum(1 for n in columns.values() if n > 1)
+            total += len(columns)
+        # The corpus sits near 4.7% of columns reused. Anything under a
+        # fifth means the line is going somewhere rather than coiling.
+        assert reused / total < 0.20, f"{reused}/{total} columns reused"
