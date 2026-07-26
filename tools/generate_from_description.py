@@ -70,7 +70,7 @@ def main() -> int:
     ap.add_argument("--scenery", type=float, default=0.0,
                     help="vegetation density 0.0-1.0 (0 = none)")
     ap.add_argument(
-        "--item-donor", default="data/catalogue/item_donor.Map.Gbx",
+        "--item-donor", default=None,
         help="map to borrow structurally-complete anchored objects from. "
              "Required for scenery: GBX.NET cannot author chunk "
              "0x03101005, so items are retargeted from real ones "
@@ -136,6 +136,14 @@ def main() -> int:
             palette=args.palette, density=args.scenery,
         )
 
+    donors = (
+        [Path(args.item_donor).resolve()] if args.item_donor
+        else sorted(Path("data/catalogue").glob("donor_*.Map.Gbx"))
+    )
+    if items and not donors:
+        _LOG.error("no item donor maps found; run scan-item-donors first")
+        return 2
+
     slug = (spec.description or spec.family).lower()
     slug = "".join(c if c.isalnum() else "-" for c in slug).strip("-")[:40]
     out = Path(args.out) if args.out else (
@@ -157,9 +165,10 @@ def main() -> int:
             }
             for p in placements
         ],
-        "item_template_path": (
-            str(Path(args.item_donor).resolve()) if items else None
-        ),
+        # Donor pool: corpus maps that already contain the species we
+        # clone. No single map has them all, so several are pooled.
+        "item_template_path": (str(donors[0]) if items and donors else None),
+        "item_template_paths": [str(d) for d in donors[1:]] if items else [],
         "items": [
             {"name": it.name, "x": it.x, "y": it.y, "z": it.z,
              "yaw": it.yaw, "pitch": it.pitch, "roll": it.roll}

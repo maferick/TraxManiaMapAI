@@ -175,20 +175,28 @@ internal static class MapBuilder
         var missingModels = new List<string>();
         if (args.Items is { Count: > 0 } && !string.IsNullOrWhiteSpace(args.ItemTemplatePath))
         {
-            var template = Gbx.ParseNode<CGameCtnChallenge>(args.ItemTemplatePath)
-                ?? throw new InvalidDataException(
-                    $"item donor is not a map: {args.ItemTemplatePath}");
-
-            // Index complete, non-waypoint donors by model id. Waypoint
-            // objects carry start/finish metadata we must not clone.
+            // Index complete, non-waypoint donors by model id across
+            // every donor map. Waypoint objects carry start/finish
+            // metadata we must not clone.
             var byModel = new Dictionary<string, CGameCtnAnchoredObject>(
                 StringComparer.OrdinalIgnoreCase);
-            foreach (var o in template.AnchoredObjects ?? new List<CGameCtnAnchoredObject>())
+            var donorPaths = new List<string> { args.ItemTemplatePath! };
+            if (args.ItemTemplatePaths is { Count: > 0 })
+                donorPaths.AddRange(args.ItemTemplatePaths);
+            foreach (var donorPath in donorPaths.Distinct())
             {
-                if (o.WaypointSpecialProperty is not null) continue;
-                if (o.Chunks.Count < 3) continue;
-                var id = o.ItemModel.Id.ToString();
-                if (id.Length > 0 && !byModel.ContainsKey(id)) byModel[id] = o;
+                if (!File.Exists(donorPath)) continue;
+                CGameCtnChallenge? template;
+                try { template = Gbx.ParseNode<CGameCtnChallenge>(donorPath); }
+                catch { continue; }
+                foreach (var o in template?.AnchoredObjects
+                         ?? new List<CGameCtnAnchoredObject>())
+                {
+                    if (o.WaypointSpecialProperty is not null) continue;
+                    if (o.Chunks.Count < 3) continue;
+                    var id = o.ItemModel.Id.ToString();
+                    if (id.Length > 0 && !byModel.ContainsKey(id)) byModel[id] = o;
+                }
             }
             if (byModel.Count == 0)
             {
@@ -283,6 +291,12 @@ internal static class MapBuilder
         /// </summary>
         [JsonPropertyName("item_template_path")]
         public string? ItemTemplatePath { get; set; }
+        /// <summary>
+        /// Extra donor maps. No single corpus map carries every species,
+        /// so donors are pooled and indexed by model.
+        /// </summary>
+        [JsonPropertyName("item_template_paths")]
+        public List<string>? ItemTemplatePaths { get; set; }
     }
 
     private sealed class BuildItemArg

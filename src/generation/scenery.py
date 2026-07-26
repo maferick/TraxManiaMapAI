@@ -47,15 +47,22 @@ GROUND_ITEM_Y = 8.0
 # Nadeo Stadium vegetation items, verified present in the game's
 # ItemInventory. Grouped so a spec can ask for a mood rather than
 # naming models.
+# Species are limited to those a donor map can supply, because items are
+# placed by CLONING a real anchored object (see MapBuilder: assigning
+# ItemModel corrupts the object, so a model can only come from a map that
+# already uses it). These eight were located in the ingested corpus by
+# ``scan-item-donors`` and confirmed rendering in game.
+#
+# To add a species: scan the corpus for a map containing it, add that map
+# to the donor pool, then list it here.
 PALETTES: dict[str, tuple[str, ...]] = {
-    "spring": (
-        "SpringTreeTall", "SpringTreeBig", "SpringTreeMedium",
-        "SpringTreeSmall", "SpringTreeVerySmall",
-        "SpringCherryTree", "CherryTreeMedium",
-    ),
-    "summer": ("SummerPalmTree", "PalmTreeMedium", "PalmTreeSmall"),
-    "conifer": ("FirTall", "FirMedium", "CypressTall"),
-    "desert": ("CactusMedium", "CactusVerySmall"),
+    "spring": ("SpringTreeTall", "SpringTreeBig", "SpringTreeMedium",
+               "CherryTreeMedium"),
+    "summer": ("PalmTreeMedium", "SpringTreeBig", "SpringTreeMedium"),
+    "conifer": ("FirMedium", "CypressTall", "SpringTreeTall"),
+    "desert": ("CactusMedium", "PalmTreeMedium"),
+    "mixed": ("SpringTreeTall", "CherryTreeMedium", "FirMedium",
+              "CypressTall", "SpringTreeBig"),
 }
 DEFAULT_PALETTE = "spring"
 
