@@ -73,6 +73,10 @@ def main() -> int:
         help="face_priors_v1 JSON (export-face-priors); enables "
              "corpus-weighted candidate ordering",
     )
+    parser.add_argument(
+        "--supports", action="store_true",
+        help="fill columns under elevated route blocks with pillars",
+    )
     args = parser.parse_args()
 
     catalogue = load_catalogue(args.catalogue)
@@ -83,6 +87,14 @@ def main() -> int:
     walker = ClipWalker(catalogue, ROADTECH_SET, seed=args.seed, priors=priors)
     placements = walker.generate(args.length, args.checkpoint_every)
     _LOG.info("route: %d blocks (seed=%d)", len(placements), args.seed)
+
+    if args.supports:
+        from src.generation.supports import build_supports
+        pillars = build_supports(placements, catalogue)
+        # Route first: supports are appended, never displacing route
+        # blocks, and the route list above is already final.
+        placements = placements + pillars
+        _LOG.info("with supports: %d blocks total", len(placements))
 
     request = {
         "base_path": str(Path(args.template).resolve()),
