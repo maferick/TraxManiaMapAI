@@ -2,16 +2,25 @@
 
 The end-to-end path, all offline:
 
-    description -> MapSpec -> ClipWalker route -> support pillars
+    description -> MapSpec -> route -> support pillars -> scenery
                 -> emit-map-from-blocks -> .Map.Gbx
 
 Nothing here needs the game running. The editor bridge
 (``tools/tm_mcp``) is only ever used to learn rules and verify them;
 generation itself stays headless so it can run in batch.
 
+Two walkers build the route, and the spec picks one:
+
+* ``clip`` joins blocks by matching route-clips — the relation the
+  game snaps together. Proven, and limited to a single road family.
+* ``grammar`` joins them by what the corpus was observed to contain.
+  Slower to trust, but it is the only one that can build platform
+  surfaces, mix families, or place a clipless gate.
+
 Examples:
     python tools/generate_from_description.py "flowy dirt map, 40 blocks"
     python tools/generate_from_description.py "twisty technical ice, 3 cps" --seed 9
+    python tools/generate_from_description.py "long dirt and plastic map"
     python tools/generate_from_description.py --spec myspec.json
 """
 from __future__ import annotations
