@@ -58,6 +58,32 @@ MAX_Y = GROUND_Y + 10
 # alignment must be enforced, not left to candidate order.
 GATE_FORWARD_LOCAL_FACE = FACE_NORTH
 
+# Waypoint kinds whose arrow must follow travel.
+DIRECTIONAL_WAYPOINTS = ("Checkpoint", "StartFinish")
+
+# Blocks with a DIRECTIONAL EFFECT but no waypoint kind. Their road is
+# 180-degree symmetric, so clips accept rotation d and d+2 equally,
+# while the effect only works one way — a booster shoves the car along
+# its arrow. Left unconstrained the walker picks at random and roughly
+# half come out backwards (user-reported after a tight turn,
+# 2026-07-26; the gate fix above had simply never been generalised).
+#
+# Matched as substrings of the block id, so one entry covers every
+# surface family (RoadTechSpecialBoost, RoadDirtSpecialTurbo, ...).
+# Curated on purpose: "is this effect directional?" cannot be derived
+# from clip geometry, so it cannot be harvested and has to be declared.
+DIRECTIONAL_BLOCK_PATTERNS = (
+    "SpecialBoost",
+    "SpecialTurbo",
+)
+
+
+def _is_directional(oriented: "_Oriented") -> bool:
+    if oriented.waypoint in DIRECTIONAL_WAYPOINTS:
+        return True
+    return any(pat in oriented.block_id for pat in DIRECTIONAL_BLOCK_PATTERNS)
+
+
 # Clips the route is allowed to travel over. Everything else on a
 # block (wall faces, slope-surface joints, diagonal road families)
 # is invisible to the walker in v0.2.
@@ -325,8 +351,9 @@ class ClipWalker:
                         return True
                     if len(exits) != 1:
                         continue
-                    if cand.waypoint in ("Checkpoint", "StartFinish"):
-                        # Gates must face the direction of travel.
+                    if _is_directional(cand):
+                        # Gates and boosters must face travel: their
+                        # geometry is symmetric but their arrow is not.
                         forward = rotate_face(
                             GATE_FORWARD_LOCAL_FACE, cand.rotation
                         )

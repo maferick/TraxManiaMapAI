@@ -249,3 +249,62 @@ class TestRealCatalogueSmoke:
         assert placements[-1].block_id == "RoadTechFinish"
         _assert_route_closed(placements)
         _assert_gates_face_travel(placements, {"RoadTechCheckpoint"})
+
+
+class TestDirectionalBlocks:
+    """Blocks whose EFFECT has a direction must face travel.
+
+    Their road is 180-degree symmetric so clips accept rotation d and
+    d+2 equally; only the arrow distinguishes them. Boosters shipped
+    backwards roughly half the time because the gate rule had not been
+    generalised to them (user-reported, 2026-07-26).
+    """
+
+    @pytest.fixture()
+    def catalogue(self, tmp_path):
+        records = [
+            _block("Start", "Start", {"n": [CLIP]}),
+            _block("Finish", "Finish", {"s": [CLIP]}),
+            _block("Straight", "None", {"n": [CLIP], "s": [CLIP]}),
+            # A curve, so the route can turn instead of running
+            # straight off the grid before reaching the length.
+            _block("Curve", "None", {"n": [CLIP], "e": [CLIP]}),
+            # Symmetric road, directional effect, no waypoint kind.
+            _block("RoadTechSpecialBoost", "None", {"n": [CLIP], "s": [CLIP]}),
+            _block("RoadTechSpecialTurbo", "None", {"n": [CLIP], "s": [CLIP]}),
+        ]
+        path = tmp_path / "catalogue.ndjson"
+        lines = [json.dumps({"type": "meta", "schema": "block_catalogue_v1"})]
+        lines += [json.dumps(r) for r in records]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        (tmp_path / "catalogue.done.json").write_text("{}", encoding="utf-8")
+        return load_catalogue(path)
+
+    def test_boosters_always_face_travel(self, catalogue):
+        from src.generation.clip_walker import (
+            DIRECTIONAL_BLOCK_PATTERNS,
+            GATE_FORWARD_LOCAL_FACE,
+            ClipWalker,
+        )
+        from src.catalogue.loader import rotate_face
+
+        ids = ["Start", "Finish", "Straight", "Curve",
+               "RoadTechSpecialBoost", "RoadTechSpecialTurbo"]
+        # Several seeds: an unconstrained walker got ~half right by
+        # luck, so one seed proves nothing.
+        for seed in range(6):
+            route = ClipWalker(catalogue, ids, seed=seed).generate(20, 0)
+            placed = [
+                p for p in route
+                if any(pat in p.block_id for pat in DIRECTIONAL_BLOCK_PATTERNS)
+            ]
+            assert placed, f"seed {seed} used no directional blocks"
+            for a, b in zip(route, route[1:]):
+                if not any(pat in a.block_id
+                           for pat in DIRECTIONAL_BLOCK_PATTERNS):
+                    continue
+                forward = rotate_face(GATE_FORWARD_LOCAL_FACE, a.rotation)
+                dx, _dy, dz = FACE_DELTAS[forward]
+                assert (a.x + dx, a.z + dz) == (b.x, b.z), (
+                    f"seed {seed}: {a} points away from next block {b}"
+                )
