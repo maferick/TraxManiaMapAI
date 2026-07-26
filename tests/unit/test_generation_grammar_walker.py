@@ -90,9 +90,11 @@ class TestRouteConstruction:
         assert route[0].block_id == "Start"
         assert route[-1].block_id == "Finish"
         assert len(route) == 7
-        # A straight line north from the origin.
+        # A straight line. Which way it points depends on the start
+        # rotation, so assert monotonic rather than increasing.
         zs = [p.z for p in route]
-        assert zs == sorted(zs) and len(set(zs)) == len(zs)
+        assert zs in (sorted(zs), sorted(zs, reverse=True))
+        assert len(set(zs)) == len(zs)
 
     def test_route_does_not_overlap_itself(self, catalogue, tmp_path):
         grammar = _grammar(
@@ -171,8 +173,8 @@ class TestJumps:
             route_only=False,
         )
         route = walker.generate(length=2, checkpoint_every=0)
-        assert [p.z for p in route] == [route[0].z, route[0].z + 2,
-                                        route[0].z + 4]
+        steps = [b.z - a.z for a, b in zip(route, route[1:])]
+        assert steps in ([2, 2], [-2, -2])
 
     def test_jumps_are_off_by_default(self, catalogue, tmp_path):
         grammar = _grammar(
@@ -461,3 +463,82 @@ class TestRouteSpread:
         # The corpus sits near 4.7% of columns reused. Anything under a
         # fifth means the line is going somewhere rather than coiling.
         assert reused / total < 0.20, f"{reused}/{total} columns reused"
+
+
+class TestClipPreference:
+    """Use the join flag the corpus already carries.
+
+    TM2020 draws a yellow-and-black dead-end barrier wherever a road
+    end is not joined. clip_matched is the game's own "these two
+    surfaces meet" flag and every grammar row carries it; treating it
+    as a mild preference rather than the test put 27 barriers in a
+    100-block map.
+    """
+
+    def test_a_clip_matched_move_wins_over_a_far_more_common_one(
+        self, catalogue, tmp_path
+    ):
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Tile", 0, 0, 5000, 5000, 0],    # popular, no clip
+                       ["Boost", 0, 0, 30, 30, 1]],      # rare, clips
+             "Boost": [["Finish", 0, 0, 900, 900, 1]],
+             "Tile": [["Finish", 0, 0, 900, 900, 1]]},
+        )
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Boost", "Finish"],
+            seed=2, min_maps=1, route_only=False,
+        )
+        route = walker.generate(length=2, checkpoint_every=0)
+        # 30 maps beats 5000 when the 30 is the one the game snaps.
+        assert route[1].block_id == "Boost"
+
+    def test_a_block_with_no_clipped_option_still_moves(
+        self, catalogue, tmp_path
+    ):
+        """PlatformPlasticStart has nine successors and none of them clip.
+
+        A blanket clip requirement would strand every platform gate, so
+        the rule is structural: clip-only where clip exists at all.
+        """
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Tile", 0, 0, 200, 200, 0]],
+             "Tile": [["Finish", 0, 0, 900, 900, 1]]},
+        )
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Finish"],
+            seed=1, min_maps=1, route_only=False,
+        )
+        route = walker.generate(length=2, checkpoint_every=0)
+        assert [p.block_id for p in route] == ["Start", "Tile", "Finish"]
+
+    def test_a_weak_non_clip_move_is_dropped_when_no_clip_exists(
+        self, catalogue, tmp_path
+    ):
+        """Falling back to non-clip is not a licence to take anything."""
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Tile", 0, 0, 12, 12, 0],       # too thin
+                       ["Finish", 0, 0, 400, 400, 0]]},  # well attested
+        )
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Finish"],
+            seed=1, min_maps=10, route_only=False,
+        )
+        route = walker.generate(length=1, checkpoint_every=0)
+        assert [p.block_id for p in route] == ["Start", "Finish"]
+
+
+class TestRestarts:
+    def test_a_seed_still_maps_to_one_route(self, catalogue, tmp_path):
+        grammar = _grammar(
+            tmp_path, _straight_rules("Start", "Tile", "Cp"))
+        runs = [
+            GrammarWalker(
+                catalogue, grammar, pool=["Start", "Tile", "Cp", "Finish"],
+                seed=5, min_maps=1,
+            ).generate(length=8, checkpoint_every=0)
+            for _ in range(3)
+        ]
+        assert all(r == runs[0] for r in runs)

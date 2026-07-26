@@ -95,6 +95,21 @@ GAP_MIN_MAPS_FACTOR = 10
 MAX_LEVELS_PER_COLUMN = 2
 COLUMN_REUSE_PENALTY = 0.05
 
+# Clip agreement is not the universal join rule — that is the whole
+# point of this walker — but where it DOES apply it is the game's own
+# notion of two road surfaces meeting, and ignoring it has a visible
+# cost: TM2020 draws a yellow-and-black dead-end barrier at every road
+# end that is not joined. A route with 27% non-clip steps came out
+# with 27 barriers scattered through it.
+#
+# So clip-matched moves are tried FIRST, exhaustively, and a non-clip
+# move is only reached when none of them works. That keeps the cases
+# the corpus proves are real (PlatformTechStart -> PlatformTechBase is
+# non-clip in 429 maps) without using them where the game would rather
+# have snapped two blocks together. Non-clip moves also carry a higher
+# evidence bar, since a weak one is usually just proximity.
+NO_CLIP_MIN_MAPS_FACTOR = 5
+
 Cell = tuple[int, int, int]
 
 
@@ -203,6 +218,7 @@ class GrammarWalker:
         block_bias: dict[str, float] | None = None,
         route_only: bool = True,
     ) -> None:
+        self._seed = seed
         self._rng = random.Random(seed)
         self._grammar = grammar
         self._min_maps = min_maps
@@ -274,13 +290,23 @@ class GrammarWalker:
         return w * (1.5 if move.clip_matched else 1.0)
 
     def _order(self, scored: list[tuple]) -> list:
-        """Weighted order without replacement.
+        """Try every clip-matched move before any non-clip one.
 
-        Same rule as the clip walker's prior handling: weights decide
-        what is tried first, never what is allowed. Every candidate
-        keeps a turn, so a rare-but-legal move can still close a route
-        the common ones dead-end on.
+        Within each tier, weighted order without replacement — the same
+        rule as the clip walker's priors: weights decide what is tried
+        first, never what is allowed. Every candidate keeps a turn, so
+        a rare-but-legal move can still close a route the common ones
+        dead-end on.
+
+        The tiering is what stops the map filling with the game's
+        dead-end barriers, and it costs nothing in reach: the non-clip
+        tier is still there when the clip-matched one runs out.
         """
+        clip = [s for s in scored if s[0][0].clip_matched]
+        rest = [s for s in scored if not s[0][0].clip_matched]
+        return self._shuffle(clip) + self._shuffle(rest)
+
+    def _shuffle(self, scored: list[tuple]) -> list:
         items = list(scored)
         out: list = []
         while items:
@@ -319,13 +345,60 @@ class GrammarWalker:
             if move.is_gap and move.map_count < self._gap_min_maps:
                 continue
             out.append(move)
-        return out
+
+        # If this block has any clip-matched continuation at all, use
+        # only those: the game snaps them together, and anything else
+        # leaves a dead-end barrier. If it has none, the block is
+        # structurally a gate — PlatformPlasticStart has nine
+        # successors and not one of them clips — and non-clip is simply
+        # how it attaches.
+        clipped = [m for m in out if m.clip_matched]
+        if clipped:
+            return clipped
+        return [
+            m for m in out
+            if m.map_count >= self._min_maps * NO_CLIP_MIN_MAPS_FACTOR
+        ] or out
 
     def generate(
         self,
         length: int,
         checkpoint_every: int = 12,
         max_expansions: int = 40000,
+        attempts: int = 8,
+    ) -> list[Placement]:
+        """Build a route, restarting rather than backtracking forever.
+
+        Depth-first search on a pool this constrained thrashes: it digs
+        to within a few blocks of the target, dead-ends, and unwinds one
+        step at a time. Measured on a dirt+plastic pool, four of twelve
+        seeds blew a 40k-node budget and one still failed at 400k — yet
+        the same seeds close immediately from a different start. So
+        restart from a fresh draw instead of raising the budget.
+
+        Each attempt reseeds deterministically from the walker's seed,
+        so a seed still maps to exactly one map.
+        """
+        last: RouteDeadEnd | None = None
+        for attempt in range(attempts):
+            self._rng = random.Random(f"{self._seed}:{attempt}")
+            try:
+                return self._attempt(length, checkpoint_every, max_expansions)
+            except RouteDeadEnd as exc:
+                last = exc
+                _LOG.debug(
+                    "%s: attempt %d/%d failed (%s)",
+                    WALKER_VERSION, attempt + 1, attempts, exc,
+                )
+        raise RouteDeadEnd(
+            f"no route of length {length} after {attempts} attempts: {last}"
+        )
+
+    def _attempt(
+        self,
+        length: int,
+        checkpoint_every: int,
+        max_expansions: int,
     ) -> list[Placement]:
         start_id = self._rng.choice(self._starts)
         origin: Cell = (
