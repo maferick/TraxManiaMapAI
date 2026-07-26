@@ -73,6 +73,10 @@ class Placement:
     y: int
     z: int
     rotation: int
+    # Block variant index; None = emitter default. Only the support
+    # pass sets this (the game's pillar stack uses variant to pick
+    # foot / transition / shaft meshes).
+    variant: int | None = None
 
 
 @dataclass(frozen=True)

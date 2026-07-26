@@ -82,10 +82,36 @@ class TestBuildSupports:
         assert all(p.block_id == "TrackWallCurve2Pillar" for p in pillars)
         assert [p.y for p in pillars] == [GROUND_Y, GROUND_Y + 1, GROUND_Y + 2]
 
-    def test_pillar_inherits_anchor_and_rotation(self, catalogue):
+    def test_wide_pillar_inherits_anchor_and_rotation(self, catalogue):
         route = [Placement("RoadTechCurve2", 4, GROUND_Y + 1, 6, 3)]
         pillars = build_supports(route, catalogue)
         assert [(p.x, p.z, p.rotation) for p in pillars] == [(4, 6, 3)]
+
+    def test_single_cell_stack_matches_game_recipe(self, catalogue):
+        """Reproduces the observed auto-pillar stack exactly.
+
+        Ground truth from a hand-placed RoadTechStraight at y=18:
+        nine TrackWallStraightPillar, all facing North, variants
+        1 (shaft) down to 5 (transition) then 0 (foot).
+        """
+        from src.generation.supports import (
+            PILLAR_VARIANT_FOOT,
+            PILLAR_VARIANT_SHAFT,
+            PILLAR_VARIANT_TRANSITION,
+        )
+        route = [Placement("RoadTechStraight", 15, GROUND_Y + 9, 24, 2)]
+        pillars = build_supports(route, catalogue)
+        assert len(pillars) == 9
+        assert all(p.block_id == DEFAULT_PILLAR for p in pillars)
+        # North regardless of the road's rotation (2 = South)
+        assert all(p.rotation == 0 for p in pillars)
+        by_y = {p.y: p.variant for p in pillars}
+        assert by_y[GROUND_Y] == PILLAR_VARIANT_FOOT
+        assert by_y[GROUND_Y + 1] == PILLAR_VARIANT_TRANSITION
+        assert all(
+            by_y[y] == PILLAR_VARIANT_SHAFT
+            for y in range(GROUND_Y + 2, GROUND_Y + 9)
+        )
 
     def test_pillars_never_intersect_the_route(self, catalogue):
         route = [

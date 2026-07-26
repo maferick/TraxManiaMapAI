@@ -9,17 +9,31 @@ any road block), and inspection of real maps shows the rule is
 mechanical — every column under an elevated block is filled from
 ground level up to the block.
 
-v2 places ONE footprint-matched pillar per level, at the block's own
-anchor and rotation. v1's per-cell 1x1 fill was structurally valid
-but visually wrong: under a wide curve, 1x1 pillars tile into a
-solid concrete plateau instead of a support that follows the road
-(confirmed in-game 2026-07-26 against a hand-placed reference).
+v3 replicates what the game itself writes. The editor auto-generates
+pillars when a human places an elevated block, but that only happens
+on interactive placement — a map written straight to .Map.Gbx gets
+none, and merely re-saving it in the editor does not backfill them
+(both verified in-game 2026-07-26).
 
-The ``TrackWall*Pillar`` family mirrors the road catalogue almost
-exactly — ``RoadTechCurve2`` -> ``TrackWallCurve2Pillar`` (both
-2x1x2), chicanes included — so the mapping is a name rewrite with a
-footprint assertion. Blocks with no matching pillar (gates, slopes)
-are 1x1 in XZ and fall back to ``TrackWallStraightPillar``.
+Ground truth, from diffing a map before/after one hand-placed
+``RoadTechStraight`` at y=18 (the game added exactly nine blocks):
+
+    TrackWallStraightPillar (x,17,z) dir=North variant=1   <- shaft
+    ... variant=1 for every level down to y=11 ...
+    TrackWallStraightPillar (x,10,z) dir=North variant=5   <- transition
+    TrackWallStraightPillar (x, 9,z) dir=North variant=0   <- foot
+
+So: pillars are always ``North`` regardless of the road's rotation,
+and the stack is foot / transition / shaft by height, selected via
+the block variant. Earlier attempts got this wrong in two ways —
+v1 tiled 1x1 pillars per cell into a solid plateau, and v2 inherited
+the road's rotation and left variants unset.
+
+Shape matching still applies for multi-cell road blocks
+(``RoadTechCurve2`` -> ``TrackWallCurve2Pillar``); the variant
+pattern above is only confirmed for the 1x1 straight case, so wider
+pillars are emitted with the shaft variant and no foot until we have
+the same evidence for them.
 
 Supports are decoration: they are appended after the route is fixed
 and never displace a route block (route-first rule, CLAUDE.md).
@@ -33,11 +47,19 @@ from src.generation.clip_walker import GROUND_Y, Placement
 
 _LOG = logging.getLogger(__name__)
 
-SUPPORTS_VERSION = "supports-v2"
+SUPPORTS_VERSION = "supports-v3"
 
 # 1x1x1 fallback for blocks with no shape-matched pillar (gates,
 # slopes) — all of which occupy a single XZ cell.
 DEFAULT_PILLAR = "TrackWallStraightPillar"
+
+# Pillars are written facing North whatever the road above does.
+PILLAR_DIRECTION = 0
+
+# Variant by height within the stack (observed on the 1x1 straight).
+PILLAR_VARIANT_FOOT = 0        # at ground level
+PILLAR_VARIANT_TRANSITION = 5  # exactly one level above ground
+PILLAR_VARIANT_SHAFT = 1       # everything higher
 
 
 def pillar_for(
@@ -125,13 +147,15 @@ def build_supports(
     catalogue: dict[str, BlockDef],
     ground_y: int = GROUND_Y,
 ) -> list[Placement]:
-    """Footprint-matched pillars beneath every elevated route block.
+    """Pillars beneath every elevated route block, as the game writes them.
 
-    One pillar per level, placed at the road block's own anchor and
-    rotation so the support follows the road's shape. A level is
-    skipped when its footprint would intersect anything already
-    placed (the route, or a pillar from an earlier block), which is
-    what keeps self-crossing routes safe.
+    One pillar per level. Single-cell columns reproduce the observed
+    foot / transition / shaft variant stack facing North; multi-cell
+    road blocks get their footprint-matched pillar at the road's own
+    rotation (so the support follows the curve). A level is skipped
+    when its footprint would intersect anything already placed — the
+    route, or a pillar from an earlier block — which keeps
+    self-crossing routes safe.
     """
     cells = route_cells(placements, catalogue)
     occupied = set(cells)
@@ -149,11 +173,29 @@ def build_supports(
         if pillar is None:
             unmatched.add(p.block_id)
             continue
+
+        single_cell = pillar == DEFAULT_PILLAR
+        # A 1x1 pillar is rotation-independent, so use the game's
+        # North; wider pillars must follow the road to stay aligned.
+        rotation = PILLAR_DIRECTION if single_cell else p.rotation
+
         for y in range(ground_y, base_y):
-            want = _footprint(pillar, p.x, y, p.z, p.rotation, catalogue)
+            want = _footprint(pillar, p.x, y, p.z, rotation, catalogue)
             if not want or any(c in occupied for c in want):
                 continue
-            supports.append(Placement(pillar, p.x, y, p.z, p.rotation))
+            if single_cell:
+                if y == ground_y:
+                    variant = PILLAR_VARIANT_FOOT
+                elif y == ground_y + 1:
+                    variant = PILLAR_VARIANT_TRANSITION
+                else:
+                    variant = PILLAR_VARIANT_SHAFT
+            else:
+                # Variant pattern unverified for wide pillars.
+                variant = None
+            supports.append(
+                Placement(pillar, p.x, y, p.z, rotation, variant=variant)
+            )
             occupied.update(want)
 
     if unmatched:

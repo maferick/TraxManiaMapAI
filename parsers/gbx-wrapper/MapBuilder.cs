@@ -132,10 +132,14 @@ internal static class MapBuilder
             }
             var coord = new Int3(entry.X.Value, entry.Y.Value, entry.Z.Value);
             var direction = (Direction)(entry.Rotation & 0b11);
-            map.PlaceBlock(
+            var block = map.PlaceBlock(
                 blockModel: entry.BlockName,
                 coord: coord,
                 direction: direction);
+            if (entry.Variant is not null && block is not null)
+            {
+                block.Variant = entry.Variant.Value;
+            }
             placed++;
         }
 
@@ -178,5 +182,10 @@ internal static class MapBuilder
         public int? Y { get; set; }
         public int? Z { get; set; }
         public int Rotation { get; set; }
+        // Block variant index. Load-bearing for auto-pillar
+        // replication: the game stacks TrackWallStraightPillar with
+        // variant 0 at ground, 5 one above, 1 for the shaft. Null
+        // leaves GBX.NET's default (0).
+        public byte? Variant { get; set; }
     }
 }

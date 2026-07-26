@@ -109,6 +109,7 @@ def main() -> int:
                 "y": p.y,
                 "z": p.z,
                 "rotation": p.rotation,
+                **({} if p.variant is None else {"variant": p.variant}),
             }
             for p in placements
         ],
