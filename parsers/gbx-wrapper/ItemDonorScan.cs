@@ -26,7 +26,8 @@ namespace TraxMania.GbxWrapper;
 internal static class ItemDonorScan
 {
     private sealed record Request(
-        string root, List<string> models, int? limit, bool? want_all);
+        string root, List<string> models, int? limit, bool? want_all,
+        string? pattern);
 
     public static Dictionary<string, object?> ScanFromStdinJson(string json)
     {
@@ -47,8 +48,11 @@ internal static class ItemDonorScan
         var coverage = new Dictionary<string, HashSet<string>>();
 
         int scanned = 0, parsed = 0, failed = 0;
+        // Corpus artifacts are content-addressed with NO extension, so
+        // the default matches everything and lets the parser decide.
+        var pattern = string.IsNullOrWhiteSpace(req.pattern) ? "*" : req.pattern;
         foreach (var path in Directory.EnumerateFiles(
-                     req.root, "*.Map.Gbx", SearchOption.AllDirectories))
+                     req.root, pattern, SearchOption.AllDirectories))
         {
             if (scanned >= limit) break;
             scanned++;
