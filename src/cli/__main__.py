@@ -196,6 +196,8 @@ def _cmd_parse_maps(args: argparse.Namespace) -> int:
                 snapshot_id=args.snapshot,
                 max_maps=args.limit,
                 retry_transient=args.retry_transient,
+                shard_index=args.shard_index,
+                shard_count=args.shard_count,
             )
         except Exception as exc:  # noqa: BLE001
             close_stage_run(
@@ -2433,6 +2435,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parse_maps_cmd.add_argument(
         "--retry-transient", action="store_true",
         help="re-parse maps whose previous attempt was failed_transient",
+    )
+    parse_maps_cmd.add_argument(
+        "--shard-count", type=int, default=1,
+        help="run as one of N concurrent workers; rows are partitioned "
+             "by id %% N so shards never touch the same map",
+    )
+    parse_maps_cmd.add_argument(
+        "--shard-index", type=int, default=0,
+        help="this worker's shard number (0 .. shard-count-1)",
     )
     parse_maps_cmd.set_defaults(func=_cmd_parse_maps)
 

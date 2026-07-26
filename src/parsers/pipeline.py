@@ -111,6 +111,8 @@ def _fetch_unparsed(
     snapshot_id: str | None,
     limit: int | None,
     retry_transient: bool,
+    shard_index: int = 0,
+    shard_count: int = 1,
 ) -> list[_UnparsedMap]:
     # A row is picked up if ANY of the following is true:
     #   parse_status = 'unparsed'                                 (fresh)
@@ -133,6 +135,12 @@ def _fetch_unparsed(
     if snapshot_id is not None:
         sql += " AND ingestion_snapshot = %s"
         params.append(snapshot_id)
+    # Sharding lets N workers run concurrently without a claim/lock
+    # protocol: id % N partitions the rows into disjoint sets, so no
+    # two workers ever touch the same map.
+    if shard_count > 1:
+        sql += " AND id %% %s = %s"
+        params.extend([int(shard_count), int(shard_index)])
     sql += " ORDER BY id"
     if limit is not None:
         sql += " LIMIT %s"
@@ -358,6 +366,8 @@ class MapParsePipeline:
         snapshot_id: str | None = None,
         max_maps: int | None = None,
         retry_transient: bool = False,
+        shard_index: int = 0,
+        shard_count: int = 1,
     ) -> ParseStats:
         stats = ParseStats(started_at=_utcnow())
         try:
@@ -366,6 +376,8 @@ class MapParsePipeline:
                 snapshot_id=snapshot_id,
                 limit=max_maps,
                 retry_transient=retry_transient,
+                shard_index=shard_index,
+                shard_count=shard_count,
             )
             for row in maps:
                 stats.maps_seen += 1
