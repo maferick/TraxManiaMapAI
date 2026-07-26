@@ -38,12 +38,13 @@ public static class Program
              && args[0] != "emit-map" && args[0] != "emit-map-from-blocks"
              && args[0] != "dump-block-info"
              && args[0] != "dump-block-catalogue"
+             && args[0] != "scan-item-donors"
              && args[0] != "probe-pak"))
         {
             Console.Error.WriteLine(
                 "usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay"
                 + "|emit-map|emit-map-from-blocks|dump-block-info"
-                + "|dump-block-catalogue|probe-pak>");
+                + "|dump-block-catalogue|scan-item-donors|probe-pak>");
             return 2;
         }
 
@@ -77,6 +78,7 @@ public static class Program
         if (args[0] != "emit-map"
             && args[0] != "emit-map-from-blocks"
             && args[0] != "dump-block-catalogue"
+            && args[0] != "scan-item-donors"
             && !File.Exists(stdinLine))
         {
             EmitError(ErrorCodes.IoError, $"file not found: {stdinLine}");
@@ -95,6 +97,7 @@ public static class Program
                 "emit-map-from-blocks" => MapBuilder.BuildFromStdinJson(stdinLine),
                 "dump-block-info" => BlockInfoDump.DumpFromPath(stdinLine),
                 "dump-block-catalogue" => BlockCatalogue.DumpFromStdinJson(stdinLine),
+                "scan-item-donors" => ItemDonorScan.ScanFromStdinJson(stdinLine),
                 "probe-pak" => PakProbe.ProbeFromPath(stdinLine),
                 _ => throw new InvalidOperationException("unreachable"),
             };

@@ -45,6 +45,13 @@ namespace TraxMania.GbxWrapper;
 
 internal static class MapBuilder
 {
+    // Item geometry, measured from a hand-placed reference map
+    // (5 trees on flat ground): absolute Y is 8 m at ground level
+    // while the block-grid row for that same ground is 9.
+    private const float GroundItemY = 8.0f;
+    private const int GroundUnitY = 9;
+
+
     public static Dictionary<string, object?> BuildFromStdinJson(string jsonLine)
     {
         if (string.IsNullOrWhiteSpace(jsonLine))
@@ -143,6 +150,98 @@ internal static class MapBuilder
             placed++;
         }
 
+        // Scenery items.
+        //
+        // HOW ITEMS ACTUALLY WORK (established by elimination against the
+        // game, because none of it is documented and GBX.NET hides it):
+        //
+        //   * PlaceAnchoredObject makes an object with only chunk
+        //     0x03101002. Game-written objects also carry 0x03101004 and
+        //     0x03101005, and GBX.NET cannot author 0x03101005 at all.
+        //   * ASSIGNING ItemModel on an existing object makes that object
+        //     unresolvable — the game reports it missing even when the
+        //     value is a model the map already uses, and even when the
+        //     assigned Ident was copied from a working object. The parsed
+        //     properties end up identical to a working object, so the
+        //     damage is in how the Ident re-serialises.
+        //   * DUPLICATING a parsed object — new object, donor's chunk
+        //     INSTANCES, donor's ItemModel — loads fine. The chunks carry
+        //     the serialised model reference, so nothing is re-encoded.
+        //
+        // Therefore: never mutate a model, only clone. Which item models
+        // we can place is bounded by what the donor map contains.
+        int itemsPlaced = 0;
+        int itemsSkipped = 0;
+        var missingModels = new List<string>();
+        if (args.Items is { Count: > 0 } && !string.IsNullOrWhiteSpace(args.ItemTemplatePath))
+        {
+            var template = Gbx.ParseNode<CGameCtnChallenge>(args.ItemTemplatePath)
+                ?? throw new InvalidDataException(
+                    $"item donor is not a map: {args.ItemTemplatePath}");
+
+            // Index complete, non-waypoint donors by model id. Waypoint
+            // objects carry start/finish metadata we must not clone.
+            var byModel = new Dictionary<string, CGameCtnAnchoredObject>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var o in template.AnchoredObjects ?? new List<CGameCtnAnchoredObject>())
+            {
+                if (o.WaypointSpecialProperty is not null) continue;
+                if (o.Chunks.Count < 3) continue;
+                var id = o.ItemModel.Id.ToString();
+                if (id.Length > 0 && !byModel.ContainsKey(id)) byModel[id] = o;
+            }
+            if (byModel.Count == 0)
+            {
+                throw new InvalidDataException(
+                    "item donor has no complete anchored objects: "
+                    + args.ItemTemplatePath);
+            }
+
+            var placedObjects = new List<CGameCtnAnchoredObject>();
+            foreach (var item in args.Items)
+            {
+                if (item is null || string.IsNullOrWhiteSpace(item.Name))
+                {
+                    itemsSkipped++;
+                    continue;
+                }
+                if (!byModel.TryGetValue(item.Name, out var donor))
+                {
+                    // No donor for this model: skip it rather than emit a
+                    // map the game will reject wholesale.
+                    if (!missingModels.Contains(item.Name)) missingModels.Add(item.Name);
+                    itemsSkipped++;
+                    continue;
+                }
+
+                var copy = new CGameCtnAnchoredObject
+                {
+                    // Donor's own Ident instance, never rebuilt.
+                    ItemModel = donor.ItemModel,
+                    AbsolutePositionInMap = new Vec3(item.X, item.Y, item.Z),
+                    YawPitchRoll = new Vec3(item.Yaw, item.Pitch, item.Roll),
+                    Scale = donor.Scale == 0 ? 1f : donor.Scale,
+                    Flags = donor.Flags,
+                    PivotPosition = donor.PivotPosition,
+                    AnchorTreeId = donor.AnchorTreeId,
+                    Color = donor.Color,
+                    BlockUnitCoord = new Byte3(
+                        (byte)Math.Clamp((int)(item.X / 32.0f), 0, 255),
+                        (byte)Math.Clamp(
+                            GroundUnitY + (int)((item.Y - GroundItemY) / 8.0f),
+                            0, 255),
+                        (byte)Math.Clamp((int)(item.Z / 32.0f), 0, 255)),
+                };
+                // Share the donor's chunk instances: these hold the
+                // serialised model reference that cannot be rebuilt.
+                foreach (var ch in donor.Chunks) copy.Chunks.Add(ch);
+
+                placedObjects.Add(copy);
+                itemsPlaced++;
+            }
+            map.AnchoredObjects = placedObjects;
+        }
+
         gbx.Save(args.OutputPath);
 
         return new Dictionary<string, object?>
@@ -155,6 +254,12 @@ internal static class MapBuilder
             ["skipped_block_count"] = skipped,
             ["source_block_count"] = sourceBlockCount,
             ["baked_block_count"] = map.BakedBlocks?.Count ?? 0,
+            ["placed_item_count"] = itemsPlaced,
+            ["skipped_item_count"] = itemsSkipped,
+            // Models the donor map does not contain, so they could not
+            // be cloned. Surfaced so callers can fix their palette or
+            // donor rather than wonder where the scenery went.
+            ["item_models_without_donor"] = missingModels,
         };
     }
 
@@ -170,6 +275,32 @@ internal static class MapBuilder
         public string? MapUid { get; set; }
         public string? MapName { get; set; }
         public List<BuildBlockArg>? Blocks { get; set; }
+        // Free-placed scenery items (trees, deco). Optional.
+        public List<BuildItemArg>? Items { get; set; }
+        /// <summary>
+        /// Map to borrow structurally-complete anchored objects from.
+        /// Required for items: see the retarget comment below.
+        /// </summary>
+        [JsonPropertyName("item_template_path")]
+        public string? ItemTemplatePath { get; set; }
+    }
+
+    private sealed class BuildItemArg
+    {
+        /// <summary>Item id, e.g. "SpringTreeMedium".</summary>
+        public string? Name { get; set; }
+        /// <summary>Item author; defaults to "Nadeo" for stock items.</summary>
+        public string? Author { get; set; }
+        /// <summary>Item collection; defaults to the map's own.</summary>
+        public string? Collection { get; set; }
+        /// <summary>Absolute position in metres, not grid cells.</summary>
+        public float X { get; set; }
+        public float Y { get; set; }
+        public float Z { get; set; }
+        /// <summary>Radians. Yaw alone is enough for upright scenery.</summary>
+        public float Yaw { get; set; }
+        public float Pitch { get; set; }
+        public float Roll { get; set; }
     }
 
     private sealed class BuildBlockArg

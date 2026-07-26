@@ -31,6 +31,7 @@ from src.generation.clip_walker import ClipWalker, RouteDeadEnd
 from src.generation.families import resolve
 from src.generation.priors import FacePriors
 from src.generation.spec import MapSpec, from_description
+from src.generation.scenery import DEFAULT_PALETTE, PALETTES, build_scenery
 from src.generation.supports import PillarRules, build_supports
 
 _LOG = logging.getLogger("generate")
@@ -66,6 +67,18 @@ def main() -> int:
     ap.add_argument("--template", default="data/catalogue/template48.Map.Gbx")
     ap.add_argument("--wrapper",
                     default="parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper.dll")
+    ap.add_argument("--scenery", type=float, default=0.0,
+                    help="vegetation density 0.0-1.0 (0 = none)")
+    ap.add_argument(
+        "--item-donor", default="data/catalogue/item_donor.Map.Gbx",
+        help="map to borrow structurally-complete anchored objects from. "
+             "Required for scenery: GBX.NET cannot author chunk "
+             "0x03101005, so items are retargeted from real ones "
+             "rather than created (see MapBuilder).",
+    )
+    ap.add_argument("--palette", default=DEFAULT_PALETTE,
+                    choices=sorted(PALETTES),
+                    help="vegetation palette")
     ap.add_argument("--save-spec", default=None,
                     help="write the resolved spec here (provenance)")
     args = ap.parse_args()
@@ -116,6 +129,13 @@ def main() -> int:
             route, catalogue, PillarRules.load(args.rules)
         )
 
+    items = []
+    if args.scenery > 0:
+        items = build_scenery(
+            route, catalogue, seed=spec.seed,
+            palette=args.palette, density=args.scenery,
+        )
+
     slug = (spec.description or spec.family).lower()
     slug = "".join(c if c.isalnum() else "-" for c in slug).strip("-")[:40]
     out = Path(args.out) if args.out else (
@@ -137,6 +157,14 @@ def main() -> int:
             }
             for p in placements
         ],
+        "item_template_path": (
+            str(Path(args.item_donor).resolve()) if items else None
+        ),
+        "items": [
+            {"name": it.name, "x": it.x, "y": it.y, "z": it.z,
+             "yaw": it.yaw, "pitch": it.pitch, "roll": it.roll}
+            for it in items
+        ],
     }
     proc = subprocess.run(
         ["dotnet", str(Path(args.wrapper).resolve()), "emit-map-from-blocks"],
@@ -152,9 +180,9 @@ def main() -> int:
 
     info = envelope["output"]
     _LOG.info(
-        "%s: %d route + %d pillars -> %s",
+        "%s: %d route + %d pillars + %s items -> %s",
         spec.family, len(route), len(placements) - len(route),
-        info["output_path"],
+        info.get("placed_item_count", 0), info["output_path"],
     )
     if info["placed_block_count"] != len(placements):
         _LOG.error(
