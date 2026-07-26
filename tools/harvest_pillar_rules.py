@@ -180,22 +180,40 @@ def main() -> int:
             if not mine:
                 unplaceable.append(block_id)
                 continue
-            mine.sort(key=lambda p: p["y"])
-            names = {p["name"] for p in mine}
-            variants = {p["variant"] for p in mine}
-            dirs = {p["dir"] for p in mine}
-            base = mine[0]
+
+            # A block may get SEVERAL pillars per level, one per
+            # footprint cell, and they can differ: a
+            # RoadTechToRoadBump transition puts dir=2 under its tech
+            # end and dir=0 under its bump end. So the unit of a rule
+            # is the per-level PATTERN, not a single pillar. v2
+            # recorded only the bottom pillar and flagged the rest
+            # "non-uniform", which lost the information.
+            by_level: dict[int, list[dict]] = {}
+            for p in mine:
+                by_level.setdefault(p["y"], []).append(p)
+            levels = sorted(by_level)
+
+            def signature(entries: list[dict]) -> list[tuple]:
+                return sorted(
+                    (e["x"] - px, e["z"] - pz, e["name"], e["variant"],
+                     e["dir"])
+                    for e in entries
+                )
+
+            base_sig = signature(by_level[levels[0]])
+            vertically_uniform = all(
+                signature(by_level[y]) == base_sig for y in levels
+            )
             rules[block_id] = {
-                "pillar": base["name"],
-                "variant": base["variant"],
-                "dir": base["dir"],
-                "dx": base["x"] - px,
-                "dz": base["z"] - pz,
-                "levels": len(mine),
-                # Flag anything that is not a uniform column so the
-                # emitter never silently assumes uniformity.
-                "uniform": len(names) == 1 and len(variants) == 1
-                           and len(dirs) == 1,
+                "pattern": [
+                    {"dx": dx, "dz": dz, "pillar": name,
+                     "variant": variant, "dir": direction}
+                    for dx, dz, name, variant, direction in base_sig
+                ],
+                "levels": len(levels),
+                # True when every level repeats the bottom pattern,
+                # which is what lets the emitter stamp it upward.
+                "uniform": vertically_uniform,
             }
 
         done = bi * len(grid)
@@ -208,7 +226,7 @@ def main() -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
-        "schema": "pillar_rules_v2",
+        "schema": "pillar_rules_v3",
         "ground_y": GROUND_Y,
         "probe_y": PROBE_Y,
         "rules": rules,

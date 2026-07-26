@@ -42,17 +42,28 @@ from src.generation.clip_walker import GROUND_Y, Placement
 _LOG = logging.getLogger(__name__)
 
 SUPPORTS_VERSION = "supports-v4"
-SCHEMA = "pillar_rules_v2"
+SCHEMA = "pillar_rules_v3"
 DEFAULT_RULES_PATH = "data/catalogue/pillar_rules.json"
 
 
 @dataclass(frozen=True)
-class PillarRule:
+class PillarSlot:
+    """One pillar within a level's pattern, offset from the anchor."""
+
+    dx: int
+    dz: int
     pillar: str
     variant: int
     direction: int
-    dx: int
-    dz: int
+
+
+@dataclass(frozen=True)
+class PillarRule:
+    # A level's full pattern. Multi-cell blocks get one slot per
+    # footprint cell and the slots can differ - a RoadTechToRoadBump
+    # transition puts dir=2 under its tech end and dir=0 under its
+    # bump end.
+    pattern: tuple[PillarSlot, ...]
     uniform: bool
 
 
@@ -70,11 +81,14 @@ class PillarRules:
             raise ValueError(f"unsupported pillar-rule schema: {doc.get('schema')!r}")
         rules = {
             block_id: PillarRule(
-                pillar=str(r["pillar"]),
-                variant=int(r["variant"]),
-                direction=int(r["dir"]),
-                dx=int(r.get("dx", 0)),
-                dz=int(r.get("dz", 0)),
+                pattern=tuple(
+                    PillarSlot(
+                        dx=int(s["dx"]), dz=int(s["dz"]),
+                        pillar=str(s["pillar"]), variant=int(s["variant"]),
+                        direction=int(s["dir"]),
+                    )
+                    for s in r.get("pattern", [])
+                ),
                 uniform=bool(r.get("uniform", True)),
             )
             for block_id, r in doc.get("rules", {}).items()
@@ -172,21 +186,44 @@ def build_supports(
             non_uniform.add(p.block_id)
             continue
 
-        # The table was harvested with the probe block at rotation 0,
-        # so the recorded offset and direction rotate with the block.
-        pillar_rot = (rule.direction + p.rotation) % 4
+        # The table was harvested with the probe at rotation 0, so a
+        # slot must be transported into the placed block's frame.
+        #
+        # Rotating the slot OFFSET directly is wrong: rotate_offset
+        # re-anchors so a footprint's min corner sits at the origin,
+        # which is right for unit cells but moves a multi-cell
+        # pillar's anchor (a 2x2 pillar under a 2x2 block at rotation
+        # 1 came out at (1,0) instead of (0,0), which the game-diff
+        # caught as 15 wrong cells on a dirt route).
+        #
+        # So rotate the CELLS the slot covers and take their min
+        # corner as the new anchor. That is correct for both a 1x1
+        # pillar per cell and a pillar spanning the whole footprint.
+        road = catalogue.get(p.block_id)
+        road_variant = road.variant("ground", 0) if road else None
+        road_size = road_variant.size if road_variant else (1, 1, 1)
+
         for y in range(ground, base_y):
-            want = _footprint(
-                rule.pillar, p.x + rule.dx, y, p.z + rule.dz,
-                pillar_rot, catalogue,
-            )
-            if not want or any(c in occupied for c in want):
-                continue
-            supports.append(Placement(
-                rule.pillar, p.x + rule.dx, y, p.z + rule.dz,
-                pillar_rot, variant=rule.variant,
-            ))
-            occupied.update(want)
+            for slot in rule.pattern:
+                srot = (slot.direction + p.rotation) % 4
+                local = _footprint(
+                    slot.pillar, slot.dx, 0, slot.dz, slot.direction, catalogue
+                )
+                if not local:
+                    continue
+                moved = [
+                    rotate_offset((cx, 0, cz), p.rotation, road_size)
+                    for cx, _cy, cz in local
+                ]
+                ax = p.x + min(c[0] for c in moved)
+                az = p.z + min(c[2] for c in moved)
+                want = _footprint(slot.pillar, ax, y, az, srot, catalogue)
+                if not want or any(c in occupied for c in want):
+                    continue
+                supports.append(Placement(
+                    slot.pillar, ax, y, az, srot, variant=slot.variant,
+                ))
+                occupied.update(want)
 
     if unknown:
         _LOG.warning(

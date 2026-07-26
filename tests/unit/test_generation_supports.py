@@ -1,4 +1,11 @@
-"""Unit tests for the support-pillar pass (v2, footprint-matched)."""
+"""Unit tests for the support-pillar pass (v4, game-harvested rules).
+
+The authoritative check on this module is
+``tools/verify_supports.py``, which diffs its output against what the
+game itself generates. These tests pin the mechanics that diff would
+only catch as a mystery: schema handling, refusal to guess, and the
+rotation transform that broke a dirt route.
+"""
 from __future__ import annotations
 
 import json
@@ -8,19 +15,22 @@ import pytest
 from src.catalogue.loader import load_catalogue
 from src.generation.clip_walker import GROUND_Y, Placement
 from src.generation.supports import (
-    DEFAULT_PILLAR,
+    PillarRule,
+    PillarRules,
+    PillarSlot,
     build_supports,
-    pillar_for,
     route_cells,
 )
 
-CLIP = "RoadTechFC"
+ONE = [[0, 0, 0]]
+TWO_BY_TWO = [[0, 0, 0], [1, 0, 0], [0, 0, 1], [1, 0, 1]]
+DEEP_1X2 = [[0, 0, 0], [0, 0, 1]]
 
 
-def _block(block_id: str, size, offsets, is_pillar=False) -> dict:
+def _block(block_id, size, offsets, is_pillar=False):
     return {
-        "type": "block", "id": block_id, "name": block_id,
-        "page": "p", "waypoint": "None", "is_pillar": is_pillar,
+        "type": "block", "id": block_id, "name": block_id, "page": "p",
+        "waypoint": "None", "is_pillar": is_pillar,
         "variants": [{
             "kind": "ground", "index": 0, "size": list(size),
             "units": [
@@ -32,21 +42,14 @@ def _block(block_id: str, size, offsets, is_pillar=False) -> dict:
     }
 
 
-ONE = [[0, 0, 0]]
-TWO_BY_TWO = [[0, 0, 0], [1, 0, 0], [0, 0, 1], [1, 0, 1]]
-
-
 @pytest.fixture()
 def catalogue(tmp_path):
     records = [
-        _block("RoadTechStraight", (1, 1, 1), ONE),
-        _block("RoadTechCurve2", (2, 1, 2), TWO_BY_TWO),
-        _block("RoadTechSlopeBase", (1, 2, 1), [[0, 0, 0], [0, 1, 0]]),
-        # matching pillars
-        _block(DEFAULT_PILLAR, (1, 1, 1), ONE, is_pillar=True),
-        _block("TrackWallCurve2Pillar", (2, 1, 2), TWO_BY_TWO, is_pillar=True),
-        # a name-matching pillar with the WRONG footprint: must be rejected
-        _block("TrackWallStraightPillar", (1, 1, 1), ONE, is_pillar=True),
+        _block("Straight", (1, 1, 1), ONE),
+        _block("Curve2", (2, 1, 2), TWO_BY_TWO),
+        _block("Transition", (1, 1, 2), DEEP_1X2),
+        _block("StraightPillar", (1, 1, 1), ONE, is_pillar=True),
+        _block("Curve2Pillar", (2, 1, 2), TWO_BY_TWO, is_pillar=True),
     ]
     path = tmp_path / "catalogue.ndjson"
     lines = [json.dumps({"type": "meta", "schema": "block_catalogue_v1"})]
@@ -56,82 +59,128 @@ def catalogue(tmp_path):
     return load_catalogue(path)
 
 
-class TestPillarFor:
-    def test_shape_matched_by_name_rewrite(self, catalogue):
-        assert pillar_for("RoadTechCurve2", catalogue) == "TrackWallCurve2Pillar"
+def _rules(mapping: dict[str, PillarRule]) -> PillarRules:
+    return PillarRules(mapping, GROUND_Y)
 
-    def test_single_cell_falls_back(self, catalogue):
-        # No TrackWallSlopeBasePillar exists, but the footprint is 1x1.
-        assert pillar_for("RoadTechSlopeBase", catalogue) == DEFAULT_PILLAR
 
-    def test_unknown_block_returns_none(self, catalogue):
-        assert pillar_for("NotAThing", catalogue) is None
+@pytest.fixture()
+def rules():
+    return _rules({
+        "Straight": PillarRule(
+            pattern=(PillarSlot(0, 0, "StraightPillar", 0, 2),), uniform=True),
+        "Curve2": PillarRule(
+            pattern=(PillarSlot(0, 0, "Curve2Pillar", 1, 0),), uniform=True),
+        # Two slots that differ, as a real RoadTech->RoadBump does.
+        "Transition": PillarRule(
+            pattern=(
+                PillarSlot(0, 0, "StraightPillar", 0, 2),
+                PillarSlot(0, 1, "StraightPillar", 0, 0),
+            ), uniform=True),
+    })
+
+
+class TestSchema:
+    def test_rejects_old_schema(self, tmp_path):
+        p = tmp_path / "rules.json"
+        p.write_text(json.dumps({"schema": "pillar_rules_v2", "rules": {}}))
+        with pytest.raises(ValueError, match="unsupported pillar-rule schema"):
+            PillarRules.load(p)
+
+    def test_loads_pattern(self, tmp_path):
+        p = tmp_path / "rules.json"
+        p.write_text(json.dumps({
+            "schema": "pillar_rules_v3", "ground_y": 9,
+            "rules": {"A": {"pattern": [
+                {"dx": 0, "dz": 1, "pillar": "P", "variant": 3, "dir": 2}
+            ], "uniform": True}},
+        }))
+        loaded = PillarRules.load(p)
+        rule = loaded.get("A")
+        assert rule is not None and len(rule.pattern) == 1
+        slot = rule.pattern[0]
+        assert (slot.dz, slot.variant, slot.direction) == (1, 3, 2)
 
 
 class TestBuildSupports:
-    def test_ground_level_needs_no_pillars(self, catalogue):
-        route = [Placement("RoadTechStraight", 10, GROUND_Y, 10, 0)]
-        assert build_supports(route, catalogue) == []
+    def test_ground_level_needs_no_pillars(self, catalogue, rules):
+        route = [Placement("Straight", 10, GROUND_Y, 10, 0)]
+        assert build_supports(route, catalogue, rules) == []
 
-    def test_one_pillar_per_level_not_per_cell(self, catalogue):
-        # A 2x2 curve three levels up: v1 produced 4 cells x 3 levels
-        # = 12 blocks (the concrete-plateau bug). v2 must emit 3.
-        route = [Placement("RoadTechCurve2", 4, GROUND_Y + 3, 6, 0)]
-        pillars = build_supports(route, catalogue)
-        assert len(pillars) == 3
-        assert all(p.block_id == "TrackWallCurve2Pillar" for p in pillars)
+    def test_column_filled_with_slot_values(self, catalogue, rules):
+        route = [Placement("Straight", 10, GROUND_Y + 3, 10, 0)]
+        pillars = build_supports(route, catalogue, rules)
         assert [p.y for p in pillars] == [GROUND_Y, GROUND_Y + 1, GROUND_Y + 2]
+        assert all(p.block_id == "StraightPillar" for p in pillars)
+        assert all(p.variant == 0 for p in pillars)
+        assert all(p.rotation == 2 for p in pillars)
 
-    def test_wide_pillar_inherits_anchor_and_rotation(self, catalogue):
-        route = [Placement("RoadTechCurve2", 4, GROUND_Y + 1, 6, 3)]
-        pillars = build_supports(route, catalogue)
-        assert [(p.x, p.z, p.rotation) for p in pillars] == [(4, 6, 3)]
+    def test_multi_slot_pattern_emits_every_slot(self, catalogue, rules):
+        route = [Placement("Transition", 10, GROUND_Y + 2, 10, 0)]
+        pillars = build_supports(route, catalogue, rules)
+        # 2 slots x 2 levels
+        assert len(pillars) == 4
+        assert {(p.x, p.z) for p in pillars} == {(10, 10), (10, 11)}
+        # the two slots keep their distinct directions
+        assert {p.rotation for p in pillars} == {0, 2}
 
-    def test_single_cell_stack_matches_game_recipe(self, catalogue):
-        """Reproduces the observed auto-pillar stack exactly.
+    def test_multicell_pillar_anchor_survives_rotation(self, catalogue, rules):
+        """A 2x2 pillar must stay on the block's anchor at every rotation.
 
-        Ground truth from a hand-placed RoadTechStraight at y=18:
-        nine TrackWallStraightPillar, all facing North, variants
-        1 (shaft) down to 5 (transition) then 0 (foot).
+        Rotating the slot offset through rotate_offset re-anchors and
+        shifted this to (x+1, z) at rotation 1 — 15 wrong cells on a
+        real dirt route before the fix.
         """
-        from src.generation.supports import (
-            PILLAR_VARIANT_FOOT,
-            PILLAR_VARIANT_SHAFT,
-            PILLAR_VARIANT_TRANSITION,
-        )
-        route = [Placement("RoadTechStraight", 15, GROUND_Y + 9, 24, 2)]
-        pillars = build_supports(route, catalogue)
-        assert len(pillars) == 9
-        assert all(p.block_id == DEFAULT_PILLAR for p in pillars)
-        # North regardless of the road's rotation (2 = South)
-        assert all(p.rotation == 0 for p in pillars)
-        by_y = {p.y: p.variant for p in pillars}
-        assert by_y[GROUND_Y] == PILLAR_VARIANT_FOOT
-        assert by_y[GROUND_Y + 1] == PILLAR_VARIANT_TRANSITION
-        assert all(
-            by_y[y] == PILLAR_VARIANT_SHAFT
-            for y in range(GROUND_Y + 2, GROUND_Y + 9)
-        )
+        for rot in range(4):
+            route = [Placement("Curve2", 20, GROUND_Y + 1, 20, rot)]
+            pillars = build_supports(route, catalogue, rules)
+            assert len(pillars) == 1, rot
+            assert (pillars[0].x, pillars[0].z) == (20, 20), rot
 
-    def test_pillars_never_intersect_the_route(self, catalogue):
+    def test_rotation_offsets_multi_slot(self, catalogue, rules):
+        # At rotation 1 the 1x2 footprint runs along x, so the two
+        # slots must land side by side in x, not stacked in z.
+        route = [Placement("Transition", 10, GROUND_Y + 1, 10, 1)]
+        pillars = build_supports(route, catalogue, rules)
+        assert {(p.x, p.z) for p in pillars} == {(10, 10), (11, 10)}
+
+    def test_unknown_block_gets_no_pillars(self, catalogue, rules):
+        route = [Placement("Curve2", 10, GROUND_Y + 2, 10, 0)]
+        empty = _rules({})
+        assert build_supports(route, catalogue, empty) == []
+
+    def test_non_uniform_is_skipped_not_guessed(self, catalogue):
+        skewed = _rules({"Straight": PillarRule(
+            pattern=(PillarSlot(0, 0, "StraightPillar", 0, 0),),
+            uniform=False)})
+        route = [Placement("Straight", 10, GROUND_Y + 3, 10, 0)]
+        assert build_supports(route, catalogue, skewed) == []
+
+    def test_pillars_never_intersect_the_route(self, catalogue, rules):
         route = [
-            Placement("RoadTechStraight", 10, GROUND_Y, 10, 0),
-            Placement("RoadTechStraight", 10, GROUND_Y + 2, 10, 0),
+            Placement("Straight", 10, GROUND_Y, 10, 0),
+            Placement("Straight", 10, GROUND_Y + 2, 10, 0),
         ]
         cells = route_cells(route, catalogue)
-        pillars = build_supports(route, catalogue)
-        for p in pillars:
-            assert (p.x, p.y, p.z) not in cells
+        pillars = build_supports(route, catalogue, rules)
+        assert all((p.x, p.y, p.z) not in cells for p in pillars)
         assert [p.y for p in pillars] == [GROUND_Y + 1]
 
-    def test_no_two_pillars_share_a_cell(self, catalogue):
+    def test_lowest_block_owns_a_stacked_column(self, catalogue, rules):
+        """Bottom-up ordering: the lower block claims the column.
+
+        Route order let an upper 1x1 grab a column the lower 2x2
+        owned, which the game-diff caught as 24 wrong cells.
+        """
         route = [
-            Placement("RoadTechCurve2", 4, GROUND_Y + 3, 6, 0),
-            Placement("RoadTechStraight", 5, GROUND_Y + 2, 7, 0),
+            Placement("Straight", 20, GROUND_Y + 4, 20, 0),  # upper, listed first
+            Placement("Curve2", 20, GROUND_Y + 2, 20, 0),    # lower
         ]
-        pillars = build_supports(route, catalogue)
-        seen = set()
-        for p in pillars:
-            fp = route_cells([p], catalogue)
-            assert not (fp & seen), f"pillar {p} overlaps an earlier pillar"
-            seen |= fp
+        pillars = build_supports(route, catalogue, rules)
+        by_y = {p.y: p.block_id for p in pillars}
+        # Below the lower block: owned by it, despite being listed second.
+        assert by_y[GROUND_Y] == "Curve2Pillar"
+        assert by_y[GROUND_Y + 1] == "Curve2Pillar"
+        # Its own level is a route cell, so no pillar there.
+        assert GROUND_Y + 2 not in by_y
+        # The gap between the two decks is supported by the upper block.
+        assert by_y[GROUND_Y + 3] == "StraightPillar"
