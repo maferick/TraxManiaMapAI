@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,19 @@ from src.parsers.errors import ParseErrorCode, ParseStatus
 from src.storage.mariadb import cursor
 
 _LOG = logging.getLogger(__name__)
+
+
+# InnoDB reports deadlock as error 1213, lock-wait timeout as 1205.
+# Both are transient under concurrent sharded writes and are resolved
+# by replaying the transaction.
+_DEADLOCK_ERRNOS = frozenset({1205, 1213})
+_DEADLOCK_MAX_ATTEMPTS = 4
+_DEADLOCK_BACKOFF_SECONDS = 0.25
+
+
+def _is_deadlock(exc: BaseException) -> bool:
+    code = getattr(exc, "args", (None,))[0]
+    return code in _DEADLOCK_ERRNOS
 
 
 _FAMILY_RE = re.compile(r"^([A-Z][a-z]+)")
@@ -493,48 +507,28 @@ class MapParsePipeline:
             if isinstance(wp, Mapping)
         ]
 
-        try:
-            with cursor(self._conn) as cur:
-                if rows:
-                    cur.executemany(_INSERT_BLOCK_SQL, rows)
-                if waypoint_rows:
-                    # Idempotent reparse: unique (map_id, parser_version,
-                    # waypoint_index) would collide on re-run with the
-                    # same parser_version. Delete then insert keeps the
-                    # common case simple; multi-parser-version coexistence
-                    # survives because we scope the delete.
-                    cur.execute(
-                        "DELETE FROM map_checkpoints "
-                        "WHERE map_id = %s AND parser_version = %s",
-                        (row.id, self._parser_version),
-                    )
-                    cur.executemany(_INSERT_WAYPOINT_SQL, waypoint_rows)
-                cur.execute(
-                    _UPDATE_MAP_SUCCESS_SQL,
-                    (
-                        self._parser_version,
-                        output.get("title"),
-                        output.get("author"),
-                        output.get("environment"),
-                        _maybe_bool(output.get("has_items")),
-                        _maybe_bool(output.get("is_block_mode")),
-                        *self._scenery_params(scenery),
-                        row.id,
-                    ),
+        # InnoDB deadlocks are expected when sharded workers insert into
+        # the same secondary indexes concurrently; the correct response
+        # is to replay the transaction, not to fail the map.
+        for attempt in range(_DEADLOCK_MAX_ATTEMPTS):
+            try:
+                self._write_parse_result(row, rows, waypoint_rows, output, scenery)
+                break
+            except Exception as exc:  # noqa: BLE001
+                self._conn.rollback()
+                if _is_deadlock(exc) and attempt < _DEADLOCK_MAX_ATTEMPTS - 1:
+                    time.sleep(_DEADLOCK_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+                stats.maps_failed_transient += 1
+                stats.errors.append(f"map={row.id} db insert failed: {exc}")
+                _LOG.exception("block_placements insert failed on map %d", row.id)
+                self._write_failure(
+                    row.id,
+                    status=ParseStatus.FAILED_TRANSIENT,
+                    error_code=ParseErrorCode.UNKNOWN,
+                    error_detail=f"db insert: {exc}"[:2000],
                 )
-            self._conn.commit()
-        except Exception as exc:  # noqa: BLE001
-            self._conn.rollback()
-            stats.maps_failed_transient += 1
-            stats.errors.append(f"map={row.id} db insert failed: {exc}")
-            _LOG.exception("block_placements insert failed on map %d", row.id)
-            self._write_failure(
-                row.id,
-                status=ParseStatus.FAILED_TRANSIENT,
-                error_code=ParseErrorCode.UNKNOWN,
-                error_detail=f"db insert: {exc}"[:2000],
-            )
-            return
+                return
 
         stats.maps_parsed += 1
         grid = sum(1 for b in blocks if isinstance(b, Mapping) and b.get("placement") != "free")
@@ -542,6 +536,45 @@ class MapParsePipeline:
         stats.total_blocks_written += grid + free
         stats.grid_blocks_written += grid
         stats.free_blocks_written += free
+
+    def _write_parse_result(
+        self,
+        row: _UnparsedMap,
+        rows: list[tuple[Any, ...]],
+        waypoint_rows: list[tuple[Any, ...]],
+        output: Mapping[str, Any],
+        scenery: Mapping[str, Any],
+    ) -> None:
+        """One transaction: blocks + waypoints + map status."""
+        with cursor(self._conn) as cur:
+            if rows:
+                cur.executemany(_INSERT_BLOCK_SQL, rows)
+            if waypoint_rows:
+                # Idempotent reparse: unique (map_id, parser_version,
+                # waypoint_index) would collide on re-run with the
+                # same parser_version. Delete then insert keeps the
+                # common case simple; multi-parser-version coexistence
+                # survives because we scope the delete.
+                cur.execute(
+                    "DELETE FROM map_checkpoints "
+                    "WHERE map_id = %s AND parser_version = %s",
+                    (row.id, self._parser_version),
+                )
+                cur.executemany(_INSERT_WAYPOINT_SQL, waypoint_rows)
+            cur.execute(
+                _UPDATE_MAP_SUCCESS_SQL,
+                (
+                    self._parser_version,
+                    output.get("title"),
+                    output.get("author"),
+                    output.get("environment"),
+                    _maybe_bool(output.get("has_items")),
+                    _maybe_bool(output.get("is_block_mode")),
+                    *self._scenery_params(scenery),
+                    row.id,
+                ),
+            )
+        self._conn.commit()
 
     def _write_scenery_only(
         self,

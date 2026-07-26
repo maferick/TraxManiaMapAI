@@ -55,3 +55,16 @@ class TestShardedFetch:
                     assert i not in seen
                     seen[i] = shard
         assert len(seen) == len(list(ids))
+
+
+class TestDeadlockClassification:
+    def test_innodb_deadlock_and_lockwait_are_retryable(self):
+        from pymysql.err import OperationalError
+        assert pl._is_deadlock(OperationalError(1213, "Deadlock found"))
+        assert pl._is_deadlock(OperationalError(1205, "Lock wait timeout"))
+
+    def test_other_errors_are_not_retried(self):
+        from pymysql.err import OperationalError, ProgrammingError
+        assert not pl._is_deadlock(OperationalError(1146, "Table missing"))
+        assert not pl._is_deadlock(ProgrammingError(1064, "Syntax error"))
+        assert not pl._is_deadlock(ValueError("nope"))
