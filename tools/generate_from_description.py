@@ -52,6 +52,12 @@ def main() -> int:
     ap.add_argument("--spec", default=None,
                     help="load a MapSpec JSON instead of parsing text")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--llm", action="store_true",
+                    help="translate the description with a local LLM "
+                         "instead of keyword matching (falls back "
+                         "automatically if the host is down)")
+    ap.add_argument("--llm-model", default=None)
+    ap.add_argument("--llm-host", default=None)
     ap.add_argument("--out", default=None,
                     help="output .Map.Gbx (default: My Maps/<slug>.Map.Gbx)")
     ap.add_argument("--catalogue", default="data/catalogue2/catalogue.ndjson")
@@ -66,6 +72,15 @@ def main() -> int:
 
     if args.spec:
         spec = MapSpec.from_json(args.spec)
+    elif args.description and args.llm:
+        from src.generation.llm_spec import (
+            DEFAULT_HOST, DEFAULT_MODEL, from_description_llm,
+        )
+        spec = from_description_llm(
+            args.description, seed=args.seed,
+            host=args.llm_host or DEFAULT_HOST,
+            model=args.llm_model or DEFAULT_MODEL,
+        )
     elif args.description:
         spec = from_description(args.description, seed=args.seed)
     else:
