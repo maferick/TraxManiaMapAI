@@ -32,6 +32,10 @@ const int SCAN_INTERVAL_MS = 400;
 // first placement so plugin load stays instant.
 const string BLOCK_ROOT = "GameData/Stadium/GameCtnBlockInfo";
 
+// Ceiling on the AI validation drive. A short map settles in a few
+// seconds; a long or broken one can sit at "Validable" indefinitely.
+const int VALIDATE_WAIT_SECONDS = 180;
+
 dictionary g_blockIndex;
 bool g_indexed = false;
 bool g_busy = false;
@@ -45,7 +49,17 @@ void Main() {
         if (!g_busy) {
             array<string> pending = ScanPending();
             for (uint i = 0; i < pending.Length; i++) {
-                ProcessCommand(pending[i]);
+                // An uncaught exception here would kill this
+                // coroutine and leave g_busy stuck true, bricking the
+                // plugin until reload. One bad command must not take
+                // the endpoint down.
+                try {
+                    ProcessCommand(pending[i]);
+                } catch {
+                    log("command failed: " + getExceptionInfo());
+                    WriteCrashResult(pending[i], getExceptionInfo());
+                }
+                g_busy = false;
             }
         }
         sleep(SCAN_INTERVAL_MS);
@@ -145,6 +159,32 @@ void ProcessCommand(const string &in inPath) {
         res["blocks"] = int(editor.Challenge.Blocks.Length);
     } else if (op == "place_blocks") {
         res = PlaceBlocks(editor, body, res);
+    } else if (op == "dump_blocks") {
+        // Read the map back. This is what makes the editor usable as
+        // an ORACLE for the offline emitter: place one block, dump,
+        // and see exactly what the game generated around it.
+        Json::Value arr = Json::Array();
+        auto blocks = editor.Challenge.Blocks;
+        string filter = body.HasKey("filter") ? string(body["filter"]) : "";
+        for (uint i = 0; i < blocks.Length; i++) {
+            auto b = blocks[i];
+            if (b is null) continue;
+            string name = b.BlockInfo !is null ? b.BlockInfo.IdName : "";
+            if (filter.Length > 0 && name.IndexOf(filter) < 0) continue;
+            Json::Value jb = Json::Object();
+            jb["name"] = name;
+            jb["x"] = b.Coord.x;
+            jb["y"] = b.Coord.y;
+            jb["z"] = b.Coord.z;
+            jb["dir"] = int(b.Direction);
+            jb["variant"] = int(b.BlockModelVariantIndex);
+            jb["is_ground"] = b.IsGround;
+            arr.Add(jb);
+            if (i % 200 == 0) yield();
+        }
+        res["ok"] = true;
+        res["count"] = int(arr.Length);
+        res["blocks"] = arr;
     } else if (op == "save") {
         string name = string(body["name"]);
         auto pmt = editor.PluginMapType;
@@ -154,19 +194,56 @@ void ProcessCommand(const string &in inPath) {
         res["saved_as"] = editor.Challenge.MapName;
     } else if (op == "validate") {
         auto pmt = editor.PluginMapType;
+        // Validate() only KICKS OFF the AI drive; the status walks
+        // NotValidable -> Validable -> (game drives) -> Validated.
+        // Reading it straight after the call just reports "Validable"
+        // with an unset author time, which is not an answer.
         pmt.Validate();
-        yield();
+        int deadline = Time::Stamp + VALIDATE_WAIT_SECONDS;
+        bool settled = false;
+        while (Time::Stamp < deadline) {
+            yield();
+            auto st = pmt.ValidationStatus;
+            if (st == CGameEditorPluginMapMapType::EValidationStatus::Validated
+                || st == CGameEditorPluginMapMapType::EValidationStatus::NotValidable) {
+                settled = true;
+                break;
+            }
+            sleep(500);
+        }
+        bool validated = (pmt.ValidationStatus
+            == CGameEditorPluginMapMapType::EValidationStatus::Validated);
         res["ok"] = true;
-        res["validation_status"] = int(pmt.ValidationStatus);
-        res["author_time_ms"] = editor.Challenge.TMObjective_AuthorTime;
+        res["settled"] = settled;
+        res["validated"] = validated;
+        res["validation_status"] = VStatusToString(pmt.ValidationStatus);
+        res["author_time_ms"] = validated
+            ? int(editor.Challenge.TMObjective_AuthorTime) : -1;
     } else {
         res["ok"] = false;
         res["error"] = "unknown op '" + op + "'";
     }
 
     Json::ToFile(outPath, res);
-    log("op=" + op + " -> " + (bool(res["ok"]) ? "ok" : string(res["error"])));
+    // NB: do not read res["error"] here — it is absent on success and
+    // on partial failures (place_blocks reports 'failures' instead),
+    // and stringifying a missing key throws.
+    log("op=" + op + " ok=" + (bool(res["ok"]) ? "true" : "false"));
     g_busy = false;
+}
+
+
+// Always leave a response file: a caller blocked on <id>.res.json
+// should get an error, not a timeout.
+void WriteCrashResult(const string &in inPath, const string &in info) {
+    string outPath = inPath.SubStr(0, inPath.Length - 9) + ".res.json";
+    if (IO::FileExists(outPath)) return;
+    Json::Value res = Json::Object();
+    res["protocol"] = PROTOCOL;
+    res["plugin_version"] = PLUGIN_VERSION;
+    res["ok"] = false;
+    res["error"] = "plugin exception: " + info;
+    Json::ToFile(outPath, res);
 }
 
 
@@ -222,6 +299,19 @@ Json::Value PlaceBlocks(
     // this path exists.
     res["blocks_total"] = int(editor.Challenge.Blocks.Length);
     return res;
+}
+
+
+string VStatusToString(CGameEditorPluginMapMapType::EValidationStatus st) {
+    switch (st) {
+        case CGameEditorPluginMapMapType::EValidationStatus::NotValidable:
+            return "NotValidable";
+        case CGameEditorPluginMapMapType::EValidationStatus::Validable:
+            return "Validable";
+        case CGameEditorPluginMapMapType::EValidationStatus::Validated:
+            return "Validated";
+    }
+    return "Unknown";
 }
 
 

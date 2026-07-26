@@ -114,8 +114,12 @@ def tm_state() -> dict:
 
 @mcp.tool()
 def tm_clear_blocks() -> dict:
-    """Remove every block from the map currently open in the editor."""
-    return _call("clear", timeout=60.0)
+    """Remove every block from the map currently open in the editor.
+
+    Slow on a full map — the editor rebuilds as it goes — so this
+    gets a generous timeout.
+    """
+    return _call("clear", timeout=300.0)
 
 
 @mcp.tool()
