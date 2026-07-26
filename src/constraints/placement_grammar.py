@@ -36,9 +36,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
+import pymysql
 from pymysql.connections import Connection
 
 from src.catalogue.loader import (
@@ -74,6 +77,13 @@ _MAX_TYPES = 1 << _TYPE_BITS
 # Merge the running totals once this many per-map keys are pending.
 # Bounds peak memory during the concatenate + unique.
 _COMPACT_EVERY = 8_000_000
+
+# A full scan is ~40 minutes of per-map queries, and the corpus host
+# is shared — MariaDB has been OOM-killed under load there before.
+# Losing the whole scan to a server restart is not acceptable, so
+# reconnect and retry rather than dying on a broken pipe.
+_DB_RETRIES = 6
+_DB_BACKOFF = 5.0
 
 
 @dataclass
@@ -132,6 +142,38 @@ def _pair_signature(
         str(rel_rotation), environment,
     ))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _with_reconnect(
+    conn: Connection,
+    reconnect: Callable[[], Connection] | None,
+    run: Callable[[Connection], object],
+) -> tuple[Connection, object]:
+    """Run a query, surviving a server restart underneath it.
+
+    Returns the connection to keep using — it may be a new one.
+    """
+    last: Exception | None = None
+    for attempt in range(_DB_RETRIES):
+        try:
+            return conn, run(conn)
+        except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as exc:
+            last = exc
+            if reconnect is None or attempt == _DB_RETRIES - 1:
+                break
+            wait = _DB_BACKOFF * (attempt + 1)
+            _LOG.warning(
+                "%s: database error (%s); reconnecting in %.0fs "
+                "(attempt %d/%d)",
+                STAGE_VERSION, exc, wait, attempt + 1, _DB_RETRIES,
+            )
+            time.sleep(wait)
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - already broken
+                pass
+            conn = reconnect()
+    raise RuntimeError(f"database unavailable after {_DB_RETRIES} attempts") from last
 
 
 class _OffsetTable:
@@ -360,6 +402,7 @@ def build_grammar(
     radius_xz: int = DEFAULT_RADIUS_XZ,
     radius_y: int = DEFAULT_RADIUS_Y,
     min_map_count: int = 3,
+    reconnect: Callable[[], Connection] | None = None,
 ) -> GrammarReport:
     """Count observed (A, B, offset in A's frame, relative rotation).
 
@@ -376,11 +419,15 @@ def build_grammar(
     ports = _clip_port_index(catalogue)
 
     limit_clause = f"LIMIT {int(limit)}" if limit else ""
-    with cursor(conn) as cur:
-        cur.execute(
-            _SCAN_MAPS_SQL.format(limit_clause=limit_clause), (environment,)
-        )
-        map_ids = [int(r[0]) for r in cur.fetchall()]
+
+    def _scan(c: Connection):
+        with cursor(c) as cur:
+            cur.execute(
+                _SCAN_MAPS_SQL.format(limit_clause=limit_clause), (environment,)
+            )
+            return [int(r[0]) for r in cur.fetchall()]
+
+    conn, map_ids = _with_reconnect(conn, reconnect, _scan)
 
     _LOG.info(
         "%s: %d maps in %s, %d offsets (xz=%d, y=%d)",
@@ -400,9 +447,12 @@ def build_grammar(
                 STAGE_VERSION, report.maps_seen, len(map_ids),
                 report.placements_seen, report.pairs_counted,
             )
-        with cursor(conn) as cur:
-            cur.execute(_PLACEMENTS_SQL, (map_id,))
-            rows = cur.fetchall()
+        def _load(c: Connection, _id: int = map_id):
+            with cursor(c) as cur:
+                cur.execute(_PLACEMENTS_SQL, (_id,))
+                return cur.fetchall()
+
+        conn, rows = _with_reconnect(conn, reconnect, _load)
         if not rows:
             continue
         report.placements_seen += len(rows)
@@ -448,48 +498,58 @@ def build_grammar(
         STAGE_VERSION, keys.size, counter.keys.size, min_map_count,
     )
 
+    # The counter's running arrays are the biggest thing in the
+    # process; the surviving slice is all the write loop needs.
+    del counter
+
+    def _flush(c: Connection, rows: list[tuple]) -> None:
+        with cursor(c) as cur:
+            cur.executemany(_UPSERT_SQL, rows)
+        c.commit()
+
     n_off = len(table)
     clip_cache: dict[tuple[int, int, int, int], bool] = {}
     batch: list[tuple] = []
-    with cursor(conn) as cur:
-        for key, pair_count, map_count in zip(
-            keys.tolist(), pair_counts.tolist(), map_counts.tolist()
-        ):
-            ta, tb, rel_rot, stored_oi = _unpack_key(int(key), n_off)
-            block_a, block_b = type_names[ta], type_names[tb]
-            dx, dy, dz = table.offsets[stored_oi]
+    for key, pair_count, map_count in zip(
+        keys.tolist(), pair_counts.tolist(), map_counts.tolist()
+    ):
+        ta, tb, rel_rot, stored_oi = _unpack_key(int(key), n_off)
+        block_a, block_b = type_names[ta], type_names[tb]
+        dx, dy, dz = table.offsets[stored_oi]
 
-            cache_key = (ta, tb, rel_rot, stored_oi)
-            matched = clip_cache.get(cache_key)
-            if matched is None:
-                matched = _clips_meet(
-                    ports, block_a, block_b, dx, dy, dz, rel_rot
-                )
-                clip_cache[cache_key] = matched
+        cache_key = (ta, tb, rel_rot, stored_oi)
+        matched = clip_cache.get(cache_key)
+        if matched is None:
+            matched = _clips_meet(
+                ports, block_a, block_b, dx, dy, dz, rel_rot
+            )
+            clip_cache[cache_key] = matched
 
-            if matched:
-                report.clip_matched_rows += 1
-            elif (dx, dy, dz) == (0, 0, 0):
-                report.overlay_rows += 1
-            elif max(abs(dx), abs(dz)) > 1:
-                report.gap_rows += 1
+        if matched:
+            report.clip_matched_rows += 1
+        elif (dx, dy, dz) == (0, 0, 0):
+            report.overlay_rows += 1
+        elif max(abs(dx), abs(dz)) > 1:
+            report.gap_rows += 1
 
-            batch.append((
-                _pair_signature(
-                    block_a, block_b, dx, dy, dz, rel_rot, environment
-                ),
-                block_a, block_b, dx, dy, dz, rel_rot, environment,
-                int(matched), int(pair_count), int(map_count),
-                STAGE_VERSION,
-            ))
-            report.rows_written += 1
-            if len(batch) >= 5000:
-                cur.executemany(_UPSERT_SQL, batch)
-                conn.commit()
-                batch.clear()
-        if batch:
-            cur.executemany(_UPSERT_SQL, batch)
-    conn.commit()
+        batch.append((
+            _pair_signature(
+                block_a, block_b, dx, dy, dz, rel_rot, environment
+            ),
+            block_a, block_b, dx, dy, dz, rel_rot, environment,
+            int(matched), int(pair_count), int(map_count),
+            STAGE_VERSION,
+        ))
+        report.rows_written += 1
+        if len(batch) >= 5000:
+            conn, _ = _with_reconnect(
+                conn, reconnect, lambda c, rows=list(batch): _flush(c, rows)
+            )
+            batch.clear()
+    if batch:
+        conn, _ = _with_reconnect(
+            conn, reconnect, lambda c, rows=list(batch): _flush(c, rows)
+        )
 
     _LOG.info(
         "%s: maps=%d placements=%d pairs=%d rows=%d "

@@ -838,6 +838,7 @@ def _cmd_mine_placement_grammar(args: argparse.Namespace) -> int:
             radius_xz=int(args.radius_xz),
             radius_y=int(args.radius_y),
             min_map_count=int(args.min_maps),
+            reconnect=lambda: open_connection(config),
         )
     finally:
         conn.close()
