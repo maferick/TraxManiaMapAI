@@ -61,20 +61,30 @@ GATE_FORWARD_LOCAL_FACE = FACE_NORTH
 # Waypoint kinds whose arrow must follow travel.
 DIRECTIONAL_WAYPOINTS = ("Checkpoint", "StartFinish")
 
-# Blocks with a DIRECTIONAL EFFECT but no waypoint kind. Their road is
-# 180-degree symmetric, so clips accept rotation d and d+2 equally,
-# while the effect only works one way — a booster shoves the car along
-# its arrow. Left unconstrained the walker picks at random and roughly
-# half come out backwards (user-reported after a tight turn,
-# 2026-07-26; the gate fix above had simply never been generalised).
+# Gameplay-effect blocks, which must face travel. Their road is
+# 180-degree symmetric so clips accept rotation d and d+2 equally,
+# but the block's arrow is not symmetric — a booster shoves the car
+# along it. Left unconstrained the walker picks at random and roughly
+# half come out backwards (user-reported twice: checkpoint arrows,
+# then boosters on tech AND dirt).
 #
-# Matched as substrings of the block id, so one entry covers every
-# surface family (RoadTechSpecialBoost, RoadDirtSpecialTurbo, ...).
-# Curated on purpose: "is this effect directional?" cannot be derived
-# from clip geometry, so it cannot be harvested and has to be declared.
+# Deliberately BROAD rather than an enumeration of known-directional
+# blocks. Whether a given effect renders an arrow is not derivable
+# from clip geometry and cannot be harvested, so any enumeration is a
+# guess — and the risk is asymmetric:
+#
+#   * constraining a block that is NOT directional costs nothing. It
+#     looks identical either way, and since the block is symmetric it
+#     still fits exactly the same corridors, so reachability is
+#     unchanged.
+#   * failing to constrain one that IS directional is a visible bug.
+#
+# So every Special*/Penalty* block is pinned to travel direction.
+# Matched as substrings, so one entry covers all surface families
+# (RoadTechSpecialBoost, RoadDirtSpecialNoBrake, ...).
 DIRECTIONAL_BLOCK_PATTERNS = (
-    "SpecialBoost",
-    "SpecialTurbo",
+    "Special",
+    "Penalty",
 )
 
 
