@@ -62,6 +62,19 @@ def main() -> int:
     ap.add_argument("--out", default=None,
                     help="output .Map.Gbx (default: My Maps/<slug>.Map.Gbx)")
     ap.add_argument("--catalogue", default="data/catalogue2/catalogue.ndjson")
+    ap.add_argument("--walker", choices=("clip", "grammar"), default=None,
+                    help="override the spec's walker. 'clip' joins by "
+                         "matching route-clips; 'grammar' joins by what "
+                         "the corpus was observed to contain, which is "
+                         "what makes platform surfaces, mixed families "
+                         "and jumps buildable")
+    ap.add_argument("--grammar",
+                    default="data/catalogue/placement_grammar.json")
+    ap.add_argument("--min-maps", type=int, default=20,
+                    help="grammar walker: a move must appear in this "
+                         "many distinct corpus maps to be buildable")
+    ap.add_argument("--no-jumps", action="store_true",
+                    help="grammar walker: refuse moves with a gap")
     ap.add_argument("--priors", default="data/catalogue/face_priors.json")
     ap.add_argument("--rules", default="data/catalogue/pillar_rules.json")
     ap.add_argument("--template", default="data/catalogue/template48.Map.Gbx")
@@ -103,17 +116,47 @@ def main() -> int:
         Path(args.save_spec).write_text(spec.to_json(), encoding="utf-8")
 
     catalogue = load_catalogue(args.catalogue, collection="Stadium2020")
-    block_ids, clips = resolve(
-        [spec.family], catalogue, max_footprint=spec.max_footprint
-    )
-    priors = (
-        FacePriors.from_json(args.priors)
-        if spec.use_priors and Path(args.priors).is_file() else None
-    )
-    walker = ClipWalker(
-        catalogue, block_ids, seed=spec.seed,
-        route_clips=clips, priors=priors, block_bias=spec.bias,
-    )
+
+    if args.walker:
+        spec.walker = args.walker
+        spec.validate()
+
+    if spec.walker == "grammar":
+        # Joins blocks by what the corpus contains rather than by clip
+        # matching, which is what makes platform surfaces, mixed
+        # families and jumps buildable at all.
+        from src.generation.families import resolve_pool
+        from src.generation.grammar import PlacementGrammar
+        from src.generation.grammar_walker import GrammarWalker
+
+        if not Path(args.grammar).is_file():
+            _LOG.error(
+                "no placement grammar at %s — run "
+                "'mine-placement-grammar' then 'export-placement-grammar'",
+                args.grammar,
+            )
+            return 2
+        pool = resolve_pool(
+            spec.family_list, catalogue, max_footprint=spec.max_footprint
+        )
+        walker = GrammarWalker(
+            catalogue, PlacementGrammar.from_json(args.grammar), pool,
+            seed=spec.seed, min_maps=args.min_maps,
+            allow_jumps=not args.no_jumps, block_bias=spec.bias,
+        )
+    else:
+        block_ids, clips = resolve(
+            spec.family_list, catalogue, max_footprint=spec.max_footprint
+        )
+        priors = (
+            FacePriors.from_json(args.priors)
+            if spec.use_priors and Path(args.priors).is_file() else None
+        )
+        walker = ClipWalker(
+            catalogue, block_ids, seed=spec.seed,
+            route_clips=clips, priors=priors, block_bias=spec.bias,
+        )
+
     try:
         route = walker.generate(spec.length, spec.checkpoint_every)
     except RouteDeadEnd as exc:

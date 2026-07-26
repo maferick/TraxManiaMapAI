@@ -19,7 +19,7 @@ class TestMapSpecValidation:
         MapSpec().validate()
 
     def test_unknown_family_rejected(self):
-        with pytest.raises(SpecError, match="unknown family"):
+        with pytest.raises(SpecError, match="unknown famil"):
             MapSpec(family="lava").validate()
 
     def test_unsupported_family_explains_itself(self):

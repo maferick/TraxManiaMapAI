@@ -64,13 +64,18 @@ STYLE_VOCAB: dict[str, dict[str, float]] = {
     "wavy": {"Wave": 4.0},
 }
 
-# Words that select a surface family.
+# Words that select a surface family. The platform entries are only
+# buildable by the grammar walker — clip matching cannot chain their
+# gates (see families._PLATFORM_REASON).
 FAMILY_WORDS: dict[str, str] = {
     "tech": "tech", "concrete": "tech", "road": "tech", "asphalt": "tech",
     "dirt": "dirt", "mud": "dirt", "rally": "dirt",
     "bump": "bump", "bumpy": "bump", "sausage": "bump",
     "ice": "ice", "icy": "ice", "slippery": "ice",
     "water": "water", "wet": "water",
+    "plastic": "platform-plastic", "bouncy": "platform-plastic",
+    "platform": "platform-tech", "stunt": "platform-tech",
+    "grass": "platform-grass",
 }
 
 # Rough length words -> block count.
@@ -88,6 +93,15 @@ class MapSpec:
     """Structured generation intent. Deterministic with ``seed``."""
 
     family: str = "tech"
+    # Several families in one map. Empty means "just ``family``".
+    # Only the grammar walker can honour more than one — clip matching
+    # rejects mixed pools, which is a fact about clips rather than
+    # about the game (map 4269 runs platform into open road into road
+    # in three consecutive cells).
+    families: list[str] = field(default_factory=list)
+    # "clip" joins blocks by matching route-clips; "grammar" joins
+    # them by what the corpus was observed to contain.
+    walker: str = "clip"
     length: int = 60
     checkpoint_every: int = 15
     seed: int = 1
@@ -99,16 +113,31 @@ class MapSpec:
     # Free-text this spec came from, for provenance.
     description: str = ""
 
+    @property
+    def family_list(self) -> list[str]:
+        return list(self.families) if self.families else [self.family]
+
     def validate(self) -> None:
-        if self.family not in FAMILIES:
+        if self.walker not in ("clip", "grammar"):
+            raise SpecError(f"unknown walker {self.walker!r}")
+        names = self.family_list
+        unknown = [n for n in names if n not in FAMILIES]
+        if unknown:
             raise SpecError(
-                f"unknown family {self.family!r}; available: {sorted(FAMILIES)}"
+                f"unknown families {unknown}; available: {sorted(FAMILIES)}"
             )
-        if FAMILIES[self.family].unsupported:
-            raise FamilyError(
-                f"{self.family}: {FAMILIES[self.family].unsupported}. "
-                f"Supported: {SUPPORTED}"
-            )
+        if self.walker == "clip":
+            blocked = [n for n in names if FAMILIES[n].unsupported]
+            if blocked:
+                raise FamilyError(
+                    f"{blocked[0]}: {FAMILIES[blocked[0]].unsupported}. "
+                    f"Supported by the clip walker: {SUPPORTED}"
+                )
+            if len(names) > 1:
+                raise SpecError(
+                    f"the clip walker builds one family at a time, got "
+                    f"{names}; use walker='grammar' to mix them"
+                )
         if self.length < 3:
             raise SpecError(f"length {self.length} is too short to close a route")
         if self.checkpoint_every < 0:
@@ -155,17 +184,18 @@ def from_description(text: str, seed: int = 1) -> MapSpec:
 
     matched: list[str] = []
 
-    # Family: last mention wins, so "dirt map, not tech" still reads
-    # oddly but predictably; ambiguity is reported to the caller.
-    families = [FAMILY_WORDS[w] for w in words if w in FAMILY_WORDS]
-    if families:
-        spec.family = families[-1]
+    # Every named family is kept, in order of first mention. "dirt and
+    # plastic" is a real request, not an ambiguity — the grammar
+    # walker builds it. ``family`` stays set to the last mention so a
+    # clip-walker run still has one to use.
+    named = [FAMILY_WORDS[w] for w in words if w in FAMILY_WORDS]
+    if named:
+        spec.families = list(dict.fromkeys(named))
+        spec.family = named[-1]
         matched.extend(w for w in words if w in FAMILY_WORDS)
-    if len(set(families)) > 1:
-        _LOG.warning(
-            "description names several families %s; using %r",
-            sorted(set(families)), spec.family,
-        )
+        if len(spec.families) > 1 or FAMILIES[spec.family].unsupported:
+            # Neither is buildable by clip matching.
+            spec.walker = "grammar"
 
     for w in words:
         if w in LENGTH_WORDS:
