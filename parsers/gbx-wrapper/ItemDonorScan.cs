@@ -35,10 +35,14 @@ internal static class ItemDonorScan
                   ?? throw new InvalidDataException("bad request JSON");
         if (!Directory.Exists(req.root))
             throw new DirectoryNotFoundException($"root not found: {req.root}");
-        if (req.models is not { Count: > 0 })
-            throw new InvalidDataException("models[] required");
+        // Empty models[] = DISCOVERY mode: report every model the corpus
+        // supplies, with counts, instead of matching a fixed list. That
+        // is how we learn what scenery is placeable at all.
+        var discover = req.models is not { Count: > 0 };
 
-        var wanted = new HashSet<string>(req.models, StringComparer.OrdinalIgnoreCase);
+        var wanted = new HashSet<string>(
+            req.models ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+        var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var limit = req.limit ?? 5000;
         var wantAll = req.want_all ?? true;
 
@@ -68,7 +72,12 @@ internal static class ItemDonorScan
                 if (o.WaypointSpecialProperty is not null) continue;
                 if (o.Chunks.Count < 3) continue;
                 var id = o.ItemModel.Id.ToString();
-                if (!wanted.Contains(id)) continue;
+                if (id.Length == 0) continue;
+                // Only stock models are reusable: community items live in
+                // the source map's embedded zip and would not resolve.
+                if (o.ItemModel.Author != "Nadeo") continue;
+                seen[id] = seen.GetValueOrDefault(id) + 1;
+                if (!discover && !wanted.Contains(id)) continue;
 
                 if (!suppliers.TryGetValue(id, out var list))
                     suppliers[id] = list = new List<string>();
@@ -79,7 +88,7 @@ internal static class ItemDonorScan
                 set.Add(id);
             }
 
-            if (wantAll && suppliers.Count >= wanted.Count) break;
+            if (!discover && wantAll && suppliers.Count >= wanted.Count) break;
         }
 
         var best = coverage
@@ -104,6 +113,11 @@ internal static class ItemDonorScan
                                 .OrderBy(x => x).ToList(),
             ["suppliers"] = suppliers.ToDictionary(kv => kv.Key, kv => (object?)kv.Value),
             ["best_donors"] = best,
+            ["discovered_models"] = seen
+                .OrderByDescending(kv => kv.Value)
+                .Take(120)
+                .ToDictionary(kv => kv.Key, kv => (object?)kv.Value),
+            ["distinct_models"] = seen.Count,
         };
     }
 }
