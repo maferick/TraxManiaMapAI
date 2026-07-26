@@ -59,6 +59,10 @@ def _IS_SUPPORT(name: str) -> bool:
     return any(m in name for m in _SUPPORT_MARKERS)
 
 
+def _sign(v: int) -> int:
+    return (v > 0) - (v < 0)
+
+
 @dataclass
 class SequenceReport:
     maps_seen: int = 0
@@ -134,12 +138,12 @@ def reconstruct_route(
     rows: list[tuple],
     catalogue: dict[str, BlockDef],
     ports: dict,
-) -> list[tuple] | None:
-    """The clip-matched chain from Start to Finish, in driving order.
+) -> list[list[tuple]] | None:
+    """Every local three-block run of this map's racing line.
 
-    Returns ``None`` when the map has no Start, no Finish, or no chain
-    joining them — all three are real and are counted, not hidden.
-    Platform maps land here because their gates use an isolated clip.
+    Returns a list of ``[before, middle, after]`` triples where before
+    and after sit on opposing faces of middle, or ``None`` if the map
+    yields none.
     """
     placements = [
         (str(r[0]), int(r[1]) % 4, int(r[2]), int(r[3]), int(r[4]))
@@ -176,50 +180,45 @@ def reconstruct_route(
                         links[i].add(j)
                         links[j].add(i)
 
-    starts = [
-        i for i, p in enumerate(placements)
-        if catalogue.get(p[0]) is not None
-        and catalogue[p[0]].waypoint in ("Start", "StartFinish")
-    ]
-    finishes = [
-        i for i, p in enumerate(placements)
-        if catalogue.get(p[0]) is not None
-        and catalogue[p[0]].waypoint in ("Finish", "StartFinish")
-    ]
-    if not starts:
-        return None
-    if not finishes:
-        return None
-
-    goal = set(finishes)
-    # Breadth-first: the racing line is the shortest clip-matched chain
-    # between the two waypoints. A longest path would be truer to how a
-    # track is driven but is NP-hard, and the shortest chain is enough
-    # to fix ORDER, which is the whole point here.
-    for start in starts:
-        prev: dict[int, int] = {start: -1}
-        queue = deque([start])
-        hit = None
-        while queue:
-            cur = queue.popleft()
-            if cur in goal and cur != start:
-                hit = cur
-                break
-            for nxt in links[cur]:
-                if nxt not in prev:
-                    prev[nxt] = cur
-                    queue.append(nxt)
-        if hit is None:
+    # Every A-B-C where A and C sit on OPPOSING sides of B: a local
+    # three-block run of the racing line.
+    #
+    # This replaced a Start->Finish shortest-path reconstruction, which
+    # was wrong twice over. On clip-matched links it recovered 2.8% of
+    # maps; on face contact it recovered 19% but the chains averaged 19
+    # blocks, meaning breadth-first was short-circuiting across a track
+    # that loops back near itself rather than following the driving
+    # line. A shortest path is not a racing line, and pretending
+    # otherwise would have poisoned every sequence mined from it.
+    #
+    # Opposing-face triples need no route order at all, so there is
+    # nothing to get wrong. They are direction-AMBIGUOUS — (A,B,C) and
+    # (C,B,A) are the same physical run — which is exactly the form
+    # generation wants: "standing on B having arrived from A, what does
+    # the corpus put on the far side?"
+    chains: list[list[tuple]] = []
+    for mid, p_mid in enumerate(placements):
+        neighbours = links.get(mid)
+        if not neighbours or len(neighbours) < 2:
             continue
-        chain = []
-        node = hit
-        while node != -1:
-            chain.append(placements[node])
-            node = prev[node]
-        chain.reverse()
-        if len(chain) >= 3:
-            return chain
-    return None
+        by_dir: dict[tuple[int, int, int], int] = {}
+        for other in neighbours:
+            p_other = placements[other]
+            step = (
+                _sign(p_other[2] - p_mid[2]),
+                _sign(p_other[3] - p_mid[3]),
+                _sign(p_other[4] - p_mid[4]),
+            )
+            by_dir.setdefault(step, other)
+        for step, before in by_dir.items():
+            back = (-step[0], -step[1], -step[2])
+            after = by_dir.get(back)
+            if after is None or after == before:
+                continue
+            # Canonical order, so a run and its reverse are one key.
+            lo, hi = sorted((before, after))
+            chains.append([placements[lo], p_mid, placements[hi]])
+    return chains or None
 
 
 def _step(a: tuple, b: tuple) -> tuple[int, int, int, int]:
@@ -266,33 +265,31 @@ def build_sequences(
         if not rows:
             continue
 
-        chain = reconstruct_route(rows, catalogue, ports)
-        if chain is None:
+        chains = reconstruct_route(rows, catalogue, ports)
+        if chains is None:
             report.no_path += 1
             continue
         report.reconstructed += 1
-        report.route_blocks += len(chain)
+        report.route_blocks += len(chains)
 
         here: set[tuple] = set()
-        for a, b in zip(chain, chain[1:]):
-            dx, dy, dz, rel = _step(a, b)
-            key = (2, a[0], b[0], "", dx, dy, dz, rel, 0, 0, 0, 0)
-            counts[key] += 1
-            report.pairs += 1
-            here.add(key)
-        for a, b, c in zip(chain, chain[1:], chain[2:]):
+        for a, b, c in chains:
             dx1, dy1, dz1, rel1 = _step(a, b)
             dx2, dy2, dz2, rel2 = _step(b, c)
-            key = (3, a[0], b[0], c[0], dx1, dy1, dz1, rel1,
-                   dx2, dy2, dz2, rel2)
-            counts[key] += 1
+            pair = (2, a[0], b[0], "", dx1, dy1, dz1, rel1, 0, 0, 0, 0)
+            counts[pair] += 1
+            report.pairs += 1
+            here.add(pair)
+            trip = (3, a[0], b[0], c[0], dx1, dy1, dz1, rel1,
+                    dx2, dy2, dz2, rel2)
+            counts[trip] += 1
             report.triples += 1
-            here.add(key)
+            here.add(trip)
         for key in here:
             maps_with[key] += 1
 
     _LOG.info(
-        "%s: reconstructed %d/%d maps (%.1f%%), %d route blocks, "
+        "%s: %d/%d maps yielded runs (%.1f%%), %d local runs, "
         "%d pair + %d triple observations, %d distinct keys",
         STAGE_VERSION, report.reconstructed, report.maps_seen,
         100.0 * report.reconstructed / max(1, report.maps_seen),
