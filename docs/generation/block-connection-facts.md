@@ -104,21 +104,58 @@ pairs in a blank map:
   cannot reach (0,+1,+1), a 1×2×1 ramp can, and that is exactly the
   difference between a ramp and a hovering tile.
 
-### Known gap: the grammar ignores block variant
+## How much does the corpus actually add? A lot.
 
-The four refused pairs were all real overlaps:
-`RoadTechStraight` at A-frame offset (1,0,1) from `RoadTechCurve2`
-lands **inside** that block's 2×2 footprint. It cannot happen in a
-real map — yet it is recorded in 175 maps.
+Two probe sets of 400 pairs each, same conditions:
 
-The cause is that `block_placement_grammar` is keyed by
-(block, block, offset, relative rotation) and **not by variant**,
-while a block's footprint depends on its variant. `RoadTechCurve2`
-ground variant 0 is 2×2; another variant is not.
+| probe set | editor accepts | offline model disagrees |
+|---|---|---|
+| **attested** — the corpus contains them | **99.0%** | 0 |
+| **unattested** — the corpus never does | **79.2%** | **12** |
 
-Consequence today: ~1% of grammar rows are geometrically impossible.
-The walker drops them silently via its occupancy check, so nothing is
-broken — but the fix is to carry variant into the grammar key.
+**The game permits four fifths of the connections no mapper uses.**
+Editor acceptance rules out roughly a fifth of nonsense and nothing
+more, so it is a weak filter and the corpus is doing the real
+filtering. Concretely, for a generator: never treat "the game let me
+place it" as evidence that a pair belongs in a track.
+
+The inverse is the useful direction. Attested pairs are accepted 99%
+of the time, so a *refused* attested pair is almost always a bug in
+our own model rather than a quirk of the corpus.
+
+## THE BIG GAP: variant is missing from everything
+
+**The game chooses a block's variant at placement time, and the
+footprint depends on the variant.** Proven directly: asked to place
+`PlatformPlasticCurve2` at an elevated cell, the editor placed it as
+`variant=1, is_ground=false` — the AIR variant — not the ground
+variant 0 that `load_catalogue(...).variant("ground", 0)` returns
+everywhere in this codebase.
+
+That one fact explains every geometry disagreement found so far:
+
+* All 12 model-vs-game disagreements in the unattested set involve
+  multi-cell blocks. 28% of Stadium2020 blocks have a **non-box**
+  footprint (1065 of 3864), so a wrong variant means a wrong shape.
+* In both "game allows, model forbids" cases the game picked a
+  *smaller* variant, so the overlap our model computed was not real.
+* In the "game refuses, model allows" cases it picked a *bigger* one.
+* `block_placement_grammar` is keyed by (block, block, offset,
+  relative rotation) with **no variant**, so ~1% of its rows are
+  geometrically impossible — `RoadTechStraight` at A-frame offset
+  (1,0,1) from `RoadTechCurve2` lands inside that block's own 2×2
+  footprint, and it is recorded in 175 maps.
+
+Not the cause: `rotate_offset` re-anchoring. Checked across all 3864
+blocks with units — only one (`DecoWallCurve4InPillar`) fails to
+re-anchor to the origin under rotation, and that is its own catalogue
+quirk, not a rotation bug.
+
+Nothing is visibly broken today because the walker's occupancy check
+drops the impossible rows silently. But every footprint decision in
+the generator is made on an assumption the game does not share, and
+carrying variant into the catalogue lookup, the grammar key and the
+walker is the single highest-value fix outstanding.
 
 ## Shape: legal is not a track
 
@@ -192,8 +229,11 @@ All measured the hard way; see `tools/tm_mcp/server.py`.
 
 ## What is still missing
 
-1. **Variant in the grammar key** — see the gap above. Removes the
-   impossible rows and would let the walker use air variants.
+1. **Variant everywhere** — see "THE BIG GAP" above. It is the top
+   item: catalogue lookup, grammar key and walker all assume ground
+   variant 0 while the game picks per placement. Fixing it removes the
+   impossible grammar rows and lets the walker build elevated
+   structures with the variants the game would actually choose.
 2. **`supports.py` over-generates.** Against the game on a 101-block
    route: 77 pillars match exactly, 24 more are emitted into free
    space the game leaves empty. None land inside the route, so nothing

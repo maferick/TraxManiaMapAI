@@ -50,6 +50,20 @@ _LOG = logging.getLogger("probe")
 
 PROBE_VERSION = "connection-probes-v1"
 
+
+class _Unattested:
+    """A candidate pair the corpus never contains, shaped like a Move."""
+
+    __slots__ = ("block", "offset", "rel_rotation", "map_count",
+                 "clip_matched")
+
+    def __init__(self, block, offset, rel_rotation):
+        self.block = block
+        self.offset = offset
+        self.rel_rotation = rel_rotation
+        self.map_count = 0
+        self.clip_matched = False
+
 # Probe spacing. The widest block in play is 3 cells and the widest
 # offset is 3, so 7 guarantees two probes can never touch.
 SPACING = 7
@@ -100,6 +114,10 @@ def main() -> int:
     ap.add_argument("--scratch", required=True,
                     help="ABSOLUTE path to a blank .Map.Gbx to probe in "
                          "(load_map silently fails on relative paths)")
+    ap.add_argument("--unattested", action="store_true",
+                    help="probe pairs the corpus does NOT contain, to "
+                         "see whether the game permits them anyway")
+    ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--base-y", type=int, default=BASE_Y,
                     help="probe altitude; must clear the deepest dy")
     ap.add_argument("--out", default="data/catalogue/connection_probes.jsonl")
@@ -110,17 +128,55 @@ def main() -> int:
     pool = resolve_pool(args.families.split(","), catalogue, max_footprint=3)
     allow = frozenset(pool)
 
-    # Strongest pairs first: those are the ones generation will lean on.
-    pairs = []
-    for block_a in pool:
-        for move in grammar.successors(
-            block_a, min_maps=args.min_maps, allow=allow,
-            overlays=False, gaps=False,
-        ):
-            pairs.append((block_a, move))
-    pairs.sort(key=lambda p: -p[1].map_count)
-    pairs = pairs[: args.limit]
-    _LOG.info("probing %d pairs", len(pairs))
+    if args.unattested:
+        # The other half of the question. Probing what the corpus
+        # contains mostly confirms it: 99% of attested pairs are
+        # accepted, so each one carries little information. What the
+        # corpus does NOT contain is the interesting set — if the game
+        # accepts those too, then editor acceptance is weak evidence
+        # and the corpus is doing the real filtering, which decides how
+        # much the generator should trust each source.
+        import random
+
+        rng = random.Random(args.seed)
+        attested = {
+            (a, m.block, m.offset, m.rel_rotation)
+            for a in pool
+            for m in grammar.successors(a, min_maps=1, allow=allow)
+        }
+        offsets = [
+            (dx, dy, dz)
+            for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+            if not (dx == 0 and dz == 0)
+        ]
+        candidates = [b for b in pool if b in grammar]
+        pairs = []
+        seen = set()
+        while len(pairs) < args.limit and len(seen) < args.limit * 50:
+            a = rng.choice(candidates)
+            b = rng.choice(candidates)
+            off = rng.choice(offsets)
+            rel = rng.randrange(4)
+            key = (a, b, off, rel)
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in attested:
+                continue
+            pairs.append((a, _Unattested(b, off, rel)))
+        _LOG.info("probing %d UNATTESTED pairs", len(pairs))
+    else:
+        # Strongest pairs first: those are the ones generation leans on.
+        pairs = []
+        for block_a in pool:
+            for move in grammar.successors(
+                block_a, min_maps=args.min_maps, allow=allow,
+                overlays=False, gaps=False,
+            ):
+                pairs.append((block_a, move))
+        pairs.sort(key=lambda p: -p[1].map_count)
+        pairs = pairs[: args.limit]
+        _LOG.info("probing %d attested pairs", len(pairs))
 
     state = call("state", timeout=20.0)
     if not state.get("ok"):
@@ -185,6 +241,7 @@ def main() -> int:
             "type": "meta", "schema": PROBE_VERSION,
             "families": args.families, "min_maps": args.min_maps,
             "base_y": args.base_y,
+            "unattested": bool(args.unattested),
             "environment": "Stadium2020",
         }) + "\n")
         for row in rows:
