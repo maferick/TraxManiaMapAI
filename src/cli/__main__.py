@@ -820,6 +820,45 @@ def _cmd_build_face_transitions(args: argparse.Namespace) -> int:
     return 0 if not report.errors else 1
 
 
+def _cmd_export_face_priors(args: argparse.Namespace) -> int:
+    import json as _json
+
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        from src.storage.mariadb import cursor as _cursor
+        sql = (
+            "SELECT block_a, block_b, clip_id, rel_rotation, "
+            "transition_count, map_count "
+            "FROM block_face_transitions "
+            "WHERE environment = %s AND map_count >= %s"
+        )
+        with _cursor(conn) as cur:
+            cur.execute(sql, (args.environment, int(args.min_maps)))
+            rows = [
+                [str(r[0]), str(r[1]), str(r[2]), int(r[3]),
+                 int(r[4]), int(r[5])]
+                for r in cur.fetchall()
+            ]
+    finally:
+        conn.close()
+
+    doc = {
+        "schema": "face_priors_v1",
+        "environment": args.environment,
+        "min_maps": int(args.min_maps),
+        "priors": rows,
+    }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(_json.dumps(doc), encoding="utf-8")
+    _LOG.info(
+        "export-face-priors: %d keys -> %s (environment=%s, min_maps=%d)",
+        len(rows), out, args.environment, int(args.min_maps),
+    )
+    return 0
+
+
 def _cmd_compute_finishability_proof(args: argparse.Namespace) -> int:
     from src.generation.finishability_proof import compute_for_map
     config = load_config(args.config)
@@ -2950,6 +2989,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="TRUNCATE block_face_transitions before rebuilding",
     )
     face_transitions_cmd.set_defaults(func=_cmd_build_face_transitions)
+
+    export_priors_cmd = sub.add_parser(
+        "export-face-priors",
+        help="Export a block_face_transitions slice as JSON for the "
+             "clip walker's generation-time weighting. Filter by "
+             "environment (TMX corpora mix multiple TM games) and a "
+             "minimum map_count to drop single-map noise.",
+    )
+    export_priors_cmd.add_argument(
+        "--environment", type=str, default="Stadium2020",
+        help="environment key (default Stadium2020 — the real TM2020 data)",
+    )
+    export_priors_cmd.add_argument(
+        "--min-maps", type=int, default=2,
+        help="drop keys observed in fewer than this many maps",
+    )
+    export_priors_cmd.add_argument(
+        "--out", type=str, default="data/catalogue/face_priors.json",
+    )
+    export_priors_cmd.set_defaults(func=_cmd_export_face_priors)
 
     block_geometry_cmd = sub.add_parser(
         "build-block-geometry",

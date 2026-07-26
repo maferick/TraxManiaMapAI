@@ -30,10 +30,11 @@ from src.catalogue.loader import (
     rotate_face,
     rotate_offset,
 )
+from src.generation.priors import FacePriors
 
 _LOG = logging.getLogger(__name__)
 
-WALKER_VERSION = "clip-walker-v0.2"
+WALKER_VERSION = "clip-walker-v0.3"
 
 # Stadium 48x48 grid; keep a margin so autoterrain never clips the
 # map border.
@@ -150,8 +151,10 @@ class ClipWalker:
         allowed_ids: list[str],
         seed: int,
         route_clips: frozenset[str] = DEFAULT_ROUTE_CLIPS,
+        priors: FacePriors | None = None,
     ) -> None:
         self._rng = random.Random(seed)
+        self._priors = priors
         self._orient: list[_Oriented] = []
         for block_id in allowed_ids:
             block = catalogue.get(block_id)
@@ -184,6 +187,44 @@ class ClipWalker:
             )
         if not self._starts or not self._finishes:
             raise ValueError("allowed set needs at least one Start and one Finish")
+
+    def _order_candidates(
+        self,
+        pool: list[_Oriented],
+        prev: Placement,
+        clip: str,
+    ) -> list[_Oriented]:
+        """Candidate try-order for the DFS.
+
+        Without priors: uniform shuffle (v0.2 behaviour). With priors:
+        weighted order without replacement — corpus-frequent
+        continuations are tried first, but every clip-legal candidate
+        keeps a non-zero chance (add-one smoothing in FacePriors), so
+        priors bias style without gating validity.
+        """
+        if self._priors is None:
+            self._rng.shuffle(pool)
+            return pool
+        items = [
+            (cand, self._priors.weight(
+                prev.block_id, prev.rotation,
+                cand.block_id, cand.rotation, clip,
+            ))
+            for cand in pool
+        ]
+        ordered: list[_Oriented] = []
+        while items:
+            total = sum(w for _, w in items)
+            pick = self._rng.random() * total
+            acc = 0.0
+            chosen = len(items) - 1
+            for i, (_, w) in enumerate(items):
+                acc += w
+                if pick <= acc:
+                    chosen = i
+                    break
+            ordered.append(items.pop(chosen)[0])
+        return ordered
 
     def generate(
         self,
@@ -241,7 +282,7 @@ class ClipWalker:
                 pool = list(self._checkpoints) or list(self._plain)
             else:
                 pool = list(self._plain)
-            self._rng.shuffle(pool)
+            pool = self._order_candidates(pool, placements[-1], clip)
 
             for cand in pool:
                 for entry in cand.ports:

@@ -68,10 +68,19 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--length", type=int, default=40)
     parser.add_argument("--checkpoint-every", type=int, default=12)
+    parser.add_argument(
+        "--priors", type=str, default=None,
+        help="face_priors_v1 JSON (export-face-priors); enables "
+             "corpus-weighted candidate ordering",
+    )
     args = parser.parse_args()
 
     catalogue = load_catalogue(args.catalogue)
-    walker = ClipWalker(catalogue, ROADTECH_SET, seed=args.seed)
+    priors = None
+    if args.priors:
+        from src.generation.priors import FacePriors
+        priors = FacePriors.from_json(args.priors)
+    walker = ClipWalker(catalogue, ROADTECH_SET, seed=args.seed, priors=priors)
     placements = walker.generate(args.length, args.checkpoint_every)
     _LOG.info("route: %d blocks (seed=%d)", len(placements), args.seed)
 
