@@ -130,7 +130,6 @@ Do **not** implement any of the following without explicit phase bump:
 - autonomous public track publishing (no pushing generated maps to TMX or
   any player-facing channel)
 - support for all styles (v0 targets Tech / FullSpeed; style breadth comes later)
-- item / free-placement generation (grid-block first; scenery items never)
 - live in-game plugin integration that modifies gameplay
 
 **Previously Phase-1 non-goals now explicitly in Phase-2 scope:**
@@ -139,6 +138,25 @@ Do **not** implement any of the following without explicit phase bump:
   corpus; training-free composition + learned-score ranking is the v0 approach
 - ~~full UI product~~ → Phase 2 adds a Flask control layer; still an
   operator tool, not a consumer product
+- ~~item / free-placement generation (scenery items never)~~ → **lifted
+  2026-07-26 by the repo owner.** Scenery is now an explicit goal: maps
+  should look built, not just be drivable. Evidence that made this
+  tractable: every TM2020 map embeds the custom blocks *and* items it
+  uses in an internal ZIP (`CGameCtnChallenge.EmbeddedZipData`), so the
+  21k-map corpus is simultaneously a scenery-asset library and a record
+  of where mappers place those assets relative to the racing line.
+
+  Constraints that still apply to scenery work:
+  - **Route first.** Scenery never displaces or overlaps the driving
+    line; the finishability gate runs before any decoration pass.
+  - **Grid blocks before free items.** Terrain / deco *blocks* reuse the
+    existing clip-and-footprint machinery; free-placed items need
+    position + rotation math that does not exist yet, so they are a
+    separate, later stage.
+  - **Attribution.** Community items are other people's work. Any
+    pipeline that reuses embedded assets records their source map and
+    author, and generated maps carrying third-party assets are not
+    published anywhere (the no-autonomous-publishing rule is unchanged).
 
 If a change drifts toward the remaining non-goals, stop and raise it.
 
