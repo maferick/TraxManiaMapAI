@@ -77,6 +77,10 @@ def main() -> int:
         "--supports", action="store_true",
         help="fill columns under elevated route blocks with pillars",
     )
+    parser.add_argument(
+        "--pillar-rules", default="data/catalogue/pillar_rules.json",
+        help="game-harvested pillar table (harvest_pillar_rules.py)",
+    )
     args = parser.parse_args()
 
     catalogue = load_catalogue(args.catalogue)
@@ -89,8 +93,10 @@ def main() -> int:
     _LOG.info("route: %d blocks (seed=%d)", len(placements), args.seed)
 
     if args.supports:
-        from src.generation.supports import build_supports
-        pillars = build_supports(placements, catalogue)
+        from src.generation.supports import PillarRules, build_supports
+        pillars = build_supports(
+            placements, catalogue, PillarRules.load(args.pillar_rules)
+        )
         # Route first: supports are appended, never displacing route
         # blocks, and the route list above is already final.
         placements = placements + pillars

@@ -80,8 +80,10 @@ def _call(op: str, timeout: float = DEFAULT_TIMEOUT_S, **payload: Any) -> dict:
         if res_path.is_file():
             try:
                 result = json.loads(res_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                time.sleep(POLL_S)  # plugin mid-write
+            except (json.JSONDecodeError, OSError):
+                # Mid-write: partial JSON, or Windows holding an
+                # exclusive lock while the plugin creates the file.
+                time.sleep(POLL_S)
                 continue
             # Clean up our own pair; the plugin never deletes files.
             for p in (cmd_path, res_path):

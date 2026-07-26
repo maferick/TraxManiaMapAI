@@ -1,105 +1,92 @@
 """Support pillars under elevated route blocks.
 
 Generated routes place only the driving line, so elevated sections
-hang in mid-air — the single most obvious "this was not made by a
-person" tell. Real maps do not look like that: in the corpus,
-pillars are the most-placed blocks in TM2020 by a wide margin
-(``DecoWallBasePillar`` alone has 22.6M placements, more than double
-any road block), and inspection of real maps shows the rule is
-mechanical — every column under an elevated block is filled from
-ground level up to the block.
+hang in mid-air — the most obvious "not built by a person" tell.
+The game itself fills those columns automatically, but ONLY when a
+human places a block in the editor; a map written straight to
+``.Map.Gbx`` gets none, and re-saving does not backfill them.
 
-v3 replicates what the game itself writes. The editor auto-generates
-pillars when a human places an elevated block, but that only happens
-on interactive placement — a map written straight to .Map.Gbx gets
-none, and merely re-saving it in the editor does not backfill them
-(both verified in-game 2026-07-26).
+Since the offline writer is the production path (headless, batchable
+— see ``tools/harvest_pillar_rules.py`` for why that matters), the
+emitter has to reproduce the game's behaviour itself.
 
-Ground truth, from diffing a map before/after one hand-placed
-``RoadTechStraight`` at y=18 (the game added exactly nine blocks):
+**The rules are a lookup table, not a formula.** Three successive
+guesses failed against the game:
 
-    TrackWallStraightPillar (x,17,z) dir=North variant=1   <- shaft
-    ... variant=1 for every level down to y=11 ...
-    TrackWallStraightPillar (x,10,z) dir=North variant=5   <- transition
-    TrackWallStraightPillar (x, 9,z) dir=North variant=0   <- foot
+1. per-cell 1x1 fill -> tiled into a solid concrete plateau
+2. footprint-matched pillar at the road's rotation -> wrong variants
+3. name rewrite ``RoadTech<X>`` -> ``TrackWall<X>Pillar`` with a
+   foot/transition/shaft variant stack -> looked right on the
+   handful of RoadTech blocks it was derived from
 
-So: pillars are always ``North`` regardless of the road's rotation,
-and the stack is foot / transition / shaft by height, selected via
-the block variant. Earlier attempts got this wrong in two ways —
-v1 tiled 1x1 pillars per cell into a solid plateau, and v2 inherited
-the road's rotation and left variants unset.
+A full harvest against the game (3,318 blocks) showed why #3 could
+never generalise: the name rewrite predicts the correct pillar for
+just 197 of 2,918 blocks (7%). Pillar direction varies across all
+four values, 73 blocks place their pillar off the block anchor, and
+cliff blocks map to pillar names sharing no stem at all.
 
-Shape matching still applies for multi-cell road blocks
-(``RoadTechCurve2`` -> ``TrackWallCurve2Pillar``); the variant
-pattern above is only confirmed for the 1x1 straight case, so wider
-pillars are emitted with the shaft variant and no foot until we have
-the same evidence for them.
-
-Supports are decoration: they are appended after the route is fixed
-and never displace a route block (route-first rule, CLAUDE.md).
+So this module reads ``data/catalogue/pillar_rules.json``, produced
+by asking the game directly. Blocks absent from the table get no
+pillars rather than a guessed one.
 """
 from __future__ import annotations
 
+import json
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 
 from src.catalogue.loader import BlockDef, rotate_offset
 from src.generation.clip_walker import GROUND_Y, Placement
 
 _LOG = logging.getLogger(__name__)
 
-SUPPORTS_VERSION = "supports-v3"
-
-# 1x1x1 fallback for blocks with no shape-matched pillar (gates,
-# slopes) — all of which occupy a single XZ cell.
-DEFAULT_PILLAR = "TrackWallStraightPillar"
-
-# Pillars are written facing North whatever the road above does.
-PILLAR_DIRECTION = 0
-
-# Variant by height within the stack (observed on the 1x1 straight).
-PILLAR_VARIANT_FOOT = 0        # at ground level
-PILLAR_VARIANT_TRANSITION = 5  # exactly one level above ground
-PILLAR_VARIANT_SHAFT = 1       # everything higher
+SUPPORTS_VERSION = "supports-v4"
+SCHEMA = "pillar_rules_v2"
+DEFAULT_RULES_PATH = "data/catalogue/pillar_rules.json"
 
 
-def pillar_for(
-    block_id: str,
-    catalogue: dict[str, BlockDef],
-) -> str | None:
-    """Footprint-matched pillar for a road block, or None.
+@dataclass(frozen=True)
+class PillarRule:
+    pillar: str
+    variant: int
+    direction: int
+    dx: int
+    dz: int
+    uniform: bool
 
-    ``RoadTechCurve2`` -> ``TrackWallCurve2Pillar``. The candidate is
-    accepted only if its ground footprint matches the road block's in
-    XZ, so a name coincidence can never place an overlapping pillar.
-    """
-    block = catalogue.get(block_id)
-    if block is None:
-        return None
-    variant = block.variant("ground", 0)
-    if variant is None:
-        return None
-    want = (variant.size[0], variant.size[2])
 
-    candidates = []
-    for prefix in ("RoadTech", "PlatformTech", "RoadDirt", "RoadBump", "RoadIce"):
-        if block_id.startswith(prefix):
-            stem = block_id[len(prefix):]
-            candidates.append(f"TrackWall{stem}Pillar")
-            candidates.append(f"DecoWall{stem}Pillar")
-    for cand in candidates:
-        other = catalogue.get(cand)
-        if other is None:
-            continue
-        ov = other.variant("ground", 0)
-        if ov is None:
-            continue
-        if (ov.size[0], ov.size[2]) == want:
-            return cand
+class PillarRules:
+    """Game-harvested pillar table, keyed by road block id."""
 
-    # No shape match: only safe for single-cell footprints.
-    if want == (1, 1) and DEFAULT_PILLAR in catalogue:
-        return DEFAULT_PILLAR
-    return None
+    def __init__(self, rules: dict[str, PillarRule], ground_y: int) -> None:
+        self._rules = rules
+        self.ground_y = ground_y
+
+    @classmethod
+    def load(cls, path: str | Path = DEFAULT_RULES_PATH) -> "PillarRules":
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        if doc.get("schema") != SCHEMA:
+            raise ValueError(f"unsupported pillar-rule schema: {doc.get('schema')!r}")
+        rules = {
+            block_id: PillarRule(
+                pillar=str(r["pillar"]),
+                variant=int(r["variant"]),
+                direction=int(r["dir"]),
+                dx=int(r.get("dx", 0)),
+                dz=int(r.get("dz", 0)),
+                uniform=bool(r.get("uniform", True)),
+            )
+            for block_id, r in doc.get("rules", {}).items()
+        }
+        _LOG.info("pillar rules loaded: %d blocks from %s", len(rules), path)
+        return cls(rules, int(doc.get("ground_y", GROUND_Y)))
+
+    def get(self, block_id: str) -> PillarRule | None:
+        return self._rules.get(block_id)
+
+    def __len__(self) -> int:
+        return len(self._rules)
 
 
 def route_cells(
@@ -145,68 +132,74 @@ def _footprint(
 def build_supports(
     placements: list[Placement],
     catalogue: dict[str, BlockDef],
-    ground_y: int = GROUND_Y,
+    rules: PillarRules,
+    ground_y: int | None = None,
 ) -> list[Placement]:
-    """Pillars beneath every elevated route block, as the game writes them.
+    """Pillars beneath elevated route blocks, per the harvested table.
 
-    One pillar per level. Single-cell columns reproduce the observed
-    foot / transition / shaft variant stack facing North; multi-cell
-    road blocks get their footprint-matched pillar at the road's own
-    rotation (so the support follows the curve). A level is skipped
-    when its footprint would intersect anything already placed — the
-    route, or a pillar from an earlier block — which keeps
-    self-crossing routes safe.
+    One pillar per level from ground up to the block. A level is
+    skipped when its footprint would hit anything already placed —
+    the route, or a pillar from an earlier block — which is what
+    keeps self-crossing routes safe.
     """
+    ground = rules.ground_y if ground_y is None else ground_y
     cells = route_cells(placements, catalogue)
     occupied = set(cells)
     supports: list[Placement] = []
-    unmatched: set[str] = set()
+    unknown: set[str] = set()
+    non_uniform: set[str] = set()
 
-    for p in placements:
+    # Bottom-up. Where a route stacks in one column, the game supports
+    # the LOWEST block and the upper deck inherits that column, so the
+    # lowest block must claim it first. Processing in route order let
+    # an upper 1x1 curve grab a column the lower 2x2 curve owned,
+    # which the game-diff caught as 24 wrong cells.
+    for p in sorted(placements, key=lambda q: (q.y, q.z, q.x)):
         own = _footprint(p.block_id, p.x, p.y, p.z, p.rotation, catalogue)
         if not own:
             continue
         base_y = min(c[1] for c in own)
-        if base_y <= ground_y:
-            continue
-        pillar = pillar_for(p.block_id, catalogue)
-        if pillar is None:
-            unmatched.add(p.block_id)
+        if base_y <= ground:
             continue
 
-        single_cell = pillar == DEFAULT_PILLAR
-        # A 1x1 pillar is rotation-independent, so use the game's
-        # North; wider pillars must follow the road to stay aligned.
-        rotation = PILLAR_DIRECTION if single_cell else p.rotation
+        rule = rules.get(p.block_id)
+        if rule is None:
+            unknown.add(p.block_id)
+            continue
+        if not rule.uniform:
+            # The harvest recorded only the bottom level for these;
+            # applying it to the whole column would be a guess.
+            non_uniform.add(p.block_id)
+            continue
 
-        for y in range(ground_y, base_y):
-            want = _footprint(pillar, p.x, y, p.z, rotation, catalogue)
+        # The table was harvested with the probe block at rotation 0,
+        # so the recorded offset and direction rotate with the block.
+        pillar_rot = (rule.direction + p.rotation) % 4
+        for y in range(ground, base_y):
+            want = _footprint(
+                rule.pillar, p.x + rule.dx, y, p.z + rule.dz,
+                pillar_rot, catalogue,
+            )
             if not want or any(c in occupied for c in want):
                 continue
-            # The variant stack is a function of HEIGHT, not
-            # footprint, so it applies to wide pillars too. Leaving
-            # them unset defaulted every one to variant 0 — i.e. a
-            # column of "foot" pieces, which is what produced the
-            # mismatched panelling seen in-game on curve supports.
-            if y == ground_y:
-                variant = PILLAR_VARIANT_FOOT
-            elif y == ground_y + 1:
-                variant = PILLAR_VARIANT_TRANSITION
-            else:
-                variant = PILLAR_VARIANT_SHAFT
-            supports.append(
-                Placement(pillar, p.x, y, p.z, rotation, variant=variant)
-            )
+            supports.append(Placement(
+                rule.pillar, p.x + rule.dx, y, p.z + rule.dz,
+                pillar_rot, variant=rule.variant,
+            ))
             occupied.update(want)
 
-    if unmatched:
+    if unknown:
         _LOG.warning(
-            "%s: no shape-matched pillar for %s — those columns are "
-            "left unsupported rather than filled with a wrong shape",
-            SUPPORTS_VERSION, sorted(unmatched),
+            "%s: no harvested rule for %s — left unsupported rather "
+            "than guessed", SUPPORTS_VERSION, sorted(unknown)[:6],
+        )
+    if non_uniform:
+        _LOG.warning(
+            "%s: non-uniform pillar column for %s — needs per-level "
+            "harvest", SUPPORTS_VERSION, sorted(non_uniform)[:6],
         )
     _LOG.info(
-        "%s: %d pillars for %d route blocks (%d route cells)",
-        SUPPORTS_VERSION, len(supports), len(placements), len(cells),
+        "%s: %d pillars for %d route blocks",
+        SUPPORTS_VERSION, len(supports), len(placements),
     )
     return supports

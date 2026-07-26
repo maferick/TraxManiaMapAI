@@ -177,7 +177,9 @@ void ProcessCommand(const string &in inPath) {
             jb["y"] = b.Coord.y;
             jb["z"] = b.Coord.z;
             jb["dir"] = int(b.Direction);
-            jb["variant"] = int(b.BlockModelVariantIndex);
+            // Runtime name differs from GBX.NET's 'Variant'.
+            jb["variant"] = int(b.BlockInfoVariantIndex);
+            jb["mobil_variant"] = int(b.MobilVariantIndex);
             jb["is_ground"] = b.IsGround;
             arr.Add(jb);
             if (i % 200 == 0) yield();
