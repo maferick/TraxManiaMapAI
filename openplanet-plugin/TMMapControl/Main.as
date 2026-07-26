@@ -160,15 +160,20 @@ void ProcessCommand(const string &in inPath) {
             res["ok"] = false;
             res["error"] = "load_map needs 'map_file'";
         } else {
-            if (editor !is null) {
-                app.BackToMainMenu();
-            }
+            // Always return to the menu first, not just when the
+            // editor is open. EditMap does nothing from most other
+            // states, and the earlier version only went back when it
+            // found an editor — so calling this from the menu-ish
+            // limbo the game sits in after quitting a map failed
+            // silently and burned the full 60s wait.
+            app.BackToMainMenu();
             int waitUntil = Time::Stamp + 30;
             while (!app.ManiaTitleControlScriptAPI.IsReady
                    && Time::Stamp < waitUntil) {
                 yield();
                 sleep(200);
             }
+            res["title_ready"] = app.ManiaTitleControlScriptAPI.IsReady;
             app.ManiaTitleControlScriptAPI.EditMap(mapFile, "", "");
             waitUntil = Time::Stamp + EDITOR_OPEN_WAIT_SECONDS;
             CGameCtnEditorFree@ opened = null;
