@@ -11,12 +11,16 @@ from src.generation.families import (
     SUPPORTED,
     FamilyError,
     resolve,
+    resolve_pool,
 )
 
 REAL_CATALOGUE = "data/catalogue2/catalogue.ndjson"
 
 
 def _block(block_id, waypoint, clip, size=(1, 1, 1)):
+    # clip=None reproduces the Gate* arches, which carry no clips at
+    # all — invisible to resolve(), usable by resolve_pool().
+    clips = {} if clip is None else {"n": [clip], "s": [clip]}
     return {
         "type": "block", "id": block_id, "name": block_id, "page": "p",
         "waypoint": waypoint, "is_pillar": False,
@@ -24,7 +28,7 @@ def _block(block_id, waypoint, clip, size=(1, 1, 1)):
             "kind": "ground", "index": 0, "size": list(size),
             "units": [{"offset": [0, 0, 0], "underground": False,
                        "terrain_modifier": "", "surface": "",
-                       "clips": {"n": [clip], "s": [clip]}}],
+                       "clips": clips}],
         }],
     }
 
@@ -41,6 +45,15 @@ def catalogue(tmp_path):
         _block("RoadDirtStraight", "None", "RoadDirtFC"),
         # Wrong clip for its family — must be filtered out.
         _block("RoadTechStray", "None", "SomethingElseFC"),
+        # Platform surface and its gate, with the mismatched clips the
+        # real catalogue has: the gate carries PlatformFCSmallRacing,
+        # which no surface block does.
+        _block("PlatformPlasticBase", "None", "PlatFormFCSmall"),
+        _block("PlatformPlasticStart", "Start", "PlatformFCSmallRacing"),
+        _block("PlatformPlasticFinish", "Finish", "PlatformFCSmallRacing"),
+        # Universal arches: no clips whatsoever.
+        _block("GateCheckpoint", "Checkpoint", None, size=(1, 4, 1)),
+        _block("GateFinish", "Finish", None, size=(1, 4, 1)),
     ]
     path = tmp_path / "catalogue.ndjson"
     lines = [json.dumps({"type": "meta", "schema": "block_catalogue_v1"})]
@@ -115,3 +128,39 @@ class TestRealCatalogue:
             ).generate(30, 10)
             assert route[0].block_id.endswith("Start"), family
             assert route[-1].block_id.endswith("Finish"), family
+
+
+class TestResolvePool:
+    """The grammar walker's vocabulary: no clip rule, so no clip limits."""
+
+    def test_platform_families_resolve(self, catalogue):
+        # resolve() refuses these because platform gates expose an
+        # isolated clip. Corpus map 25192 is a published plastic map
+        # that places them anyway.
+        pool = resolve_pool(["platform-plastic"], catalogue)
+        assert any(catalogue[b].waypoint == "Start" for b in pool)
+        assert any(catalogue[b].waypoint == "Finish" for b in pool)
+
+    def test_families_may_mix(self, catalogue):
+        mixed = resolve_pool(["dirt", "platform-plastic"], catalogue)
+        assert set(mixed) >= set(resolve_pool(["dirt"], catalogue))
+        assert set(mixed) >= set(resolve_pool(["platform-plastic"], catalogue))
+
+    def test_clipless_gates_are_included(self, catalogue):
+        pool = resolve_pool(["dirt"], catalogue, gates=True)
+        gates = [b for b in pool if b.startswith("Gate")]
+        assert gates, "universal Gate* arches must reach the pool"
+        # The whole point: these have no clips, so resolve() drops them.
+        clipless = [
+            b for b in gates
+            if not catalogue[b].variant("ground", 0).side_ports()
+        ]
+        assert clipless
+
+    def test_gates_can_be_switched_off(self, catalogue):
+        pool = resolve_pool(["dirt"], catalogue, gates=False)
+        assert not [b for b in pool if b.startswith("Gate")]
+
+    def test_unknown_family_is_rejected(self, catalogue):
+        with pytest.raises(FamilyError, match="unknown families"):
+            resolve_pool(["banana"], catalogue)

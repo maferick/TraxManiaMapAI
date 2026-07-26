@@ -5,19 +5,27 @@ every generated map was a tech road no matter what was asked for.
 Nothing in the walker required that: it is clip-driven, and each
 surface family is simply a different clip id over the same geometry.
 
-Two facts from the catalogue shape this module:
+There are two consumers with different needs, so there are two
+resolvers.
 
-* **Roads do not interconnect across surfaces.** ``RoadTechFC`` and
-  ``RoadDirtFC`` are distinct clips, so a tech road cannot butt
-  straight into a dirt road — real maps use explicit transition
-  blocks for that, which is a separate feature.
-* **Platforms all share ``PlatFormFCSmall``.** Every Platform*
-  surface (tech / dirt / ice / grass / plastic) uses the same clip,
-  so those five families interconnect freely and can be mixed in one
-  route.
+``resolve`` serves :class:`ClipWalker`, which joins blocks by matching
+route-clips. Under that rule two facts from the catalogue apply:
+``RoadTechFC`` and ``RoadDirtFC`` are distinct clips so those pools
+cannot interconnect, and every Platform* surface shares
+``PlatFormFCSmall`` so those five can.
 
-Every family ships exactly one Start and one Finish plus 7-9
-checkpoints, so any of them can form a complete route.
+``resolve_pool`` serves :class:`GrammarWalker`, which joins blocks by
+corpus evidence. Under that rule the clip constraints above simply do
+not apply, and the corpus says so plainly: map 25192 runs
+``PlatformTechStart`` (clip ``PlatformFCSmallRacing``) into
+``PlatformWaterSpecialTurbo2`` (``PlatformWaterFCSmall``) into
+``PlatformTechToDecoWall`` (``PlatFormFCSmall``), and map 4269 runs
+platform into open road into road in three consecutive cells. So
+``resolve_pool`` mixes freely, keeps clipless blocks, and can add the
+universal ``Gate*`` arches that no surface family contains.
+
+Every surface family ships its own Start, Finish, Multilap and 7-9
+checkpoints, so any of them can form a complete route on its own.
 """
 from __future__ import annotations
 
@@ -39,18 +47,29 @@ class Family:
     unsupported: str | None = None
 
 
-# Platform families are deliberately excluded. Their gates
-# (Start/Finish/Checkpoint/Multilap) expose only
-# ``PlatformFCSmallRacing``, which NO other platform block carries —
+# Platform families are excluded from the CLIP walker only. Their
+# gates (Start/Finish/Checkpoint/Multilap) expose only
+# ``PlatformFCSmallRacing``, which no other platform block carries —
 # verified across all 186 PlatformTech blocks, of which just the 4
-# gates use it. There is no bridge block, so gates cannot be chained
-# to platform surface blocks at all. Platform maps are not linear
-# clip-chains: the gates sit on a platform area rather than in-line.
-# Supporting them needs a different route model, not a config entry.
+# gates use it. Under clip matching there is no bridge, so the gates
+# cannot be chained to the surface.
+#
+# That is a fact about clip matching, NOT about the game: corpus map
+# 25192 is a real, published plastic map that places
+# ``PlatformTechStart`` directly beside surface blocks whose clips do
+# not match it. Platform tiles butt together and you drive over the
+# seam. Use ``resolve_pool`` + :class:`GrammarWalker` to build these.
 _PLATFORM_REASON = (
     "platform gates use an isolated clip (PlatformFCSmallRacing) with "
-    "no bridge to surface blocks; platform maps are not linear "
-    "clip-chains and need a different route model"
+    "no bridge to surface blocks, so clip matching cannot chain them. "
+    "Real platform maps do it anyway — build them with the grammar "
+    "walker (resolve_pool) instead"
+)
+
+_OPEN_REASON = (
+    "open roads ship checkpoints but no Start or Finish, so they "
+    "cannot form a route alone; add them to another family's pool "
+    "with resolve_pool"
 )
 
 FAMILIES: dict[str, Family] = {
@@ -69,13 +88,91 @@ FAMILIES: dict[str, Family] = {
         "platform-grass", "PlatformGrass", "PlatFormFCSmall", _PLATFORM_REASON),
     "platform-plastic": Family(
         "platform-plastic", "PlatformPlastic", "PlatFormFCSmall", _PLATFORM_REASON),
+    # Open roads have checkpoints but no Start/Finish of their own, so
+    # they are a garnish on another family rather than a whole map.
+    # Map 4269 uses OpenTechRoadStraight mid-route between a platform
+    # block and a road block.
+    "open-tech": Family("open-tech", "OpenTechRoad", "", _OPEN_REASON),
+    "open-dirt": Family("open-dirt", "OpenDirtRoad", "", _OPEN_REASON),
 }
 
+# Universal gate arches. Clipless and 1x4x1 (GateCheckpoint,
+# GateFinish, GateSpecialTurbo, ...) or 1x1x1 tiles a mapper assembles
+# into a wall (GateExpandable*). They belong to no surface family,
+# which is why a prefix-based pool never saw them, which is why the
+# clip walker could not close a plastic map.
+GATE_PREFIX = "Gate"
+
 SUPPORTED = [n for n, f in FAMILIES.items() if f.unsupported is None]
+
+# Every family is usable by the grammar walker: it does not chain by
+# clips, so nothing above disqualifies a pool.
+GRAMMAR_FAMILIES = sorted(FAMILIES)
 
 
 class FamilyError(ValueError):
     pass
+
+
+def resolve_pool(
+    names: list[str],
+    catalogue: dict[str, BlockDef],
+    max_footprint: int | None = None,
+    gates: bool = True,
+) -> list[str]:
+    """Block ids for the grammar walker: no clip requirement, no mixing rule.
+
+    Three things ``resolve`` drops and this keeps, each because the
+    corpus contains it:
+
+    * **clipless blocks.** Every 1x4x1 ``Gate*`` arch has no clips at
+      all. ``resolve`` filters on exposing a route clip, so those
+      blocks were invisible to it — and they are how a map gets a
+      checkpoint or a booster over a surface that has no gate of its
+      own.
+    * **cross-family pools.** Mixing tech with dirt is rejected under
+      clip matching. Real maps do it.
+    * **families marked unsupported.** That flag describes the clip
+      walker's reach, not the game's.
+
+    ``gates`` adds the universal ``Gate*`` set on top of the requested
+    families. Leave it on unless a run deliberately wants no arches.
+    """
+    if not names:
+        raise FamilyError("no families requested")
+    unknown = [n for n in names if n not in FAMILIES]
+    if unknown:
+        raise FamilyError(
+            f"unknown families {unknown}; available: {sorted(FAMILIES)}"
+        )
+
+    prefixes = tuple(FAMILIES[n].prefix for n in names)
+    if gates:
+        prefixes += (GATE_PREFIX,)
+
+    allowed: list[str] = []
+    for block_id, block in catalogue.items():
+        if not block_id.startswith(prefixes):
+            continue
+        variant = block.variant("ground", 0)
+        if variant is None:
+            continue
+        if max_footprint is not None:
+            if variant.size[0] > max_footprint or variant.size[2] > max_footprint:
+                continue
+        allowed.append(block_id)
+
+    have_start = any(catalogue[b].waypoint == "Start" for b in allowed)
+    have_finish = any(catalogue[b].waypoint == "Finish" for b in allowed)
+    if not (have_start and have_finish):
+        raise FamilyError(
+            f"families {names} lack a Start and/or Finish block"
+        )
+
+    _LOG.info(
+        "families %s -> %d blocks (gates=%s)", names, len(allowed), gates
+    )
+    return sorted(allowed)
 
 
 def resolve(
