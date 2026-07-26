@@ -308,3 +308,99 @@ class TestRouteVocabulary:
         # anything on the line, so it is not buildable.
         assert "Boost" not in walker._allow
         assert {"Start", "Tile", "Finish"} <= walker._allow
+
+
+class TestFootprintContact:
+    """Route steps must touch across a face, not a corner.
+
+    The grammar records kitty-corner pairs as readily as in-line ones —
+    a curve and the block diagonally off it really do co-occur. Chained
+    as route steps they produce slabs meeting at their corners with
+    nothing to drive across, which is what the first driven map looked
+    like.
+    """
+
+    def test_a_diagonal_step_is_refused(self, catalogue, tmp_path):
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Tile", 3, 0, 900, 900, 0],
+                       ["Finish", 0, 0, 500, 500, 0]],
+             "Tile": [["Finish", 0, 0, 900, 900, 0]]},
+            offsets=[[0, 0, 1], [0, 0, 0], [0, 0, 2], [1, 0, 1]],
+        )
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Finish"],
+            seed=1, min_maps=1, route_only=False,
+        )
+        # Tile is only reachable at (1,0,1) — corner contact for a 1x1
+        # block — so the walker must fall through to the straight
+        # Start -> Finish move instead.
+        route = walker.generate(length=1, checkpoint_every=0)
+        assert [p.block_id for p in route] == ["Start", "Finish"]
+
+    def test_a_multi_cell_block_may_hand_off_diagonally(self, tmp_path):
+        """The SAME offset the test above refuses, from a 1x1x2 source.
+
+        (1,0,1) is corner-only for a 1x1 block and face contact for a
+        two-deep one, which is why the rule is about footprints rather
+        than about the step being axis-aligned.
+        """
+        records = [
+            _block("Start", "Start", size=(1, 1, 2)),
+            _block("Finish", "Finish"),
+        ]
+        path = tmp_path / "catalogue.ndjson"
+        lines = [json.dumps({"type": "meta", "schema": "block_catalogue_v1"})]
+        lines += [json.dumps(r) for r in records]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        (tmp_path / "catalogue.done.json").write_text("{}", encoding="utf-8")
+        cat = load_catalogue(path, collection="Stadium2020")
+
+        grammar = _grammar(
+            tmp_path, {"Start": [["Finish", 3, 0, 900, 900, 0]]},
+            offsets=[[0, 0, 1], [0, 0, 0], [0, 0, 2], [1, 0, 1]],
+        )
+        walker = GrammarWalker(
+            cat, grammar, pool=["Start", "Finish"], seed=1,
+            min_maps=1, route_only=False,
+        )
+        route = walker.generate(length=1, checkpoint_every=0)
+        assert [p.block_id for p in route] == ["Start", "Finish"]
+
+    def test_a_flat_block_cannot_step_up(self, catalogue, tmp_path):
+        """(0,+1,+1) has no face contact for a 1x1 source — a floating slab."""
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Finish", 3, 0, 900, 900, 0]]},
+            offsets=[[0, 0, 1], [0, 0, 0], [0, 0, 2], [0, 1, 1]],
+        )
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Finish"],
+            seed=1, min_maps=1, route_only=False,
+        )
+        with pytest.raises(RouteDeadEnd):
+            walker.generate(length=1, checkpoint_every=0)
+
+    def test_a_two_cell_tall_source_can(self, tmp_path):
+        """The same step from a 1x2x1 ramp is exactly how slopes work."""
+        records = [
+            _block("Start", "Start", size=(1, 2, 1)),
+            _block("Finish", "Finish"),
+        ]
+        path = tmp_path / "catalogue.ndjson"
+        lines = [json.dumps({"type": "meta", "schema": "block_catalogue_v1"})]
+        lines += [json.dumps(r) for r in records]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        (tmp_path / "catalogue.done.json").write_text("{}", encoding="utf-8")
+        cat = load_catalogue(path, collection="Stadium2020")
+
+        grammar = _grammar(
+            tmp_path, {"Start": [["Finish", 3, 0, 900, 900, 0]]},
+            offsets=[[0, 0, 1], [0, 0, 0], [0, 0, 2], [0, 1, 1]],
+        )
+        walker = GrammarWalker(
+            cat, grammar, pool=["Start", "Finish"], seed=1,
+            min_maps=1, route_only=False,
+        )
+        route = walker.generate(length=1, checkpoint_every=0)
+        assert route[1].y == route[0].y + 1

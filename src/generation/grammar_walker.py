@@ -134,6 +134,32 @@ def _reverse_offset(move: Move) -> Cell:
     return rotate_vector(back, (4 - move.rel_rotation) % 4)
 
 
+_NEIGHBOURS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+
+
+def _touches(source: set[Cell], target: list[Cell]) -> bool:
+    """Do the two footprints share a FACE, not just an edge or corner?
+
+    The grammar records every nearby pair, including the ones that sit
+    kitty-corner — a curve and the block diagonally off it are as real
+    a pair as a straight and the block ahead of it. Chained as route
+    steps those produce exactly what the first driven map looked like:
+    slabs meeting at their corners with nothing to drive across.
+
+    Face contact is the right test rather than "the step must be
+    axis-aligned", because a multi-cell block's anchor-to-anchor step
+    is legitimately diagonal — a 2x2 curve hands off at ``(1, 0, 2)``.
+    It also rules out bogus height changes for free: a 1x1 block cannot
+    reach ``(0, +1, +1)``, while a 1x2x1 slope can, which is precisely
+    the difference between a ramp and a floating slab.
+    """
+    for cx, cy, cz in target:
+        for dx, dy, dz in _NEIGHBOURS:
+            if (cx + dx, cy + dy, cz + dz) in source:
+                return True
+    return False
+
+
 def _faces_travel(rotation: int, travel: Cell) -> bool:
     """Does a block at ``rotation`` point along ``travel``?
 
@@ -327,10 +353,14 @@ class GrammarWalker:
             if not moves and want == "Checkpoint":
                 moves = self._candidates(prev.block_id, "None", incoming)
 
+            here = (prev.x, prev.y, prev.z)
+            source = {
+                _shift(here, c)
+                for c in self._cells[(prev.block_id, prev.rotation)]
+            }
+
             for move in self._order(moves):
-                anchor, rotation = move.apply(
-                    (prev.x, prev.y, prev.z), prev.rotation
-                )
+                anchor, rotation = move.apply(here, prev.rotation)
                 cells = self._cells.get((move.block, rotation))
                 if cells is None:
                     continue
@@ -338,6 +368,13 @@ class GrammarWalker:
                 if not in_bounds(footprint):
                     continue
                 if any(c in occupied for c in footprint):
+                    continue
+                # A jump is defined by NOT touching; everything else has
+                # to, or the route is a chain of corner-to-corner slabs.
+                if move.is_gap:
+                    if _touches(source, footprint):
+                        continue
+                elif not _touches(source, footprint):
                     continue
                 travel = (
                     anchor[0] - prev.x, anchor[1] - prev.y, anchor[2] - prev.z,
