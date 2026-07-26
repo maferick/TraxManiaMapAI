@@ -47,6 +47,17 @@ _LOG = logging.getLogger(__name__)
 
 STAGE_VERSION = "route-sequences-v1"
 
+# Blocks that hold a track up rather than carry it. Excluding them
+# matters: adjacency here is face contact, so with pillars in the graph
+# a shortest path would happily cut down a support column and across
+# the scenery instead of following the road.
+_SUPPORT_MARKERS = ("Pillar", "TrackWall", "DecoWall", "Structure",
+                    "Canopy", "Technics", "Grass")
+
+
+def _IS_SUPPORT(name: str) -> bool:
+    return any(m in name for m in _SUPPORT_MARKERS)
+
 
 @dataclass
 class SequenceReport:
@@ -133,28 +144,37 @@ def reconstruct_route(
     placements = [
         (str(r[0]), int(r[1]) % 4, int(r[2]), int(r[3]), int(r[4]))
         for r in rows
+        # Pillars and structural walls are not on the racing line and
+        # would let a shortest path cut straight through the scenery.
+        if not _IS_SUPPORT(str(r[0]))
     ]
-    # World port cell+face -> (placement index, clip)
-    open_ports: dict[tuple[int, int, int, int], list[tuple[int, str]]] = (
-        defaultdict(list)
-    )
+
+    # Adjacency is FACE CONTACT, not clip agreement. A clip-matched
+    # chain reconstructed only 2.8% of maps, because clip matching is
+    # not how platform surfaces join, how clipless gates attach, or how
+    # a jump works — the finding this whole table exists to move past.
+    cell_owner: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     for i, (name, rot, x, y, z) in enumerate(placements):
-        for cell, face, clip in ports.get((name, rot), ()):
-            open_ports[(x + cell[0], y + cell[1], z + cell[2], face)].append(
-                (i, clip)
-            )
+        block = catalogue.get(name)
+        variant = block.variant("ground", 0) if block is not None else None
+        cells = (
+            [rotate_offset(u.offset, rot, variant.size) for u in variant.units]
+            if variant is not None else [(0, 0, 0)]
+        )
+        for cx, cy, cz in cells:
+            cell_owner[(x + cx, y + cy, z + cz)].append(i)
 
     links: dict[int, set[int]] = defaultdict(set)
-    for (wx, wy, wz, face), here in open_ports.items():
-        dx, dy, dz = FACE_DELTAS[face]
-        there = open_ports.get((wx + dx, wy + dy, wz + dz, opposite_face(face)))
-        if not there:
-            continue
-        for i, clip_i in here:
-            for j, clip_j in there:
-                if i != j and clip_i == clip_j:
-                    links[i].add(j)
-                    links[j].add(i)
+    for (cx, cy, cz), owners in cell_owner.items():
+        # Side faces plus up/down: slopes hand off vertically.
+        for dx, dy, dz in (
+            *FACE_DELTAS.values(), (0, 1, 0), (0, -1, 0),
+        ):
+            for j in cell_owner.get((cx + dx, cy + dy, cz + dz), ()):
+                for i in owners:
+                    if i != j:
+                        links[i].add(j)
+                        links[j].add(i)
 
     starts = [
         i for i, p in enumerate(placements)
