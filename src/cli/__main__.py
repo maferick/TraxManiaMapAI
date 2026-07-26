@@ -820,6 +820,37 @@ def _cmd_build_face_transitions(args: argparse.Namespace) -> int:
     return 0 if not report.errors else 1
 
 
+def _cmd_mine_placement_grammar(args: argparse.Namespace) -> int:
+    from src.catalogue.loader import load_catalogue
+    from src.constraints.placement_grammar import build_grammar, reset_grammar
+
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        catalogue = load_catalogue(args.catalogue, collection=args.environment)
+        if args.reset:
+            reset_grammar(conn)
+        report = build_grammar(
+            conn,
+            catalogue=catalogue,
+            environment=args.environment,
+            limit=int(args.limit) if args.limit else None,
+            radius_xz=int(args.radius_xz),
+            radius_y=int(args.radius_y),
+            min_map_count=int(args.min_maps),
+        )
+    finally:
+        conn.close()
+    _LOG.info(
+        "mine-placement-grammar: maps=%d placements=%d pairs=%d "
+        "keys=%d rows=%d clip_matched=%d overlay=%d gap=%d",
+        report.maps_seen, report.placements_seen, report.pairs_counted,
+        report.distinct_keys, report.rows_written,
+        report.clip_matched_rows, report.overlay_rows, report.gap_rows,
+    )
+    return 0 if not report.errors else 1
+
+
 def _cmd_export_face_priors(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -2989,6 +3020,47 @@ def _build_parser() -> argparse.ArgumentParser:
         help="TRUNCATE block_face_transitions before rebuilding",
     )
     face_transitions_cmd.set_defaults(func=_cmd_build_face_transitions)
+
+    grammar_cmd = sub.add_parser(
+        "mine-placement-grammar",
+        help="Observed placement grammar: count every (block_a, block_b, "
+             "offset, relative rotation) the corpus actually contains, "
+             "into block_placement_grammar. Unlike build-face-transitions "
+             "this does not require a clip match, so jumps, clipless "
+             "gates placed over the route, same-cell stacks and "
+             "cross-family joins all survive. Clip agreement is kept as "
+             "a column, not a filter.",
+    )
+    grammar_cmd.add_argument(
+        "--catalogue", type=str, default="data/catalogue2/catalogue.ndjson",
+        help="path to the block catalogue NDJSON",
+    )
+    grammar_cmd.add_argument(
+        "--environment", type=str, default="Stadium2020",
+        help="one environment per run; the corpus spans six TM games "
+             "whose geometry is not interchangeable",
+    )
+    grammar_cmd.add_argument(
+        "--radius-xz", type=int, default=3,
+        help="neighbourhood radius in X/Z cells (3 spans real jumps)",
+    )
+    grammar_cmd.add_argument(
+        "--radius-y", type=int, default=2,
+        help="neighbourhood radius in Y cells",
+    )
+    grammar_cmd.add_argument(
+        "--min-maps", type=int, default=3,
+        help="drop keys observed in fewer than this many maps",
+    )
+    grammar_cmd.add_argument(
+        "--limit", type=int, default=None,
+        help="cap the number of maps processed (for smoke runs)",
+    )
+    grammar_cmd.add_argument(
+        "--reset", action="store_true",
+        help="TRUNCATE block_placement_grammar before rebuilding",
+    )
+    grammar_cmd.set_defaults(func=_cmd_mine_placement_grammar)
 
     export_priors_cmd = sub.add_parser(
         "export-face-priors",

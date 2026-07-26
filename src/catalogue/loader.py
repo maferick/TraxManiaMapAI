@@ -91,6 +91,29 @@ def rotate_offset(
     return (z, y, sx - 1 - x)
 
 
+def rotate_vector(
+    offset: tuple[int, int, int],
+    direction: int,
+) -> tuple[int, int, int]:
+    """Rotate a free vector, without re-anchoring to a footprint.
+
+    Same sense as :func:`rotate_offset`, but for a displacement
+    between two placements rather than a cell inside one block. The
+    re-anchoring in ``rotate_offset`` exists to keep a block's own
+    cells non-negative; applying it to a displacement silently shifts
+    the result (the bug that put 2x2 pillars one cell off).
+    """
+    x, y, z = offset
+    d = direction % 4
+    if d == 0:
+        return (x, y, z)
+    if d == 1:
+        return (-z, y, x)
+    if d == 2:
+        return (-x, y, -z)
+    return (z, y, -x)
+
+
 def rotated_size(size: tuple[int, int, int], direction: int) -> tuple[int, int, int]:
     sx, sy, sz = size
     return (sz, sy, sx) if direction % 2 == 1 else (sx, sy, sz)
