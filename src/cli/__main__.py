@@ -852,6 +852,69 @@ def _cmd_mine_placement_grammar(args: argparse.Namespace) -> int:
     return 0 if not report.errors else 1
 
 
+def _cmd_export_placement_grammar(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from src.storage.mariadb import cursor as _cursor
+
+    config = load_config(args.config)
+    conn = open_connection(config)
+    sql = (
+        "SELECT block_a, block_b, dx, dy, dz, rel_rotation, clip_matched, "
+        "map_count, pair_count FROM block_placement_grammar "
+        "WHERE environment = %s AND map_count >= %s"
+    )
+    params: list = [args.environment, int(args.min_maps)]
+    if args.prefix:
+        # Keeps the export to the vocabulary a generator run needs;
+        # the full table is tens of millions of rows.
+        clause = " OR ".join(["block_a LIKE %s"] * len(args.prefix))
+        sql += f" AND ({clause})"
+        params += [f"{p}%" for p in args.prefix]
+    try:
+        with _cursor(conn) as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    offsets: list[tuple[int, int, int]] = []
+    offset_ids: dict[tuple[int, int, int], int] = {}
+    rules: dict[str, list[list[int | str]]] = {}
+    for a, b, dx, dy, dz, rel, clip, maps, pairs in rows:
+        off = (int(dx), int(dy), int(dz))
+        oid = offset_ids.get(off)
+        if oid is None:
+            oid = len(offsets)
+            offset_ids[off] = oid
+            offsets.append(off)
+        rules.setdefault(str(a), []).append(
+            [str(b), oid, int(rel), int(maps), int(pairs), int(clip)]
+        )
+    for moves in rules.values():
+        moves.sort(key=lambda m: -m[3])
+
+    doc = {
+        "schema": "placement_grammar_v1",
+        "environment": args.environment,
+        "min_maps": int(args.min_maps),
+        "prefixes": list(args.prefix or []),
+        "offsets": [list(o) for o in offsets],
+        # block_a -> [[block_b, offset_index, rel_rotation,
+        #              map_count, pair_count, clip_matched], ...]
+        "rules": rules,
+    }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(_json.dumps(doc), encoding="utf-8")
+    _LOG.info(
+        "export-placement-grammar: %d rows, %d source blocks, "
+        "%d offsets -> %s",
+        len(rows), len(rules), len(offsets), out,
+    )
+    return 0
+
+
 def _cmd_export_face_priors(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -3062,6 +3125,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="TRUNCATE block_placement_grammar before rebuilding",
     )
     grammar_cmd.set_defaults(func=_cmd_mine_placement_grammar)
+
+    export_grammar_cmd = sub.add_parser(
+        "export-placement-grammar",
+        help="Export a block_placement_grammar slice as JSON for "
+             "offline generation. Filter by environment, a minimum "
+             "map_count, and block_a prefixes — the full table is "
+             "tens of millions of rows.",
+    )
+    export_grammar_cmd.add_argument(
+        "--environment", type=str, default="Stadium2020")
+    export_grammar_cmd.add_argument(
+        "--min-maps", type=int, default=20,
+        help="drop keys observed in fewer than this many maps",
+    )
+    export_grammar_cmd.add_argument(
+        "--prefix", action="append", default=None,
+        help="restrict block_a to this prefix (repeatable)",
+    )
+    export_grammar_cmd.add_argument(
+        "--out", type=str, default="data/catalogue/placement_grammar.json")
+    export_grammar_cmd.set_defaults(func=_cmd_export_placement_grammar)
 
     export_priors_cmd = sub.add_parser(
         "export-face-priors",
