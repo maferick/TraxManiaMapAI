@@ -853,6 +853,31 @@ def _cmd_mine_placement_grammar(args: argparse.Namespace) -> int:
     return 0 if not report.errors else 1
 
 
+def _cmd_mine_route_sequences(args: argparse.Namespace) -> int:
+    from src.catalogue.loader import load_catalogue
+    from src.constraints.route_sequences import build_sequences, reset_sequences
+
+    config = load_config(args.config)
+    catalogue = load_catalogue(args.catalogue, collection=args.environment)
+    conn = open_connection(config)
+    if args.reset:
+        reset_sequences(conn)
+    report = build_sequences(
+        conn, catalogue=catalogue, environment=args.environment,
+        limit=int(args.limit) if args.limit else None,
+        min_map_count=int(args.min_maps),
+    )
+    conn.close()
+    _LOG.info(
+        "mine-route-sequences: maps=%d reconstructed=%d route_blocks=%d "
+        "pairs=%d triples=%d rows=%d errors=%d",
+        report.maps_seen, report.reconstructed, report.route_blocks,
+        report.pairs, report.triples, report.rows_written,
+        len(report.errors),
+    )
+    return 0
+
+
 def _cmd_import_connection_probes(args: argparse.Namespace) -> int:
     """Load probe_connections.py output into block_connection_probes."""
     import hashlib
@@ -3186,6 +3211,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="TRUNCATE block_placement_grammar before rebuilding",
     )
     grammar_cmd.set_defaults(func=_cmd_mine_placement_grammar)
+
+    seq_cmd = sub.add_parser(
+        "mine-route-sequences",
+        help="Reconstruct each map's racing line (the clip-matched "
+             "chain from Start to Finish) and mine ORDERED pairs and "
+             "triples from it. Unlike the co-occurrence tables this "
+             "knows which block comes first, and can express a "
+             "sequence rather than only a marginal.",
+    )
+    seq_cmd.add_argument(
+        "--catalogue", type=str, default="data/catalogue2/catalogue.ndjson")
+    seq_cmd.add_argument("--environment", type=str, default="Stadium2020")
+    seq_cmd.add_argument("--limit", type=int, default=None)
+    seq_cmd.add_argument("--min-maps", type=int, default=3)
+    seq_cmd.add_argument("--reset", action="store_true")
+    seq_cmd.set_defaults(func=_cmd_mine_route_sequences)
 
     probes_cmd = sub.add_parser(
         "import-connection-probes",
