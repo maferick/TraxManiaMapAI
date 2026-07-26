@@ -19,12 +19,18 @@
 // Commands:
 //   {"op":"state"}
 //   {"op":"clear"}
+//   {"op":"load_map","map_file":"Maps/My Maps/x.Map.Gbx"}
 //   {"op":"place_blocks","blocks":[{"name":..,"x":..,"y":..,"z":..,
 //                                   "dir":0..3}, ...]}
+//   {"op":"can_place","blocks":[...]}       legality, no mutation
+//   {"op":"dump_blocks","filter":"RoadTech"}
+//   {"op":"status"}                          validation status, no drive
+//   {"op":"camera","x":..,"y":..,"z":..,"distance":..,
+//    "h_angle":..,"v_angle":..}
 //   {"op":"save","name":"MyMap"}
 //   {"op":"validate"}
 
-const string PLUGIN_VERSION = "tm-map-control-v0.1";
+const string PLUGIN_VERSION = "tm-map-control-v0.2";
 const string PROTOCOL = "tm_mcp_v1";
 const int SCAN_INTERVAL_MS = 400;
 
@@ -198,6 +204,28 @@ void ProcessCommand(const string &in inPath) {
         res["blocks"] = int(editor.Challenge.Blocks.Length);
     } else if (op == "place_blocks") {
         res = PlaceBlocks(editor, body, res);
+    } else if (op == "can_place") {
+        // The game's own legality test, WITHOUT mutating the map.
+        //
+        // This is the oracle the offline generator was missing. Every
+        // structural bug so far — blocks meeting at a corner, a flat
+        // tile stepping up, two road ends that do not join — is a
+        // question the editor can answer directly, and answering it
+        // per candidate is far cheaper than shipping a map and
+        // looking at it.
+        res = CanPlace(editor, body, res);
+    } else if (op == "status") {
+        // Read validation status WITHOUT calling Validate(). Validate()
+        // parks the editor waiting for a human driver and then times
+        // out; this just reports what the game already thinks, so it
+        // is safe to call unattended after loading a map.
+        auto pmt = editor.PluginMapType;
+        res["ok"] = true;
+        res["validation_status"] = VStatusToString(pmt.ValidationStatus);
+        res["blocks"] = int(editor.Challenge.Blocks.Length);
+        res["map_name"] = editor.Challenge.MapName;
+    } else if (op == "camera") {
+        res = MoveCamera(editor, body, res);
     } else if (op == "dump_blocks") {
         // Read the map back. This is what makes the editor usable as
         // an ORACLE for the offline emitter: place one block, dump,
@@ -345,6 +373,101 @@ Json::Value PlaceBlocks(
     // generated itself (pillars in particular), which is the reason
     // this path exists.
     res["blocks_total"] = int(editor.Challenge.Blocks.Length);
+    return res;
+}
+
+
+Json::Value CanPlace(
+    CGameCtnEditorFree@ editor, Json::Value@ body, Json::Value res
+) {
+    auto pmt = editor.PluginMapType;
+    Json::Value@ blocks = body["blocks"];
+    if (blocks is null || blocks.GetType() != Json::Type::Array) {
+        res["ok"] = false;
+        res["error"] = "can_place needs a 'blocks' array";
+        return res;
+    }
+
+    Json::Value arr = Json::Array();
+    int legal = 0;
+    for (uint i = 0; i < blocks.Length; i++) {
+        if (i % 25 == 0) yield();
+        Json::Value@ b = blocks[i];
+        string name = string(b["name"]);
+        Json::Value entry = Json::Object();
+        entry["name"] = name;
+        entry["x"] = int(b["x"]);
+        entry["y"] = int(b["y"]);
+        entry["z"] = int(b["z"]);
+        entry["dir"] = int(b["dir"]) & 3;
+
+        CGameCtnBlockInfo@ info = LookupBlock(name);
+        if (info is null) {
+            entry["can_place"] = false;
+            entry["reason"] = "unknown block";
+        } else {
+            int3 coord = int3(int(b["x"]), int(b["y"]), int(b["z"]));
+            auto dir = CGameEditorPluginMap::ECardinalDirections(
+                int(b["dir"]) & 3);
+            bool ok = false;
+            try {
+                ok = pmt.CanPlaceBlock(info, coord, dir);
+            } catch {
+                ok = false;
+                entry["reason"] = "exception: " + getExceptionInfo();
+            }
+            entry["can_place"] = ok;
+            if (ok) legal++;
+        }
+        arr.Add(entry);
+    }
+    res["ok"] = true;
+    res["legal"] = legal;
+    res["checked"] = int(arr.Length);
+    res["results"] = arr;
+    return res;
+}
+
+
+// Point the editor camera somewhere so an external screenshot shows
+// the part of the map being discussed. Best effort: the orbital
+// camera fields are not part of a documented API and have moved
+// between game builds, so every write is guarded and the op reports
+// what it managed rather than failing the whole command.
+Json::Value MoveCamera(
+    CGameCtnEditorFree@ editor, Json::Value@ body, Json::Value res
+) {
+    auto cam = editor.OrbitalCameraControl;
+    if (cam is null) {
+        res["ok"] = false;
+        res["error"] = "no orbital camera control on this editor";
+        return res;
+    }
+    Json::Value applied = Json::Array();
+    try {
+        if (body.HasKey("x") && body.HasKey("y") && body.HasKey("z")) {
+            cam.m_TargetedPosition = vec3(
+                float(body["x"]), float(body["y"]), float(body["z"]));
+            applied.Add("position");
+        }
+        if (body.HasKey("distance")) {
+            cam.m_TargetedDistance = float(body["distance"]);
+            applied.Add("distance");
+        }
+        if (body.HasKey("h_angle")) {
+            cam.m_CurrentHAngle = float(body["h_angle"]);
+            applied.Add("h_angle");
+        }
+        if (body.HasKey("v_angle")) {
+            cam.m_CurrentVAngle = float(body["v_angle"]);
+            applied.Add("v_angle");
+        }
+        res["ok"] = true;
+    } catch {
+        res["ok"] = false;
+        res["error"] = "camera write failed: " + getExceptionInfo();
+    }
+    res["applied"] = applied;
     return res;
 }
 

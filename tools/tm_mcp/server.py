@@ -152,6 +152,87 @@ def tm_place_blocks(blocks: list[dict]) -> dict:
 
 
 @mcp.tool()
+def tm_dump_blocks(filter: str = "") -> dict:
+    """Read the open map back out of the editor.
+
+    Returns every block as ``{name, x, y, z, dir, variant,
+    mobil_variant, is_ground}``. ``filter`` keeps only names
+    containing that substring.
+
+    This is what makes the editor an oracle rather than a display.
+    Two things it shows that no offline check can:
+
+    * what the GAME added — place a route and dump, and the support
+      pillars it generated are in the list
+    * which mesh the game chose — ``mobil_variant`` changes when a
+      road end is left unjoined, which is the dead-end barrier that
+      offline geometry checks cannot see
+    """
+    return _call("dump_blocks", filter=filter, timeout=120.0)
+
+
+@mcp.tool()
+def tm_can_place(blocks: list[dict]) -> dict:
+    """Ask the game whether placements are legal. Does not modify the map.
+
+    Same entry shape as ``tm_place_blocks``:
+    ``{"name": ..., "x": ..., "y": ..., "z": ..., "dir": 0..3}``.
+    Returns a per-entry ``can_place`` plus a ``legal`` count.
+
+    This is the game's own placement rule, which is the thing the
+    offline generator has been approximating. Every structural bug so
+    far — blocks meeting at a corner, a flat tile stepping up to a
+    floating slab, two road ends that do not join — is a question this
+    answers directly, per candidate, without shipping a map and
+    looking at it.
+    """
+    return _call("can_place", blocks=blocks, timeout=180.0)
+
+
+@mcp.tool()
+def tm_validation_status() -> dict:
+    """Read the map's validation status WITHOUT starting a validation run.
+
+    ``tm_validate_map`` parks the editor waiting for a human driver
+    and then times out. This just reports what the game already
+    thinks, so it is safe unattended right after ``tm_load_map``:
+    ``NotValidable`` is a real structural failure (missing
+    Start/Finish, unlinked checkpoints), ``Validable`` means the
+    topology is accepted.
+    """
+    return _call("status", timeout=30.0)
+
+
+@mcp.tool()
+def tm_camera(
+    x: float | None = None,
+    y: float | None = None,
+    z: float | None = None,
+    distance: float | None = None,
+    h_angle: float | None = None,
+    v_angle: float | None = None,
+) -> dict:
+    """Point the editor camera, so a screenshot shows what is being discussed.
+
+    Position is in METRES, not grid cells: one cell is 32 m in X/Z and
+    8 m in Y, and ground is grid row 9. Best effort — the orbital
+    camera fields are undocumented and have moved between game builds,
+    so the result reports which of them it managed to set.
+    """
+    payload: dict[str, Any] = {}
+    if x is not None and y is not None and z is not None:
+        payload.update(x=x, y=y, z=z)
+    for key, value in (
+        ("distance", distance), ("h_angle", h_angle), ("v_angle", v_angle),
+    ):
+        if value is not None:
+            payload[key] = value
+    if not payload:
+        return {"ok": False, "error": "nothing to set"}
+    return _call("camera", timeout=30.0, **payload)
+
+
+@mcp.tool()
 def tm_save_map(name: str = "") -> dict:
     """Save the open map, optionally renaming it first."""
     return _call("save", name=name, timeout=60.0)
