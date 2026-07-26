@@ -54,16 +54,17 @@ void Main() {
 
 
 array<string> ScanPending() {
-    array<string> out;
+    // NB: 'out' is a reserved keyword in AngelScript.
+    array<string> pending;
     array<string> entries = IO::IndexFolder(IO::FromStorageFolder(""), false);
     for (uint i = 0; i < entries.Length; i++) {
         string path = entries[i];
         if (!path.EndsWith(".cmd.json")) continue;
         string res = path.SubStr(0, path.Length - 9) + ".res.json";
         if (IO::FileExists(res)) continue;
-        out.InsertLast(path);
+        pending.InsertLast(path);
     }
-    return out;
+    return pending;
 }
 
 
@@ -153,10 +154,10 @@ void ProcessCommand(const string &in inPath) {
         res["saved_as"] = editor.Challenge.MapName;
     } else if (op == "validate") {
         auto pmt = editor.PluginMapType;
-        pmt.ValidateMap();
+        pmt.Validate();
         yield();
         res["ok"] = true;
-        res["validation_status"] = tostring(pmt.ValidationStatus);
+        res["validation_status"] = int(pmt.ValidationStatus);
         res["author_time_ms"] = editor.Challenge.TMObjective_AuthorTime;
     } else {
         res["ok"] = false;
@@ -195,7 +196,7 @@ Json::Value PlaceBlocks(
             continue;
         }
         int3 coord = int3(int(b["x"]), int(b["y"]), int(b["z"]));
-        auto dir = CGameCtnBlock::ECardinalDirections(int(b["dir"]) & 3);
+        auto dir = CGameEditorPluginMap::ECardinalDirections(int(b["dir"]) & 3);
         bool ok = false;
         try {
             ok = pmt.PlaceBlock(info, coord, dir);
