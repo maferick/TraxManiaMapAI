@@ -110,6 +110,15 @@ COLUMN_REUSE_PENALTY = 0.05
 # evidence bar, since a weak one is usually just proximity.
 NO_CLIP_MIN_MAPS_FACTOR = 5
 
+# How hard to steer toward a requested surface the route has not
+# reached yet. Weighting is by corpus breadth, and the popular blocks
+# dominate by orders of magnitude — RoadTechStraight is attested in 746
+# maps against a few dozen for a surface-transition block — so "grass
+# and dirt" produced 88 tech, 13 dirt and no grass at all. This has to
+# outweigh that gap, and it stops applying the moment the surface is
+# reached, so it steers the route rather than filling it.
+UNVISITED_FAMILY_BOOST = 5000.0
+
 Cell = tuple[int, int, int]
 
 
@@ -142,6 +151,14 @@ def _orientations(block: BlockDef) -> list[_Oriented]:
         )
         for rotation in range(4)
     ]
+
+
+def _POOL_PREFIXES(pool) -> set[str]:
+    """Surface prefixes present in a pool, for spotting `<A>To<B>` blocks."""
+    known = ("RoadTech", "RoadDirt", "RoadBump", "RoadIce", "RoadWater",
+             "PlatformTech", "PlatformDirt", "PlatformIce",
+             "PlatformGrass", "PlatformPlastic", "PlatformWater")
+    return {p for p in known if any(b.startswith(p) for b in pool)}
 
 
 def _shift(cell: Cell, delta: Cell) -> Cell:
@@ -217,6 +234,7 @@ class GrammarWalker:
         gap_min_maps: int | None = None,
         block_bias: dict[str, float] | None = None,
         route_only: bool = True,
+        require_prefixes: list[str] | None = None,
     ) -> None:
         self._seed = seed
         self._rng = random.Random(seed)
@@ -229,6 +247,13 @@ class GrammarWalker:
         )
         self._bias = dict(block_bias or {})
         self._allow = frozenset(pool)
+        # Surfaces the request named, which the route must actually
+        # visit. Asking for "grass and dirt" and getting neither is a
+        # failure even if the pool contained both: weighting is by
+        # corpus breadth, and RoadTechStraight is attested in 746 maps
+        # against a few dozen for the PlatformGrassToRoadTech bridge,
+        # so a plain weighted walk never crosses over.
+        self._require = tuple(require_prefixes or ())
 
         self._cells: dict[tuple[str, int], tuple[Cell, ...]] = {}
         self._waypoint: dict[str, str] = {}
@@ -258,8 +283,25 @@ class GrammarWalker:
                 if self._waypoint.get(b) in (
                     "Start", "Finish", "Checkpoint", "StartFinish")
             ]
+            # Surface-transition blocks must be seeded, not discovered.
+            # They are the ONLY way two surfaces meet, and they are far
+            # too rare to survive a top-N cut: a grass+dirt pool grew a
+            # 129-block vocabulary containing 42 grass blocks and zero
+            # bridges, so no route could ever cross and "grass and dirt"
+            # was unbuildable. The `<A>To<B>` naming is not a guess — it
+            # was verified exhaustively against the catalogue when the
+            # transition table was mapped.
+            bridges = sorted(
+                b for b in pool
+                if any(f"To{p}" in b for p in _POOL_PREFIXES(pool))
+            )
+            if bridges:
+                _LOG.info(
+                    "%s: seeding %d surface-transition blocks",
+                    WALKER_VERSION, len(bridges),
+                )
             self._allow = grammar.route_vocabulary(
-                seeds, self._allow, min_maps=min_maps
+                seeds + bridges, self._allow, min_maps=min_maps
             )
 
         reachable = sum(1 for b in self._allow if b in grammar)
@@ -365,7 +407,7 @@ class GrammarWalker:
         length: int,
         checkpoint_every: int = 12,
         max_expansions: int = 40000,
-        attempts: int = 8,
+        attempts: int = 24,
     ) -> list[Placement]:
         """Build a route, restarting rather than backtracking forever.
 
@@ -376,6 +418,11 @@ class GrammarWalker:
         the same seeds close immediately from a different start. So
         restart from a fresh draw instead of raising the budget.
 
+        An attempt is also rejected if the finished route never reached
+        one of ``require_prefixes`` — asking for grass and dirt and
+        getting neither is a failure, and the boost that steers toward
+        an unvisited surface is greedy enough to miss on its own.
+
         Each attempt reseeds deterministically from the walker's seed,
         so a seed still maps to exactly one map.
         """
@@ -383,7 +430,22 @@ class GrammarWalker:
         for attempt in range(attempts):
             self._rng = random.Random(f"{self._seed}:{attempt}")
             try:
-                return self._attempt(length, checkpoint_every, max_expansions)
+                route = self._attempt(length, checkpoint_every, max_expansions)
+                missing = [
+                    p for p in self._require
+                    if not any(pl.block_id.startswith(p) for pl in route)
+                ]
+                if missing:
+                    # The boost is greedy: it can only steer toward a
+                    # requested surface when a candidate at the current
+                    # node already belongs to one, and reaching a
+                    # surface-transition block can take several steps.
+                    # So verify the finished route and retry rather than
+                    # quietly shipping a map missing what was asked for.
+                    raise RouteDeadEnd(
+                        f"route reached none of {missing}"
+                    )
+                return route
             except RouteDeadEnd as exc:
                 last = exc
                 _LOG.debug(
@@ -416,6 +478,10 @@ class GrammarWalker:
         columns: collections.Counter = collections.Counter(
             (c[0], c[2]) for c in occupied
         )
+        # Requested surfaces the route has already reached.
+        visited: set[str] = {
+            p for p in self._require if start_id.startswith(p)
+        }
         expansions = 0
 
         def in_bounds(cells: list[Cell]) -> bool:
@@ -490,6 +556,13 @@ class GrammarWalker:
                     # Legal — 4.2% of corpus columns are a bridge — but
                     # it should stay that rare.
                     weight *= COLUMN_REUSE_PENALTY
+                if any(
+                    move.block.startswith(p) for p in self._require
+                    if p not in visited
+                ):
+                    # A requested surface the route has not reached yet.
+                    # Big enough to beat a common move's raw map_count.
+                    weight *= UNVISITED_FAMILY_BOOST
                 scored.append(((move, anchor, rotation, footprint, cols), weight))
 
             for move, anchor, rotation, footprint, cols in self._order(scored):
@@ -499,11 +572,17 @@ class GrammarWalker:
                     return True
                 occupied.update(footprint)
                 columns.update(cols)
+                reached = {
+                    p for p in self._require
+                    if p not in visited and move.block.startswith(p)
+                }
+                visited.update(reached)
                 if dfs(nxt, _reverse_offset(move), steps + 1):
                     return True
                 placements.pop()
                 occupied.difference_update(footprint)
                 columns.subtract(cols)
+                visited.difference_update(reached)
             return False
 
         if not dfs(placements[0], None, 1):

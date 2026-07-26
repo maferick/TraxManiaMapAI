@@ -138,7 +138,7 @@ def main() -> int:
         # Joins blocks by what the corpus contains rather than by clip
         # matching, which is what makes platform surfaces, mixed
         # families and jumps buildable at all.
-        from src.generation.families import resolve_pool
+        from src.generation.families import FAMILIES, resolve_pool
         from src.generation.grammar import PlacementGrammar
         from src.generation.grammar_walker import GrammarWalker
 
@@ -156,6 +156,13 @@ def main() -> int:
             catalogue, PlacementGrammar.from_json(args.grammar), pool,
             seed=spec.seed, min_maps=args.min_maps,
             allow_jumps=args.jumps, block_bias=spec.bias,
+            # Every surface the description named must actually appear.
+            # The bridge family is deliberately NOT in this list: it is
+            # added to make the halves meet, not because it was asked
+            # for.
+            require_prefixes=[
+                FAMILIES[n].prefix for n in spec.family_list
+            ],
         )
     else:
         block_ids, clips = resolve(
