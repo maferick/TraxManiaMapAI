@@ -156,6 +156,7 @@ class GrammarWalker:
         allow_jumps: bool = False,
         gap_min_maps: int | None = None,
         block_bias: dict[str, float] | None = None,
+        route_only: bool = True,
     ) -> None:
         self._rng = random.Random(seed)
         self._grammar = grammar
@@ -183,10 +184,28 @@ class GrammarWalker:
         if not self._starts or not self._finishes:
             raise ValueError("pool needs at least one Start and one Finish")
 
-        reachable = sum(1 for b in pool if b in grammar)
+        if route_only:
+            # Without this the walker builds routes out of WALLS. Not a
+            # hypothetical: the first run over the real corpus put 44
+            # PlatformPlasticWall* blocks into a 101-block route,
+            # because a wall beside the road is as strong a neighbour
+            # as the road ahead and co-occurrence cannot tell them
+            # apart. Growing the vocabulary out from the waypoints can
+            # (see PlacementGrammar.route_vocabulary).
+            seeds = [
+                b for b in pool
+                if self._waypoint.get(b) in (
+                    "Start", "Finish", "Checkpoint", "StartFinish")
+            ]
+            self._allow = grammar.route_vocabulary(
+                seeds, self._allow, min_maps=min_maps
+            )
+
+        reachable = sum(1 for b in self._allow if b in grammar)
         _LOG.info(
-            "%s: pool=%d blocks, %d with grammar entries, min_maps=%d",
-            WALKER_VERSION, len(pool), reachable, min_maps,
+            "%s: pool=%d blocks (%d usable, %d with grammar entries), "
+            "min_maps=%d",
+            WALKER_VERSION, len(pool), len(self._allow), reachable, min_maps,
         )
         if not reachable:
             raise ValueError(

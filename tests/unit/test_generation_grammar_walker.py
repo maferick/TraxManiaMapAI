@@ -166,6 +166,9 @@ class TestJumps:
         walker = GrammarWalker(
             catalogue, grammar, pool=["Start", "Tile", "Finish"],
             seed=1, min_maps=1, allow_jumps=True, gap_min_maps=1,
+            # The vocabulary is grown from ADJACENT moves, and this
+            # fixture has nothing but gaps, so it would come back empty.
+            route_only=False,
         )
         route = walker.generate(length=2, checkpoint_every=0)
         assert [p.z for p in route] == [route[0].z, route[0].z + 2,
@@ -196,6 +199,7 @@ class TestJumps:
         walker = GrammarWalker(
             catalogue, grammar, pool=["Start", "Tile", "Finish"],
             seed=1, min_maps=10, allow_jumps=True,  # gap bar becomes 100
+            route_only=False,
         )
         # Only the adjacent Start -> Finish move clears the gap bar.
         route = walker.generate(length=1, checkpoint_every=0)
@@ -263,3 +267,44 @@ class TestReverseOffset:
     def test_a_turning_move_does_not(self):
         move = Move("B", (0, 0, 1), 1, 10, 10, False)
         assert _reverse_offset(move) != (0, 0, -1)
+
+
+class TestRouteVocabulary:
+    def test_a_block_only_reachable_by_a_jump_stays_out(
+        self, catalogue, tmp_path
+    ):
+        """Landing blocks must be attested on the ground too.
+
+        The vocabulary is grown from ADJACENT moves only, so a block
+        the corpus never places next to anything cannot become a jump
+        target either. That is deliberate: it is the guard that keeps
+        scenery out of routes, and a gap pair is far too weak on its
+        own to admit a block.
+        """
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Finish", 0, 0, 900, 900, 0],
+                       ["Tile", 2, 0, 900, 900, 0]]},
+        )
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Finish"],
+            seed=1, min_maps=1, allow_jumps=True, gap_min_maps=1,
+        )
+        route = walker.generate(length=1, checkpoint_every=0)
+        assert [p.block_id for p in route] == ["Start", "Finish"]
+
+    def test_vocabulary_narrows_the_pool(self, catalogue, tmp_path):
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Tile", 0, 0, 900, 900, 0]],
+             "Tile": [["Finish", 0, 0, 900, 900, 0]]},
+        )
+        walker = GrammarWalker(
+            catalogue, grammar,
+            pool=["Start", "Tile", "Cp", "Finish", "Boost"],
+            seed=1, min_maps=1,
+        )
+        # Boost is in the pool but the corpus never places it next to
+        # anything on the line, so it is not buildable.
+        assert "Boost" not in walker._allow
+        assert {"Start", "Tile", "Finish"} <= walker._allow

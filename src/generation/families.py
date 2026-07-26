@@ -103,6 +103,16 @@ FAMILIES: dict[str, Family] = {
 # clip walker could not close a plastic map.
 GATE_PREFIX = "Gate"
 
+# RoadTech is the game's universal connector between surfaces, and the
+# catalogue is unambiguous about it: every Platform* family has
+# exactly three `Platform<X>ToRoadTech` blocks and nothing else that
+# reaches a road, and the road families join through
+# `RoadTechToRoadDirt` (7 blocks), `ToRoadBump` (14) and `ToRoadIce`
+# (4). There is no dirt-to-plastic block, no dirt-to-bump block, no
+# platform-to-dirt block. So a pool that mixes surfaces needs RoadTech
+# in it or the two halves can never meet.
+BRIDGE_PREFIX = "RoadTech"
+
 SUPPORTED = [n for n, f in FAMILIES.items() if f.unsupported is None]
 
 # Every family is usable by the grammar walker: it does not chain by
@@ -119,6 +129,7 @@ def resolve_pool(
     catalogue: dict[str, BlockDef],
     max_footprint: int | None = None,
     gates: bool = True,
+    bridge: bool = True,
 ) -> list[str]:
     """Block ids for the grammar walker: no clip requirement, no mixing rule.
 
@@ -136,7 +147,10 @@ def resolve_pool(
       walker's reach, not the game's.
 
     ``gates`` adds the universal ``Gate*`` set on top of the requested
-    families. Leave it on unless a run deliberately wants no arches.
+    families. ``bridge`` adds RoadTech when a pool mixes surfaces,
+    because nothing else in the game joins them (see
+    ``BRIDGE_PREFIX``). Leave both on unless a run deliberately wants
+    a bare pool.
     """
     if not names:
         raise FamilyError("no families requested")
@@ -149,6 +163,12 @@ def resolve_pool(
     prefixes = tuple(FAMILIES[n].prefix for n in names)
     if gates:
         prefixes += (GATE_PREFIX,)
+    if bridge and len(set(names)) > 1 and BRIDGE_PREFIX not in prefixes:
+        _LOG.info(
+            "families %s mix surfaces; adding %s as the connector",
+            names, BRIDGE_PREFIX,
+        )
+        prefixes += (BRIDGE_PREFIX,)
 
     allowed: list[str] = []
     for block_id, block in catalogue.items():

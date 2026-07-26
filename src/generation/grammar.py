@@ -119,6 +119,63 @@ class PlacementGrammar:
             out.append(move)
         return tuple(out)
 
+    def route_vocabulary(
+        self,
+        seeds: list[str],
+        allow: frozenset[str],
+        *,
+        min_maps: int = 20,
+        rounds: int = 4,
+        per_block: int = 12,
+    ) -> frozenset[str]:
+        """Blocks the corpus puts ON the racing line, grown from waypoints.
+
+        Co-occurrence cannot tell a road's continuation from the wall
+        beside it, and left to itself the walker builds routes out of
+        walls — 44 of 101 blocks in the first real run. The corpus
+        does separate them, though, once you ask the right block:
+
+        * ``PlatformPlasticCheckpoint`` — unambiguously on the racing
+          line — has ``PlatformPlasticBase`` as its neighbour and no
+          wall anywhere in its top rows.
+        * ``PlatformPlasticWallStraight`` has only more of itself, and
+          at offsets ``(0, ±1, 0)`` and ``(0, ±2, 0)``: walls stack
+          vertically, road does not.
+
+        So start from the blocks that are certainly route — the
+        waypoints — and keep only each block's ``per_block`` strongest
+        neighbours. A wall is never among a road's strongest, so it
+        never gets in, and nothing here is a guess about names.
+
+        ``per_block`` is calibrated, not chosen: measured against the
+        real corpus on a dirt+plastic pool, 12 is the widest setting
+        that still admits zero plain wall blocks while reaching the
+        surface-transition blocks (``PlatformPlasticToRoadTech``,
+        ``RoadTechToRoadDirt``) that let one route change surface. 14
+        lets the first wall in.
+        """
+        vocab = set(seeds)
+        frontier = set(seeds)
+        for _ in range(rounds):
+            grown: set[str] = set()
+            for block in frontier:
+                moves = self.successors(
+                    block, min_maps=min_maps, allow=allow,
+                    overlays=False, gaps=False,
+                )
+                for move in moves[:per_block]:
+                    if move.block not in vocab:
+                        grown.add(move.block)
+            if not grown:
+                break
+            vocab |= grown
+            frontier = grown
+        _LOG.info(
+            "route vocabulary: %d blocks from %d waypoint seeds",
+            len(vocab), len(seeds),
+        )
+        return frozenset(vocab)
+
     def __contains__(self, block_a: str) -> bool:
         return block_a in self._moves
 
