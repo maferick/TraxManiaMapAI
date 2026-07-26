@@ -878,6 +878,29 @@ def _cmd_mine_route_sequences(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mine_jumps(args: argparse.Namespace) -> int:
+    from src.catalogue.loader import load_catalogue
+    from src.constraints.route_jumps import build_jumps, reset_jumps
+
+    config = load_config(args.config)
+    catalogue = load_catalogue(args.catalogue, collection=args.environment)
+    conn = open_connection(config)
+    if args.reset:
+        reset_jumps(conn)
+    report = build_jumps(
+        conn, catalogue=catalogue, environment=args.environment,
+        limit=int(args.limit) if args.limit else None,
+        min_map_count=int(args.min_maps),
+    )
+    conn.close()
+    _LOG.info(
+        "mine-jumps: maps=%d with_jumps=%d open_ends=%d jumps=%d rows=%d",
+        report.maps_seen, report.maps_with_jumps, report.open_ends,
+        report.jumps, report.rows_written,
+    )
+    return 0
+
+
 def _cmd_import_connection_probes(args: argparse.Namespace) -> int:
     """Load probe_connections.py output into block_connection_probes."""
     import hashlib
@@ -3227,6 +3250,22 @@ def _build_parser() -> argparse.ArgumentParser:
     seq_cmd.add_argument("--min-maps", type=int, default=3)
     seq_cmd.add_argument("--reset", action="store_true")
     seq_cmd.set_defaults(func=_cmd_mine_route_sequences)
+
+    jumps_cmd = sub.add_parser(
+        "mine-jumps",
+        help="Learn jumps from the corpus-finishable axiom: every "
+             "published map can be driven, so a gap the racing line "
+             "must cross IS drivable. A jump is an OPEN END facing "
+             "another open end across empty cells, not two blocks that "
+             "merely sit near each other.",
+    )
+    jumps_cmd.add_argument(
+        "--catalogue", type=str, default="data/catalogue2/catalogue.ndjson")
+    jumps_cmd.add_argument("--environment", type=str, default="Stadium2020")
+    jumps_cmd.add_argument("--limit", type=int, default=None)
+    jumps_cmd.add_argument("--min-maps", type=int, default=3)
+    jumps_cmd.add_argument("--reset", action="store_true")
+    jumps_cmd.set_defaults(func=_cmd_mine_jumps)
 
     probes_cmd = sub.add_parser(
         "import-connection-probes",
