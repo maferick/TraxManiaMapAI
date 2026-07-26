@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.catalogue.loader import load_catalogue
 from src.generation.clip_walker import ClipWalker
+from src.generation.families import resolve
 from src.generation.priors import FacePriors
 from src.generation.supports import PillarRules, build_supports
 
@@ -88,14 +89,22 @@ def main() -> int:
     ap.add_argument("--length", type=int, default=60)
     ap.add_argument("--checkpoint-every", type=int, default=15)
     ap.add_argument("--rules", default="data/catalogue/pillar_rules.json")
+    ap.add_argument("--family", default=None,
+                    help="surface family (tech/dirt/bump/ice/water); "
+                         "default = the legacy hand-listed RoadTech set")
     args = ap.parse_args()
 
     storage = Path(args.storage)
     catalogue = load_catalogue(args.catalogue, collection="Stadium2020")
     priors = FacePriors.from_json(args.priors)
-    route = ClipWalker(
-        catalogue, ROADTECH_SET, seed=args.seed, priors=priors
-    ).generate(args.length, args.checkpoint_every)
+    if args.family:
+        block_ids, clips = resolve([args.family], catalogue, max_footprint=3)
+        walker = ClipWalker(catalogue, block_ids, seed=args.seed,
+                            route_clips=clips, priors=priors)
+    else:
+        walker = ClipWalker(catalogue, ROADTECH_SET, seed=args.seed,
+                            priors=priors)
+    route = walker.generate(args.length, args.checkpoint_every)
     print(f"route: {len(route)} blocks")
 
     state = call(storage, "state", timeout=20.0)
