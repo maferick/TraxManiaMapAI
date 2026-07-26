@@ -139,6 +139,7 @@ class BlockDef:
     waypoint: str  # "Start" | "Finish" | "Checkpoint" | "None" | ...
     is_pillar: bool
     variants: tuple[BlockVariant, ...]
+    collection: str = ""  # environment: Stadium, BlueBay, ...
 
     def variant(self, kind: str = "ground", index: int = 0) -> BlockVariant | None:
         for v in self.variants:
@@ -147,8 +148,17 @@ class BlockDef:
         return None
 
 
-def load_catalogue(path: str | Path) -> dict[str, BlockDef]:
+def load_catalogue(
+    path: str | Path,
+    collection: str | None = None,
+) -> dict[str, BlockDef]:
     """Parse a catalogue NDJSON into {block_id: BlockDef}.
+
+    ``collection`` filters to one environment (``"Stadium"`` for
+    TM2020). This matters: a full-game dump contains the same block
+    id in several collections with different geometry, and keying on
+    id alone means the last one parsed silently wins. ``None`` keeps
+    the historical behaviour (single-collection dumps).
 
     Refuses a catalogue without its ``catalogue.done.json`` completion
     marker — a partial dump must never silently become the substrate.
@@ -177,6 +187,8 @@ def load_catalogue(path: str | Path) -> dict[str, BlockDef]:
                 meta_seen = True
                 continue
             if rec_type != "block":
+                continue
+            if collection is not None and rec.get("collection", "") != collection:
                 continue
             block = _parse_block(rec)
             blocks[block.block_id] = block
@@ -225,4 +237,5 @@ def _parse_block(rec: dict) -> BlockDef:
         waypoint=str(waypoint),
         is_pillar=bool(rec.get("is_pillar", False)),
         variants=tuple(variants),
+        collection=str(rec.get("collection", "")),
     )

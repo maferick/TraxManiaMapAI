@@ -126,6 +126,11 @@ internal static class BlockCatalogue
         {
             ["type"] = "block",
             ["id"] = bi.Ident?.Id ?? BaseName(path),
+            // Collection = environment (Stadium, BlueBay, ...). The
+            // same block id exists in several collections with
+            // different geometry, so consumers MUST disambiguate:
+            // keying on id alone silently overwrites.
+            ["collection"] = bi.Ident?.Collection.ToString() ?? "",
             ["name"] = bi.Name ?? "",
             ["page"] = bi.PageName ?? "",
             ["waypoint"] = bi.WayPointType.ToString(),
