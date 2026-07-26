@@ -75,8 +75,8 @@ _TYPE_BITS = 17
 _MAX_TYPES = 1 << _TYPE_BITS
 
 # Merge the running totals once this many per-map keys are pending.
-# Bounds peak memory during the concatenate + unique.
-_COMPACT_EVERY = 8_000_000
+# Bounds peak memory during the fold.
+_COMPACT_EVERY = 4_000_000
 
 # A full scan is ~40 minutes of per-map queries, and the corpus host
 # is shared — MariaDB has been OOM-killed under load there before.
@@ -258,15 +258,24 @@ def _clips_meet(
 class _Counter:
     """Sorted-array counter for a key space too big for a dict.
 
-    Per-map key arrays are appended, then folded into the running
-    totals with ``unique`` + ``bincount``. ``map_count`` works because
-    each map contributes each key exactly once.
+    Per-map key arrays are appended and periodically folded into the
+    running totals. ``map_count`` works because each map contributes
+    each key exactly once.
+
+    The fold is written to keep its peak down rather than for brevity.
+    ``np.unique(..., return_inverse=True)`` plus two weighted
+    ``bincount`` calls is the obvious version and allocates an int64
+    inverse the length of the whole input plus two float64 outputs the
+    length of the result; measured against the real corpus that peaked
+    at 10.5 GB and would have been OOM-killed before the end. Sorting
+    once and summing runs with ``reduceat`` costs about a third of
+    that. ``maps`` is int32 because the corpus is 18,935 maps.
     """
 
     def __init__(self) -> None:
         self.keys = np.empty(0, dtype=np.int64)
         self.pairs = np.empty(0, dtype=np.int64)
-        self.maps = np.empty(0, dtype=np.int64)
+        self.maps = np.empty(0, dtype=np.int32)
         self._pending_keys: list[np.ndarray] = []
         self._pending_pairs: list[np.ndarray] = []
         self._pending_size = 0
@@ -275,7 +284,7 @@ class _Counter:
         if keys.size == 0:
             return
         self._pending_keys.append(keys)
-        self._pending_pairs.append(counts)
+        self._pending_pairs.append(counts.astype(np.int64, copy=False))
         self._pending_size += int(keys.size)
         if self._pending_size >= _COMPACT_EVERY:
             self.compact()
@@ -287,19 +296,27 @@ class _Counter:
         pairs = np.concatenate([self.pairs, *self._pending_pairs])
         maps = np.concatenate(
             [self.maps]
-            + [np.ones(k.size, dtype=np.int64) for k in self._pending_keys]
+            + [np.ones(k.size, dtype=np.int32) for k in self._pending_keys]
         )
-        uniq, inverse = np.unique(keys, return_inverse=True)
-        self.keys = uniq
-        self.pairs = np.bincount(
-            inverse, weights=pairs, minlength=uniq.size
-        ).astype(np.int64)
-        self.maps = np.bincount(
-            inverse, weights=maps, minlength=uniq.size
-        ).astype(np.int64)
         self._pending_keys.clear()
         self._pending_pairs.clear()
         self._pending_size = 0
+
+        order = np.argsort(keys, kind="stable")
+        keys = keys[order]
+        pairs = pairs[order]
+        maps = maps[order]
+        del order
+
+        boundary = np.empty(keys.size, dtype=bool)
+        boundary[0] = True
+        np.not_equal(keys[1:], keys[:-1], out=boundary[1:])
+        starts = np.flatnonzero(boundary)
+        del boundary
+
+        self.keys = keys[starts]
+        self.pairs = np.add.reduceat(pairs, starts)
+        self.maps = np.add.reduceat(maps, starts)
 
 
 def _map_pairs(
@@ -442,10 +459,13 @@ def build_grammar(
     for map_id in map_ids:
         report.maps_seen += 1
         if report.maps_seen % 500 == 0:
+            # Distinct keys is the number that decides whether this
+            # run fits in memory, so log it rather than infer it.
             _LOG.info(
-                "%s: %d/%d maps, %d placements, %d pairs",
+                "%s: %d/%d maps, %d placements, %d pairs, %d keys",
                 STAGE_VERSION, report.maps_seen, len(map_ids),
                 report.placements_seen, report.pairs_counted,
+                counter.keys.size,
             )
         def _load(c: Connection, _id: int = map_id):
             with cursor(c) as cur:
