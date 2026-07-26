@@ -204,32 +204,18 @@ def tm_validation_status() -> dict:
 
 
 @mcp.tool()
-def tm_camera(
-    x: float | None = None,
-    y: float | None = None,
-    z: float | None = None,
-    distance: float | None = None,
-    h_angle: float | None = None,
-    v_angle: float | None = None,
-) -> dict:
+def tm_camera(x: float, y: float, z: float) -> dict:
     """Point the editor camera, so a screenshot shows what is being discussed.
 
     Position is in METRES, not grid cells: one cell is 32 m in X/Z and
-    8 m in Y, and ground is grid row 9. Best effort — the orbital
-    camera fields are undocumented and have moved between game builds,
-    so the result reports which of them it managed to set.
+    8 m in Y, and ground is grid row 9, so cell (24, 9, 24) is roughly
+    (768, 72, 768).
+
+    Only the target position — CGameControlCameraEditorOrbital does not
+    expose a distance field, and these members are undocumented and
+    move between game builds.
     """
-    payload: dict[str, Any] = {}
-    if x is not None and y is not None and z is not None:
-        payload.update(x=x, y=y, z=z)
-    for key, value in (
-        ("distance", distance), ("h_angle", h_angle), ("v_angle", v_angle),
-    ):
-        if value is not None:
-            payload[key] = value
-    if not payload:
-        return {"ok": False, "error": "nothing to set"}
-    return _call("camera", timeout=30.0, **payload)
+    return _call("camera", timeout=30.0, x=x, y=y, z=z)
 
 
 @mcp.tool()

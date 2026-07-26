@@ -409,14 +409,19 @@ Json::Value CanPlace(
             int3 coord = int3(int(b["x"]), int(b["y"]), int(b["z"]));
             auto dir = CGameEditorPluginMap::ECardinalDirections(
                 int(b["dir"]) & 3);
+            // Unlike PlaceBlock, CanPlaceBlock has no short overload:
+            // it wants OnGround and VariantIndex too.
+            bool ground = b.HasKey("ground") ? bool(b["ground"]) : true;
+            uint variant = b.HasKey("variant") ? uint(int(b["variant"])) : 0;
             bool ok = false;
             try {
-                ok = pmt.CanPlaceBlock(info, coord, dir);
+                ok = pmt.CanPlaceBlock(info, coord, dir, ground, variant);
             } catch {
                 ok = false;
                 entry["reason"] = "exception: " + getExceptionInfo();
             }
             entry["can_place"] = ok;
+            entry["ground"] = ground;
             if (ok) legal++;
         }
         arr.Add(entry);
@@ -430,10 +435,13 @@ Json::Value CanPlace(
 
 
 // Point the editor camera somewhere so an external screenshot shows
-// the part of the map being discussed. Best effort: the orbital
-// camera fields are not part of a documented API and have moved
-// between game builds, so every write is guarded and the op reports
-// what it managed rather than failing the whole command.
+// the part of the map being discussed.
+//
+// Deliberately only m_TargetedPosition. CGameControlCameraEditorOrbital
+// does NOT expose m_TargetedDistance — the first version of this
+// assumed it did and failed to compile the whole plugin. These fields
+// are undocumented and move between game builds, so this sticks to the
+// one that is verified present and reports what it set.
 Json::Value MoveCamera(
     CGameCtnEditorFree@ editor, Json::Value@ body, Json::Value res
 ) {
@@ -444,29 +452,12 @@ Json::Value MoveCamera(
         return res;
     }
     Json::Value applied = Json::Array();
-    try {
-        if (body.HasKey("x") && body.HasKey("y") && body.HasKey("z")) {
-            cam.m_TargetedPosition = vec3(
-                float(body["x"]), float(body["y"]), float(body["z"]));
-            applied.Add("position");
-        }
-        if (body.HasKey("distance")) {
-            cam.m_TargetedDistance = float(body["distance"]);
-            applied.Add("distance");
-        }
-        if (body.HasKey("h_angle")) {
-            cam.m_CurrentHAngle = float(body["h_angle"]);
-            applied.Add("h_angle");
-        }
-        if (body.HasKey("v_angle")) {
-            cam.m_CurrentVAngle = float(body["v_angle"]);
-            applied.Add("v_angle");
-        }
-        res["ok"] = true;
-    } catch {
-        res["ok"] = false;
-        res["error"] = "camera write failed: " + getExceptionInfo();
+    if (body.HasKey("x") && body.HasKey("y") && body.HasKey("z")) {
+        cam.m_TargetedPosition = vec3(
+            float(body["x"]), float(body["y"]), float(body["z"]));
+        applied.Add("position");
     }
+    res["ok"] = true;
     res["applied"] = applied;
     return res;
 }
