@@ -430,6 +430,9 @@ def build_grammar(
     ``min_map_count`` drops pairs seen in fewer than N maps before
     writing. One mapper's quirk is not a grammar rule, and the
     single-map tail is most of the key space.
+
+    Takes ownership of ``conn``: a reconnect replaces the object, so
+    the caller's reference goes stale and must not be closed.
     """
     report = GrammarReport()
     table = _OffsetTable(radius_xz, radius_y)
@@ -570,6 +573,13 @@ def build_grammar(
         conn, _ = _with_reconnect(
             conn, reconnect, lambda c, rows=list(batch): _flush(c, rows)
         )
+    # This function owns the connection from here: reconnects have
+    # replaced the object the caller handed in, so the caller cannot
+    # close it.
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001 - already gone is fine
+        pass
 
     _LOG.info(
         "%s: maps=%d placements=%d pairs=%d rows=%d "

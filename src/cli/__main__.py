@@ -825,23 +825,24 @@ def _cmd_mine_placement_grammar(args: argparse.Namespace) -> int:
     from src.constraints.placement_grammar import build_grammar, reset_grammar
 
     config = load_config(args.config)
+    catalogue = load_catalogue(args.catalogue, collection=args.environment)
+    # build_grammar replaces its connection when the server restarts
+    # under it, so it owns the lifecycle — a `finally: conn.close()`
+    # here would be closing a stale object (and did: "Already closed"
+    # after a 40-minute run that had otherwise written every row).
     conn = open_connection(config)
-    try:
-        catalogue = load_catalogue(args.catalogue, collection=args.environment)
-        if args.reset:
-            reset_grammar(conn)
-        report = build_grammar(
-            conn,
-            catalogue=catalogue,
-            environment=args.environment,
-            limit=int(args.limit) if args.limit else None,
-            radius_xz=int(args.radius_xz),
-            radius_y=int(args.radius_y),
-            min_map_count=int(args.min_maps),
-            reconnect=lambda: open_connection(config),
-        )
-    finally:
-        conn.close()
+    if args.reset:
+        reset_grammar(conn)
+    report = build_grammar(
+        conn,
+        catalogue=catalogue,
+        environment=args.environment,
+        limit=int(args.limit) if args.limit else None,
+        radius_xz=int(args.radius_xz),
+        radius_y=int(args.radius_y),
+        min_map_count=int(args.min_maps),
+        reconnect=lambda: open_connection(config),
+    )
     _LOG.info(
         "mine-placement-grammar: maps=%d placements=%d pairs=%d "
         "keys=%d rows=%d clip_matched=%d overlay=%d gap=%d",
