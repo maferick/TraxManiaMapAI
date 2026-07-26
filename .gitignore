@@ -79,3 +79,7 @@ route_s7.json
 # corpus-mined item donor maps (see scan-item-donors)
 data/catalogue/donor_*.Map.Gbx
 data/catalogue/item_donor.Map.Gbx
+
+# corpus scan outputs
+discover.json
+donors2.json
