@@ -43,7 +43,13 @@ class Move:
 
     @property
     def is_overlay(self) -> bool:
-        """Shares the source's cell — a gate arch over the route."""
+        """Shares the source's cell in XZ.
+
+        Two blocks in one column. The corpus does this for gate arches
+        on pillar stacks (``GateCheckpoint`` shares its cell with
+        ``StructurePillar`` in 353 maps) — never a route continuation,
+        which is why the walker excludes these.
+        """
         return self.offset[0] == 0 and self.offset[2] == 0
 
     @property

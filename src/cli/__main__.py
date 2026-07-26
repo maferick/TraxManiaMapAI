@@ -3092,7 +3092,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "offset, relative rotation) the corpus actually contains, "
              "into block_placement_grammar. Unlike build-face-transitions "
              "this does not require a clip match, so jumps, clipless "
-             "gates placed over the route, same-cell stacks and "
+             "clipless gate arches, same-cell stacks and "
              "cross-family joins all survive. Clip agreement is kept as "
              "a column, not a filter.",
     )

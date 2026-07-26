@@ -33,7 +33,7 @@ game made the generator refuse things published maps do constantly:
 | what real maps do | why clip matching misses it |
 |---|---|
 | jumps | takeoff and landing share no boundary, so no clip can meet |
-| `GateCheckpoint`, `GateFinish`, `GateSpecial*` | 1x4x1 arches with **no clips at all**, placed *over* the route |
+| `GateCheckpoint`, `GateFinish`, `GateSpecial*` | 1x4x1 arches with **no clips at all**; the corpus mounts them on pillar columns and you drive through |
 | platform surfaces | corpus map 25192 runs `PlatformTechStart` (`PlatformFCSmallRacing`) into `PlatformWaterSpecialTurbo2` (`PlatformWaterFCSmall`) into `PlatformTechToDecoWall` (`PlatFormFCSmall`) — no two of those clips match |
 | mixed families | map 4269 runs platform → open road → road in three consecutive cells |
 | stacked blocks | map 25192 puts two blocks in cell (25, 10, 20) |

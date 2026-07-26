@@ -9,8 +9,9 @@ real maps showed it excludes things mappers do constantly. Corpus map
 25192 (a plastic map) alone breaks four of the walker's rules:
 
 * ``GateCheckpoint`` / ``GateFinish`` / ``GateSpecial*`` carry **no
-  clips at all** and are 1x4x1 — they are arches placed *over* the
-  route, not links in it
+  clips at all** and are 1x4x1 — free-standing arches you drive
+  through, which the corpus shows mounted on pillar columns rather
+  than chained into the surface
 * ``GateExpandableFinish`` appears 15 times as a tiled 3x5 wall of
   1x1x1 cells, so a "gate" can be an assembly
 * one row runs ``PlatformTechStart`` -> ``PlatformWaterSpecialTurbo2``

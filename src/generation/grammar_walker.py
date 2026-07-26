@@ -14,8 +14,10 @@ track. Three examples straight out of the corpus:
 * Map 4269 runs ``PlatformTechTiltTransition1UpLeft`` ->
   ``OpenTechRoadStraight`` -> ``RoadTechCurve1`` in one line: platform,
   open road and road in three consecutive cells.
-* ``GateCheckpoint`` has no clips whatsoever. It is a 1x4x1 arch that
-  goes *over* the route.
+* ``GateCheckpoint`` has no clips whatsoever. It is a 1x4x1 arch, and
+  the corpus mounts it on a pillar column — it shares its cell with
+  ``StructurePillar`` in 353 maps — so nothing about how it attaches
+  is expressible as a clip meeting.
 
 So this walker asks a different question: has the corpus ever placed
 B there, next to A, and in how many distinct maps? Legality is
@@ -261,7 +263,7 @@ class GrammarWalker:
             block_id,
             min_maps=self._min_maps,
             allow=self._allow,
-            overlays=False,  # arches go over the route, not along it
+            overlays=False,  # same column, so never a continuation
             gaps=None if self._allow_jumps else False,
         )
         out = []
