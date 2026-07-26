@@ -55,16 +55,39 @@ GROUND_ITEM_Y = 8.0
 #
 # To add a species: scan the corpus for a map containing it, add that map
 # to the donor pool, then list it here.
+# NOTE ON CLUSTER ITEMS: ``Forest``, ``Grove``, ``Spring``, ``Summer``,
+# ``Fall``, ``Winter``, ``PalmForest``, ``Ecotone`` are not single
+# plants — each is a copse of many. They dominate real maps (``Forest``
+# appears 181k times in the corpus sample vs 11k for a single
+# ``SpringTreeTall``) because they dress ground cheaply. Use a LOW
+# density with these; 0.05-0.1 already reads as woodland.
 PALETTES: dict[str, tuple[str, ...]] = {
+    # single specimens — fine at higher density
     "spring": ("SpringTreeTall", "SpringTreeBig", "SpringTreeMedium",
-               "CherryTreeMedium"),
+               "CherryTreeMedium", "SpringCherryTree"),
     "summer": ("PalmTreeMedium", "SpringTreeBig", "SpringTreeMedium"),
-    "conifer": ("FirMedium", "CypressTall", "SpringTreeTall"),
+    "conifer": ("FirMedium", "CypressTall", "TreePineBig"),
     "desert": ("CactusMedium", "PalmTreeMedium"),
     "mixed": ("SpringTreeTall", "CherryTreeMedium", "FirMedium",
               "CypressTall", "SpringTreeBig"),
+    # cluster palettes — keep density low
+    "forest": ("Forest", "Grove", "Bush"),
+    "palmforest": ("PalmForest", "PalmGrove", "SummerPalmTree"),
+    "seasons-spring": ("Spring", "SpringCherryTree", "Bush"),
+    "seasons-summer": ("Summer", "Grove", "Bush"),
+    "seasons-fall": ("Fall", "Grove", "Bush"),
+    "seasons-winter": ("Winter", "WinterFrozenTree", "SnowBarrier"),
+    # non-vegetation dressing
+    "lights": ("LightTubeBig4m", "LightCube2m"),
+    "barriers": ("TrackBarrier4m", "RallyBarrier"),
 }
 DEFAULT_PALETTE = "spring"
+
+# Palettes whose entries are multi-plant clusters.
+CLUSTER_PALETTES = frozenset({
+    "forest", "palmforest", "seasons-spring", "seasons-summer",
+    "seasons-fall", "seasons-winter",
+})
 
 
 @dataclass(frozen=True)
