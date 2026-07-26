@@ -35,6 +35,8 @@ const string BLOCK_ROOT = "GameData/Stadium/GameCtnBlockInfo";
 // Ceiling on the AI validation drive. A short map settles in a few
 // seconds; a long or broken one can sit at "Validable" indefinitely.
 const int VALIDATE_WAIT_SECONDS = 180;
+// Editor warm-up after EditMap(); first launch is the slow case.
+const int EDITOR_OPEN_WAIT_SECONDS = 60;
 
 dictionary g_blockIndex;
 bool g_indexed = false;
@@ -142,7 +144,44 @@ void ProcessCommand(const string &in inPath) {
     auto app = cast<CTrackMania>(GetApp());
     auto editor = cast<CGameCtnEditorFree>(app.Editor);
 
-    if (op == "state") {
+    if (op == "load_map") {
+        // Open an existing .Map.Gbx in the editor so a generated
+        // ARTIFACT can be validated, not just a route we re-place.
+        // EditMap cannot transition cleanly from every state, so drop
+        // to the menu first when we are not already idle.
+        string mapFile = string(body["map_file"]);
+        if (mapFile.Length == 0) {
+            res["ok"] = false;
+            res["error"] = "load_map needs 'map_file'";
+        } else {
+            if (editor !is null) {
+                app.BackToMainMenu();
+            }
+            int waitUntil = Time::Stamp + 30;
+            while (!app.ManiaTitleControlScriptAPI.IsReady
+                   && Time::Stamp < waitUntil) {
+                yield();
+                sleep(200);
+            }
+            app.ManiaTitleControlScriptAPI.EditMap(mapFile, "", "");
+            waitUntil = Time::Stamp + EDITOR_OPEN_WAIT_SECONDS;
+            CGameCtnEditorFree@ opened = null;
+            while (Time::Stamp < waitUntil) {
+                yield();
+                // Handle assignment needs '@' in AngelScript.
+                @opened = cast<CGameCtnEditorFree>(app.Editor);
+                if (opened !is null && opened.Challenge !is null) break;
+                sleep(250);
+            }
+            res["ok"] = (opened !is null);
+            if (opened !is null) {
+                res["map_name"] = opened.Challenge.MapName;
+                res["blocks"] = int(opened.Challenge.Blocks.Length);
+            } else {
+                res["error"] = "editor did not open '" + mapFile + "'";
+            }
+        }
+    } else if (op == "state") {
         res["ok"] = true;
         res["editor_open"] = (editor !is null);
         if (editor !is null && editor.Challenge !is null) {
@@ -196,10 +235,16 @@ void ProcessCommand(const string &in inPath) {
         res["saved_as"] = editor.Challenge.MapName;
     } else if (op == "validate") {
         auto pmt = editor.PluginMapType;
-        // Validate() only KICKS OFF the AI drive; the status walks
-        // NotValidable -> Validable -> (game drives) -> Validated.
-        // Reading it straight after the call just reports "Validable"
-        // with an unset author time, which is not an answer.
+        // NOT automated: TM2020 validation needs a HUMAN to drive the
+        // map start to finish, and that run sets the author time.
+        // There is no AI driver (corrected 2026-07-26 — earlier
+        // comments here and in AIRouteTelemetry claimed otherwise).
+        //
+        // Status walks NotValidable -> Validable -> (someone drives)
+        // -> Validated. So an unattended call settles at "Validable"
+        // and then times out waiting for a driver. "NotValidable" is
+        // still a genuine automated signal: it means the topology is
+        // wrong (no Start/Finish, unlinked CPs).
         pmt.Validate();
         int deadline = Time::Stamp + VALIDATE_WAIT_SECONDS;
         bool settled = false;

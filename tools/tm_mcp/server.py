@@ -115,6 +115,18 @@ def tm_state() -> dict:
 
 
 @mcp.tool()
+def tm_load_map(map_file: str) -> dict:
+    """Open an existing .Map.Gbx in the editor.
+
+    Use this to validate a generated ARTIFACT rather than a route
+    re-placed by hand — it checks the file that would actually be
+    played. ``map_file`` is a path the game can resolve, e.g.
+    ``Maps/My Maps/whatever.Map.Gbx``.
+    """
+    return _call("load_map", map_file=map_file, timeout=180.0)
+
+
+@mcp.tool()
 def tm_clear_blocks() -> dict:
     """Remove every block from the map currently open in the editor.
 
@@ -147,11 +159,25 @@ def tm_save_map(name: str = "") -> dict:
 
 @mcp.tool()
 def tm_validate_map() -> dict:
-    """Run the editor's own validation (drives the AI start to finish).
+    """Ask the editor to validate — REQUIRES A HUMAN TO DRIVE.
 
-    Returns ``validation_status`` and, on success, ``author_time_ms``
-    — the same gate TMX applies to uploads, so it is a real
-    finishability check rather than our own approximation.
+    TM2020 validation is not automated: the author drives the map
+    start to finish and that run sets the author time. There is no AI
+    driver. Calling this only moves the editor into validation; it
+    then waits for a person, so an unattended call will time out.
+
+    What the status still tells us, without anyone driving:
+
+    * ``NotValidable`` — the map's TOPOLOGY is rejected (missing
+      Start/Finish, unlinked checkpoints). A genuine structural
+      failure, and useful.
+    * ``Validable`` — structure accepted, awaiting a drive.
+    * ``Validated`` — somebody completed a run; ``author_time_ms``
+      is then meaningful.
+
+    So this is a structure gate we can automate and a drivability
+    gate we cannot. Offline, the closest proxy is that a clip-walked
+    route closes Start->Finish by construction.
     """
     return _call("validate", timeout=300.0)
 

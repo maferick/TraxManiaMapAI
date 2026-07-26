@@ -1,16 +1,24 @@
 // AI Route Telemetry — OpenPlanet plugin for the remote-test rig.
 //
-// v0.2: unattended finishability via CGameEditorPluginMap.Validate().
+// v0.2: STRUCTURE check via CGameEditorPluginMap.Validate().
 //
-// TM2020's map editor exposes the same AI validator the game uses
-// to gate TMX uploads. Opening a .Map.Gbx in the editor and calling
-// Validate() runs that AI from Spawn to Goal and reports:
+// CORRECTION (2026-07-26): this file previously claimed Validate()
+// runs an internal AI driver, making finishability an unattended
+// signal. That is WRONG. TM2020 validation requires a HUMAN to drive
+// the map start to finish; that run is what sets the author time.
+// There is no AI driver, so "is this map finishable?" cannot be
+// answered unattended this way.
+//
+// What Validate() still gives without a driver:
 //   * ValidationStatus ∈ {NotValidable, Validable, Validated}
-//   * Map.TMObjective_AuthorTime (set after a successful validate)
+//   * NotValidable  = the map's TOPOLOGY is rejected (no Start or
+//                     Finish, unlinked checkpoints). A real automated
+//                     negative, and worth having.
+//   * Validable     = structure accepted, waiting for someone to drive.
+//   * Validated     = a person completed a run; author time is then set.
 //
-// "Validated" = the internal AI drove from spawn to goal cleanly.
-// That's our "is this map finishable?" unattended signal — no
-// OP input-simulation shenanigans, no human driver needed.
+// So an unattended call settles at Validable and waits. Treat this as
+// a structural gate, not a drivability proof.
 //
 // Works with OpenPlanet 1.29.5 + AngelScript 2.39 WIP. Protocol
 // stays ai_rig_v1; new fields (`validation_status`, `author_time_ms`)
