@@ -128,10 +128,17 @@ def tm_load_map(map_file: str) -> dict:
 
 @mcp.tool()
 def tm_clear_blocks() -> dict:
-    """Remove every block from the map currently open in the editor.
+    """Undo this session's edits. NOT an empty canvas.
 
-    Slow on a full map — the editor rebuilds as it goes — so this
-    gets a generous timeout.
+    Measured against the game: ``RemoveAllBlocks`` only drops blocks
+    placed since the map was opened. On a map loaded from a file it
+    returns the count straight back, and it never touches the terrain
+    baseplate — a 48x48 map carries 2304 ``Grass`` blocks. The result
+    reports ``blocks_before`` / ``blocks`` / ``removed`` so this is
+    visible rather than assumed.
+
+    To place a route into empty space, ``tm_load_map`` a blank
+    template first.
     """
     return _call("clear", timeout=300.0)
 
@@ -175,9 +182,16 @@ def tm_dump_blocks(filter: str = "") -> dict:
 def tm_can_place(blocks: list[dict]) -> dict:
     """Ask the game whether placements are legal. Does not modify the map.
 
-    Same entry shape as ``tm_place_blocks``:
-    ``{"name": ..., "x": ..., "y": ..., "z": ..., "dir": 0..3}``.
-    Returns a per-entry ``can_place`` plus a ``legal`` count.
+    Same entry shape as ``tm_place_blocks``, plus optional ``ground``
+    (default true) and ``variant`` (default 0). Returns a per-entry
+    ``can_place`` plus a ``legal`` count.
+
+    CAVEAT, measured: at ground level this reports ``false`` for
+    everything, because the terrain baseplate already occupies those
+    cells and ``CanPlaceBlock`` will not place over it — while
+    ``PlaceBlock`` replaces the terrain happily. So it is a reliable
+    oracle in the air and useless on the ground; for a ground-level
+    route, place into a blank template and read the failures.
 
     This is the game's own placement rule, which is the thing the
     offline generator has been approximating. Every structural bug so

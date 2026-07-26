@@ -167,7 +167,20 @@ void ProcessCommand(const string &in inPath) {
             // limbo the game sits in after quitting a map failed
             // silently and burned the full 60s wait.
             app.BackToMainMenu();
+            // Wait for the OLD editor to actually go away first. Without
+            // this the loop below finds the editor that is still open,
+            // sees a non-null Challenge, and reports success while the
+            // map never changed — which it did, silently, returning the
+            // previous map's name and block count.
             int waitUntil = Time::Stamp + 30;
+            while (cast<CGameCtnEditorFree>(app.Editor) !is null
+                   && Time::Stamp < waitUntil) {
+                yield();
+                sleep(200);
+            }
+            res["editor_closed"] =
+                (cast<CGameCtnEditorFree>(app.Editor) is null);
+            waitUntil = Time::Stamp + 30;
             while (!app.ManiaTitleControlScriptAPI.IsReady
                    && Time::Stamp < waitUntil) {
                 yield();
@@ -203,10 +216,25 @@ void ProcessCommand(const string &in inPath) {
         res["ok"] = false;
         res["error"] = "map editor is not open";
     } else if (op == "clear") {
+        // MEASURED, not what the name suggests: RemoveAllBlocks() only
+        // drops blocks placed in THIS editor session. On a map loaded
+        // from a file it returns the count straight back — 2481 before,
+        // 2481 after — and it never touches the terrain baseplate
+        // (a 48x48 map carries 2304 Grass blocks).
+        //
+        // So this is "undo my edits", not "empty the map". To place a
+        // route into empty space, load a blank template map instead.
+        // Reporting before/after makes the difference visible rather
+        // than letting a caller assume an empty canvas.
         auto pmt = editor.PluginMapType;
+        int before = int(editor.Challenge.Blocks.Length);
         pmt.RemoveAllBlocks();
+        yield();
+        int after = int(editor.Challenge.Blocks.Length);
         res["ok"] = true;
-        res["blocks"] = int(editor.Challenge.Blocks.Length);
+        res["blocks_before"] = before;
+        res["blocks"] = after;
+        res["removed"] = before - after;
     } else if (op == "place_blocks") {
         res = PlaceBlocks(editor, body, res);
     } else if (op == "can_place") {
