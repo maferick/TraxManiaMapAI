@@ -156,9 +156,15 @@ class ClipWalker:
         seed: int,
         route_clips: frozenset[str] = DEFAULT_ROUTE_CLIPS,
         priors: FacePriors | None = None,
+        block_bias: dict[str, float] | None = None,
     ) -> None:
         self._rng = random.Random(seed)
         self._priors = priors
+        # Style bias: substring of a block id -> weight multiplier.
+        # Multiplies the corpus prior, so it shifts WHICH legal block
+        # gets tried first without ever making an illegal one legal.
+        # A 0.0 weight effectively bans a block.
+        self._bias = dict(block_bias or {})
         self._orient: list[_Oriented] = []
         for block_id in allowed_ids:
             block = catalogue.get(block_id)
@@ -192,6 +198,19 @@ class ClipWalker:
         if not self._starts or not self._finishes:
             raise ValueError("allowed set needs at least one Start and one Finish")
 
+    def _bias_for(self, block_id: str) -> float:
+        factor = 1.0
+        for needle, weight in self._bias.items():
+            if needle in block_id:
+                factor *= weight
+        return factor
+
+    def _weight(self, prev: Placement, cand: "_Oriented", clip: str) -> float:
+        base = 1.0 if self._priors is None else self._priors.weight(
+            prev.block_id, prev.rotation, cand.block_id, cand.rotation, clip,
+        )
+        return base * self._bias_for(cand.block_id)
+
     def _order_candidates(
         self,
         pool: list[_Oriented],
@@ -206,14 +225,11 @@ class ClipWalker:
         keeps a non-zero chance (add-one smoothing in FacePriors), so
         priors bias style without gating validity.
         """
-        if self._priors is None:
+        if self._priors is None and not self._bias:
             self._rng.shuffle(pool)
             return pool
         items = [
-            (cand, self._priors.weight(
-                prev.block_id, prev.rotation,
-                cand.block_id, cand.rotation, clip,
-            ))
+            (cand, self._weight(prev, cand, clip))
             for cand in pool
         ]
         ordered: list[_Oriented] = []
