@@ -1,0 +1,13 @@
+name = "TM Map Control"
+author = "TraxManiaMapAI"
+category = "Utility"
+version = "0.1.0"
+
+# TM2020 only. Editor automation endpoint driven by file-drop
+# commands (protocol tm_mcp_v1) from the MCP bridge in
+# tools/tm_mcp/. Placement goes through CGameEditorPluginMap so the
+# game generates pillars/variants/terrain itself.
+siteid = 0
+
+[script]
+dependencies = []
