@@ -12,8 +12,13 @@ import pytest
 
 from src.catalogue.loader import load_catalogue
 from src.generation.clip_walker import RouteDeadEnd
-from src.generation.grammar import PlacementGrammar
-from src.generation.grammar_walker import GrammarWalker, _faces_travel
+from src.catalogue.loader import rotate_vector
+from src.generation.grammar import Move, PlacementGrammar
+from src.generation.grammar_walker import (
+    GrammarWalker,
+    _faces_travel,
+    _reverse_offset,
+)
 
 
 def _block(block_id: str, waypoint: str = "None", size=(1, 1, 1)) -> dict:
@@ -212,3 +217,32 @@ class TestFacesTravel:
         assert _faces_travel(rotation, travel)
         back = (-travel[0], 0, -travel[2])
         assert not _faces_travel(rotation, back)
+
+
+class TestReverseOffset:
+    """The vector that would undo a move, in the target block's frame.
+
+    Negating the offset is not enough: it lives in the SOURCE frame,
+    and the target sits rel_rotation steps away. Get this wrong and a
+    U-turn goes unrecognised after any move that also turns.
+    """
+
+    @pytest.mark.parametrize("rel", [0, 1, 2, 3])
+    @pytest.mark.parametrize("offset", [(0, 0, 1), (1, 0, 0), (2, 1, -1)])
+    def test_matches_the_world_space_definition(self, offset, rel):
+        move = Move("B", offset, rel, 10, 10, False)
+        for source_rot in range(4):
+            target_rot = (source_rot + rel) % 4
+            world_step = rotate_vector(offset, source_rot)
+            world_back = tuple(-v for v in world_step)
+            # The same displacement, read in the target's frame.
+            expected = rotate_vector(world_back, (4 - target_rot) % 4)
+            assert _reverse_offset(move) == expected
+
+    def test_a_straight_move_reverses_to_its_negation(self):
+        move = Move("B", (0, 0, 1), 0, 10, 10, False)
+        assert _reverse_offset(move) == (0, 0, -1)
+
+    def test_a_turning_move_does_not(self):
+        move = Move("B", (0, 0, 1), 1, 10, 10, False)
+        assert _reverse_offset(move) != (0, 0, -1)

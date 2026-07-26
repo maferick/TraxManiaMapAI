@@ -38,7 +38,13 @@ import logging
 import random
 from dataclasses import dataclass
 
-from src.catalogue.loader import BlockDef, FACE_DELTAS, rotate_face, rotate_offset
+from src.catalogue.loader import (
+    BlockDef,
+    FACE_DELTAS,
+    rotate_face,
+    rotate_offset,
+    rotate_vector,
+)
 from src.generation.clip_walker import (
     DIRECTIONAL_BLOCK_PATTERNS,
     DIRECTIONAL_WAYPOINTS,
@@ -102,6 +108,20 @@ def _shift(cell: Cell, delta: Cell) -> Cell:
 
 def _sign(v: int) -> int:
     return (v > 0) - (v < 0)
+
+
+def _reverse_offset(move: Move) -> Cell:
+    """The move that would undo ``move``, in the TARGET block's frame.
+
+    Negating the offset is not enough. ``move.offset`` lives in the
+    source block's frame, and the target sits at
+    ``source_rotation + move.rel_rotation`` — so the two frames differ
+    by exactly that much. Skip the correction and the walker fails to
+    recognise a U-turn after any move that also turns, which is most
+    of them.
+    """
+    back = (-move.offset[0], -move.offset[1], -move.offset[2])
+    return rotate_vector(back, (4 - move.rel_rotation) % 4)
 
 
 def _faces_travel(rotation: int, travel: Cell) -> bool:
@@ -296,10 +316,7 @@ class GrammarWalker:
                 if want == "Finish":
                     return True
                 occupied.update(footprint)
-                # The reverse of this move, in the NEW block's frame,
-                # is what a U-turn would look like from there.
-                back = (-move.offset[0], -move.offset[1], -move.offset[2])
-                if dfs(nxt, back, steps + 1):
+                if dfs(nxt, _reverse_offset(move), steps + 1):
                     return True
                 placements.pop()
                 occupied.difference_update(footprint)
