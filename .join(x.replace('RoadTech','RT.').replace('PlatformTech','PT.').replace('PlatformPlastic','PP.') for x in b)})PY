@@ -1,5 +1,0 @@
-bash: line 20: warning: here-document at line 1 delimited by end-of-file (wanted `PY')
-  File "<stdin>", line 19
-    print(f"  len={L} maps={mc}  { -
-                                 ^
-SyntaxError: '{' was never closed
