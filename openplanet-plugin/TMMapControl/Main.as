@@ -212,6 +212,100 @@ void ProcessCommand(const string &in inPath) {
             res["map_name"] = editor.Challenge.MapName;
             res["blocks"] = int(editor.Challenge.Blocks.Length);
         }
+    } else if (op == "dump_derived_blocks") {
+        // Find and serialise NON-PLACEABLE block models (the baked "FC"
+        // families). They are absent from GameData/Stadium/GameCtnBlockInfo
+        // -- the catalogue walk covered that whole tree and has zero FC
+        // names -- so this op searches a caller-given Fids root for them.
+        // Read-only: metadata walk plus Fids::Preload on the named hits.
+        //
+        // Hosted here rather than in a new plugin because a NEVER-loaded
+        // plugin needs a human click or a game restart to load, and a
+        // restart would kill a running capture batch. TMMapControl is
+        // already loaded and idle, and PluginReloader can hot-reload it.
+        string rootPath = body.HasKey("root")
+            ? string(body["root"]) : "GameData/Stadium";
+        string pattern = body.HasKey("pattern") ? string(body["pattern"]) : "";
+        array<string> wanted;
+        if (body.HasKey("names")) {
+            Json::Value@ names = body["names"];
+            for (uint i = 0; i < names.Length; i++) {
+                wanted.InsertLast(string(names[i]));
+            }
+        }
+
+        CSystemFidsFolder@ fidRoot = Fids::GetGameFolder(rootPath);
+        if (fidRoot is null) {
+            res["ok"] = false;
+            res["error"] = "no Fids folder at '" + rootPath + "'";
+        } else {
+            Json::Value@ matches = Json::Array();
+            Json::Value@ records = Json::Array();
+            int walked = 0;
+            array<CSystemFidsFolder@> stack;
+            stack.InsertLast(fidRoot);
+            while (stack.Length > 0) {
+                CSystemFidsFolder@ cur = stack[stack.Length - 1];
+                stack.RemoveLast();
+                for (uint i = 0; i < cur.Trees.Length; i++) {
+                    if (cur.Trees[i] !is null) stack.InsertLast(cur.Trees[i]);
+                }
+                for (uint i = 0; i < cur.Leaves.Length; i++) {
+                    walked++;
+                    if (walked % 400 == 0) yield();
+                    string leaf = cur.Leaves[i].FileName;
+                    bool patternHit = pattern.Length > 0
+                        && leaf.Contains(pattern);
+                    bool namedHit = false;
+                    for (uint w = 0; w < wanted.Length; w++) {
+                        if (leaf.StartsWith(wanted[w] + ".")
+                            || leaf == wanted[w]) {
+                            namedHit = true;
+                            break;
+                        }
+                    }
+                    if (patternHit || namedHit) {
+                        matches.Add(cur.FullDirName + leaf);
+                    }
+                    if (!namedHit) continue;
+                    CMwNod@ nod = Fids::Preload(cur.Leaves[i]);
+                    Json::Value@ rec = Json::Object();
+                    rec["file"] = cur.FullDirName + leaf;
+                    if (nod is null) {
+                        rec["error"] = "preload returned null";
+                        records.Add(rec);
+                        continue;
+                    }
+                    auto bi = cast<CGameCtnBlockInfo>(nod);
+                    if (bi is null) {
+                        // Not a BlockInfo: report the real class so the
+                        // next probe knows what it is dealing with.
+                        rec["error"] = "not CGameCtnBlockInfo";
+                        rec["id_name"] = nod.IdName;
+                        records.Add(rec);
+                        continue;
+                    }
+                    rec["name"] = bi.IdName;
+                    Json::Value@ variants = Json::Array();
+                    AddDerivedVariant(variants, bi.VariantBaseGround, "ground", 0);
+                    AddDerivedVariant(variants, bi.VariantBaseAir, "air", 0);
+                    for (uint v = 0; v < bi.AdditionalVariantsGround.Length; v++) {
+                        AddDerivedVariant(variants,
+                            bi.AdditionalVariantsGround[v], "ground", int(v) + 1);
+                    }
+                    for (uint v = 0; v < bi.AdditionalVariantsAir.Length; v++) {
+                        AddDerivedVariant(variants,
+                            bi.AdditionalVariantsAir[v], "air", int(v) + 1);
+                    }
+                    rec["variants"] = variants;
+                    records.Add(rec);
+                }
+            }
+            res["ok"] = true;
+            res["walked"] = walked;
+            res["matches"] = matches;
+            res["records"] = records;
+        }
     } else if (editor is null) {
         res["ok"] = false;
         res["error"] = "map editor is not open";
@@ -511,4 +605,36 @@ string VStatusToString(CGameEditorPluginMapMapType::EValidationStatus st) {
 
 void log(const string &in msg) {
     print("[TMMapControl] " + msg);
+}
+
+
+// Serialise one variant of a derived (non-placeable) block model.
+// Same fields the block catalogue records, so the offline loader can
+// treat both shapes alike. Clip reads sit in a try block: on some game
+// builds the Clips_* buffers throw on file-loaded nods (measured
+// 2026-07-25 during the catalogue dump).
+void AddDerivedVariant(Json::Value@ arr, CGameCtnBlockInfoVariant@ v,
+                       const string &in kind, int index) {
+    if (v is null) return;
+    Json::Value@ jv = Json::Object();
+    jv["kind"] = kind;
+    jv["index"] = index;
+    Json::Value@ size = Json::Array();
+    size.Add(int(v.Size.x)); size.Add(int(v.Size.y)); size.Add(int(v.Size.z));
+    jv["size"] = size;
+    Json::Value@ units = Json::Array();
+    for (uint i = 0; i < v.BlockUnitInfos.Length; i++) {
+        auto u = v.BlockUnitInfos[i];
+        if (u is null) continue;
+        Json::Value@ ju = Json::Object();
+        Json::Value@ off = Json::Array();
+        off.Add(int(u.Offset.x)); off.Add(int(u.Offset.y)); off.Add(int(u.Offset.z));
+        ju["offset"] = off;
+        try {
+            ju["underground"] = u.Underground;
+        } catch {}
+        units.Add(ju);
+    }
+    jv["units"] = units;
+    arr.Add(jv);
 }
