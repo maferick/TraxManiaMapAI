@@ -83,11 +83,13 @@ def main() -> int:
                     help="grammar walker: a move must appear in this "
                          "many distinct corpus maps to be buildable")
     ap.add_argument("--jumps", action="store_true",
-                    help="grammar walker: allow gap moves. Off by "
-                         "default — a real jump and two unrelated "
-                         "blocks three cells apart are the same row, "
-                         "and the second kind dominates. Enabling this "
-                         "raises the evidence bar for gaps tenfold")
+                    help="allow jumps, taken from block_jump_pairs — "
+                         "open-end-to-open-end gaps in maps that are "
+                         "finishable by construction, not the grammar's "
+                         "gap rows, which cannot tell a take-off from "
+                         "two unrelated blocks a few cells apart")
+    ap.add_argument("--jump-bias", type=float, default=0.04,
+                    help="how often to take a jump when one is offered")
     ap.add_argument("--route-model",
                     default="data/catalogue/route_model.json",
                     help="ordered three-block runs mined from the corpus; "
@@ -172,6 +174,7 @@ def main() -> int:
             catalogue, PlacementGrammar.from_json(args.grammar), pool,
             seed=spec.seed, min_maps=args.min_maps,
             allow_jumps=args.jumps, block_bias=spec.bias,
+            jump_bias=args.jump_bias,
             # Every surface the description named must actually appear.
             # The bridge family is deliberately NOT in this list: it is
             # added to make the halves meet, not because it was asked

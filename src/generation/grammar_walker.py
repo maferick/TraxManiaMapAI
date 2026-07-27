@@ -172,6 +172,22 @@ SEQUENCE_WEIGHT = 0.0
 RECENCY_WINDOW = 14
 RECENCY_PENALTY = 0.25
 
+# How strongly to consider a mined jump at any given step.
+#
+# Jumps come from block_jump_pairs, NOT from the grammar's gap rows.
+# The grammar cannot tell a take-off from two unrelated blocks three
+# cells apart — 81% of its radius-3 rows were that coincidence, which
+# is why gap moves had to be off by default. block_jump_pairs applies
+# the finishability axiom instead: an open end facing another open end
+# across empty cells, in a map that demonstrably completes.
+#
+# Jumps are well-attested placements, so they sit in the SAME tier as
+# clip-matched moves rather than the fallback tier — a fallback would
+# mean they are only reached when everything else dead-ends, i.e.
+# never. The bias keeps them occasional; a track is not a series of
+# gaps.
+JUMP_BIAS = 0.04
+
 Cell = tuple[int, int, int]
 
 
@@ -305,6 +321,7 @@ class GrammarWalker:
         route_only: bool = True,
         require_prefixes: list[str] | None = None,
         route_model=None,
+        jump_bias: float = JUMP_BIAS,
     ) -> None:
         self._seed = seed
         self._rng = random.Random(seed)
@@ -327,6 +344,7 @@ class GrammarWalker:
         # Ordered three-block runs mined from the corpus. Optional: the
         # walker still works on pairwise evidence alone.
         self._model = route_model
+        self._jump_bias = jump_bias
 
         self._cells: dict[tuple[str, int, str], tuple[Cell, ...]] = {}
         self._waypoint: dict[str, str] = {}
@@ -420,8 +438,13 @@ class GrammarWalker:
         dead-end barriers, and it costs nothing in reach: the non-clip
         tier is still there when the clip-matched one runs out.
         """
-        clip = [s for s in scored if s[0][0].clip_matched]
-        rest = [s for s in scored if not s[0][0].clip_matched]
+        # Jumps ride in the primary tier: they are attested placements,
+        # and in the fallback tier they would never be reached.
+        clip = [s for s in scored if s[0][0].clip_matched or s[0][0].is_gap]
+        rest = [
+            s for s in scored
+            if not (s[0][0].clip_matched or s[0][0].is_gap)
+        ]
         return self._shuffle(clip) + self._shuffle(rest)
 
     def _shuffle(self, scored: list[tuple]) -> list:
@@ -451,7 +474,13 @@ class GrammarWalker:
             min_maps=self._min_maps,
             allow=self._allow,
             overlays=False,  # same column, so never a continuation
-            gaps=None if self._allow_jumps else False,
+            # Gap rows from the grammar are never the jump source now:
+            # block_jump_pairs is better evidence. They are only used
+            # when no route model was supplied at all.
+            gaps=(
+                None if (self._allow_jumps and self._model is None)
+                else False
+            ),
         )
         out = []
         for move in moves:
@@ -472,11 +501,35 @@ class GrammarWalker:
         # how it attaches.
         clipped = [m for m in out if m.clip_matched]
         if clipped:
-            return clipped
-        return [
-            m for m in out
-            if m.map_count >= self._min_maps * NO_CLIP_MIN_MAPS_FACTOR
-        ] or out
+            out = clipped
+        else:
+            out = [
+                m for m in out
+                if m.map_count >= self._min_maps * NO_CLIP_MIN_MAPS_FACTOR
+            ] or out
+
+        # Mined jumps are added AFTER the clip-first filter, never
+        # through it. A jump joins nothing by definition, so it is
+        # clip_matched=False and the filter above would discard every
+        # one of them — which it silently did, producing zero jumps at
+        # any bias.
+        if self._allow_jumps and self._model is not None:
+            for jump in self._model.jumps_from(
+                block_id, min_maps=self._min_maps
+            ):
+                if jump.block not in self._allow:
+                    continue
+                if self._waypoint.get(jump.block, "None") != want:
+                    continue
+                if incoming is not None and jump.offset == incoming:
+                    continue
+                out.append(Move(
+                    block=jump.block, offset=jump.offset,
+                    rel_rotation=jump.rel_rotation,
+                    map_count=jump.map_count, pair_count=jump.map_count,
+                    clip_matched=False,
+                ))
+        return out
 
     def generate(
         self,
@@ -650,6 +703,8 @@ class GrammarWalker:
                     )
                     if score:
                         weight *= 1.0 + SEQUENCE_WEIGHT * score
+                if move.is_gap:
+                    weight *= self._jump_bias
                 if any(columns[col] for col in cols):
                     # Passing back over ground the line already covers.
                     # Legal — 4.2% of corpus columns are a bridge — but

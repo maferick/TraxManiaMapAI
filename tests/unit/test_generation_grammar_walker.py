@@ -612,3 +612,53 @@ class TestVariantAwareness:
         from src.generation.grammar_walker import _orientations
         # Asking for ground must not yield an empty footprint.
         assert len(_orientations(cat["Canopy"], "ground")[0].cells) == 1
+
+
+class TestMinedJumps:
+    """Jumps come from block_jump_pairs, not the grammar's gap rows."""
+
+    def _model(self, tmp_path, jumps):
+        doc = {"schema": "route_model_v1", "environment": "Stadium2020",
+               "min_maps": 1, "triples": [], "jumps": jumps}
+        path = tmp_path / "route_model.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        from src.generation.route_model import RouteModel
+        return RouteModel.from_json(path)
+
+    def test_a_mined_jump_survives_the_clip_first_filter(
+        self, catalogue, tmp_path
+    ):
+        """The bug this pins: a jump is clip_matched=False by
+        definition, so returning only clip-matched moves discarded
+        every one — silently, producing zero jumps at any bias."""
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Tile", 0, 0, 900, 900, 1]],
+             "Tile": [["Finish", 0, 0, 900, 900, 1]]},
+        )
+        model = self._model(
+            tmp_path, [["Start", "Tile", 0, 0, 3, 0, 2, 500]])
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Finish"],
+            seed=1, min_maps=1, allow_jumps=True, route_model=model,
+            jump_bias=1e6, route_only=False,
+        )
+        route = walker.generate(length=2, checkpoint_every=0)
+        step = abs(route[1].z - route[0].z)
+        assert step == 3, "the jump should have been taken over the clip move"
+
+    def test_no_jumps_when_disabled(self, catalogue, tmp_path):
+        grammar = _grammar(
+            tmp_path,
+            {"Start": [["Tile", 0, 0, 900, 900, 1]],
+             "Tile": [["Finish", 0, 0, 900, 900, 1]]},
+        )
+        model = self._model(
+            tmp_path, [["Start", "Tile", 0, 0, 3, 0, 2, 500]])
+        walker = GrammarWalker(
+            catalogue, grammar, pool=["Start", "Tile", "Finish"],
+            seed=1, min_maps=1, allow_jumps=False, route_model=model,
+            route_only=False,
+        )
+        route = walker.generate(length=2, checkpoint_every=0)
+        assert abs(route[1].z - route[0].z) == 1
