@@ -265,7 +265,17 @@ void ProcessJob(const string &in inPath) {
         if (guiPlayer is null) break;
         auto smPlayer = cast<CSmPlayer>(guiPlayer);
         if (smPlayer is null) break;
-        auto api = smPlayer.ScriptAPI;
+        // MUST cast. CSmPlayer::ScriptAPI is declared as the BASE
+        // type CGameScriptPlayer, and `auto` binds to that, so every
+        // TM-specific member — EngineRpm, RaceFinished,
+        // CurrentNbCheckpoints, CurrentLapNumber, CurrentRaceRespawns —
+        // fails to resolve. Together with the `out` keyword this is why
+        // the plugin never compiled and so was never run.
+        auto api = cast<CSmScriptPlayer>(smPlayer.ScriptAPI);
+        if (api is null) {
+            log("ScriptAPI is not a CSmScriptPlayer; aborting job");
+            break;
+        }
         if (api is null) {
             sleep(SAMPLE_PERIOD_MS);
             continue;
