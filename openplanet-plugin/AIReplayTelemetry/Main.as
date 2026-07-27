@@ -116,6 +116,23 @@ class Frame {
     int    rpm;
     int    cp_index;          // current checkpoint count, 0 at spawn
     int    finished;          // 0/1, set on finish frame onward
+    // Lap and respawn, both EXPLICIT rather than inferred. Verified
+    // present on CSmScriptPlayer by the APIProbe reflection dump
+    // before being referenced here — an unknown member is a
+    // compile-time error that takes the plugin down, so these are not
+    // guessed.
+    //
+    // These matter for map-matching. A respawn teleports the car to
+    // the last checkpoint, and without the counter that discontinuity
+    // is indistinguishable from an enormous jump. And lap makes
+    // multilap runs explicit rather than something to be recovered by
+    // dividing a cumulative checkpoint count, which is not derivable:
+    // gates are frequently many blocks (a GateExpandableFinish wall is
+    // ~16 waypoints), so "checkpoints per lap" cannot be counted from
+    // the map data.
+    int    lap;               // CurrentLapNumber
+    int    race_respawns;     // cumulative; increments ON a respawn
+    int    lap_respawns;
 
     Json::Value@ ToJson() {
         Json::Value@ j = Json::Object();
@@ -129,6 +146,9 @@ class Frame {
         j["rpm"] = rpm;
         j["cp_index"] = cp_index;
         j["finished"] = finished;
+        j["lap"] = lap;
+        j["race_respawns"] = race_respawns;
+        j["lap_respawns"] = lap_respawns;
         return j;
     }
 }
@@ -281,6 +301,9 @@ void ProcessJob(const string &in inPath) {
         f.rpm  = int(api.EngineRpm);
         f.cp_index = int(api.CurrentNbCheckpoints);
         f.finished = api.RaceFinished ? 1 : 0;
+        f.lap = int(api.CurrentLapNumber);
+        f.race_respawns = int(api.CurrentRaceRespawns);
+        f.lap_respawns = int(api.CurrentLapRespawns);
         frames.InsertLast(f);
 
         if (api.RaceFinished) {

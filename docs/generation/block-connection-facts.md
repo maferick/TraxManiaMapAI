@@ -403,10 +403,34 @@ stored — three separate reasons:
   `GateExpandableFinish` is a 1x1x1 tile that mappers assemble into a
   wall. A finish is one crossing and sixteen waypoint rows.
 
-So the block rows over-count logical gates, and any `cps_per_lap` has
-to come from spatially clustering contiguous same-tag waypoint blocks
-into gates — then be checked against what the game's counter actually
-reports, which is a live-API question rather than a corpus one.
+So the block rows over-count logical gates, and `cps_per_lap` is not
+derivable from them.
+
+**It does not need to be.** A reflection dump of the live API
+(`openplanet-plugin/APIProbe`) found the game reports all of this
+directly:
+
+| need | verified accessor |
+|---|---|
+| lap index | `CSmScriptPlayer.CurrentLapNumber` |
+| respawn event | `CurrentRaceRespawns`, `CurrentLapRespawns` |
+| lap timing | `CurrentLapTime`, `LapStartTime` |
+| per-lap checkpoint times | `CurrentLapWaypointTimes`, `PreviousLapWaypointTimes` |
+| map lap config | `CGameCtnChallenge.TMObjective_NbLaps`, `TMObjective_IsLapRace` |
+| respawn landmark | `CSmPlayer.CurrentLaunchedRespawnLandmarkIndex` |
+
+`CurrentRaceRespawns` is a monotone counter, so a respawn is the sample
+where it increments — an explicit event, not a residual outlier to be
+thresholded. Both are now recorded per frame by AIReplayTelemetry.
+
+**How to check a member exists without risking a plugin.** In
+AngelScript an unknown member is a COMPILE-time error that takes the
+whole plugin down, so a guess costs a reload cycle
+(`m_TargetedDistance` did exactly that). `APIProbe` enumerates members
+at runtime through `Reflection::GetType(...).Members` and lives in its
+own plugin, so a mistake is contained. It proved the point on its first
+run: `MwMemberInfo` exposes `Name` but not `Type`, the probe failed to
+compile, and nothing else was affected.
 
 Useful structure found while looking:
 
