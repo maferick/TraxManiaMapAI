@@ -385,6 +385,43 @@ learning"). The 20Hz telemetry plugin exists from PR #81 and has never
 been run at scale. That is the dependency for any sequence model, and
 for the planner.
 
+## Lap derivation is NOT contractual, and here is why
+
+`lap = cp_index // cps_per_lap` looked safe because the plugin records
+`CurrentNbCheckpoints`, which is cumulative. Checking `cps_per_lap`
+against the corpus, it is not derivable from `map_checkpoints` as
+stored — three separate reasons:
+
+* **`waypoint_order` is unpopulated.** 431,468 of ~440,000 rows hold 0.
+  It is not the ordering field, despite the name.
+* **`waypoint_index` is per BLOCK, not per gate.** Every
+  `(map_id, waypoint_index)` group holds exactly one row — 92,508
+  checkpoint groups, all size 1 — so it cannot collapse a multi-block
+  gate into one logical checkpoint.
+* **Gates are frequently many blocks.** There are 324,406 `Goal`
+  waypoints across 20,582 maps: about **16 per map**, because
+  `GateExpandableFinish` is a 1x1x1 tile that mappers assemble into a
+  wall. A finish is one crossing and sixteen waypoint rows.
+
+So the block rows over-count logical gates, and any `cps_per_lap` has
+to come from spatially clustering contiguous same-tag waypoint blocks
+into gates — then be checked against what the game's counter actually
+reports, which is a live-API question rather than a corpus one.
+
+Useful structure found while looking:
+
+| tag | rows | maps | meaning |
+|---|---|---|---|
+| `Spawn` | 19,620 | 19,600 | ~1 per map, reliable |
+| `Goal` | 324,406 | 20,582 | ~16 per map — tiled walls |
+| `Checkpoint` | 86,580 | 11,974 | |
+| `LinkedCheckpoint` | 5,928 | **763** | explicit ORDER — a natural gold set |
+| `StartFinish` | 1,164 | **1,097** | the multilap gate |
+
+The 763 linked-checkpoint maps are the obvious manually-verifiable set
+for replay extraction: their checkpoint order is already unambiguous,
+so an inferred sequence can be checked against it rather than eyeballed.
+
 ## The planner, specified
 
 Not built. The design, so it is not re-derived:
