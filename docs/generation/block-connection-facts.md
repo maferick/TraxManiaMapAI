@@ -303,11 +303,61 @@ decoration whose open faces happen to point at each other. The support
 filter caught `DecoWall` and not `DecoPlatform` / `DecoHill` /
 `WaterBase`.
 
+## Macros: mined, and the sampling constraint they impose
+
+`block_macros` holds 3,395 recurring 4-8 block runs from 1,907 of
+4,000 maps. Extraction chains through-pieces (a block whose neighbours
+sit on opposing faces) and takes maximal chains, so no route order is
+involved.
+
+**88% of them are a single block repeated** — `PlatformTechBase x4`
+in 212 maps, `RoadTechStraight x4` in 154. Only **397 (12%) are varied**,
+and those are the actual design patterns:
+
+| macro | maps |
+|---|---|
+| `PT.Base → PT.SpecialNoEngine → PT.SpecialNoEngine → PT.Base` | 20 |
+| `PT.Base → PT.SpecialTurbo → PT.SpecialTurbo → PT.Base → PT.BaseWithHole24m → PT.SpecialNoEngine → …` | 18 |
+| `PT.Diag1Slope2UpLeft → PT.Slope2Straight ×4` | 17 |
+| `PT.Slope2Start → PT.SpecialNoEngine → PT.Curve2In → PT.Base → PT.SpecialTurbo` | 15 |
+
+**The constraint this imposes on a planner: do not sample macros by
+breadth.** The uniform runs outweigh the varied ones roughly ten to one
+(212 against 20), so breadth-weighted sampling reproduces the same
+repetition collapse that killed the sequence prior. A planner must
+either sample the varied tail deliberately or weight within a
+same-length, same-character bucket.
+
+## The planner, specified
+
+Not built. The design, so it is not re-derived:
+
+1. **Skeleton.** Anchor points across the map before any block is
+   placed, spaced from the measured corpus geometry (median route
+   bounding box 351 cells at 0.21 blocks per box cell). Checkpoints
+   land on anchors instead of every N blocks.
+2. **Segment intents.** Each anchor-to-anchor span gets a character
+   (fast / technical / climb / gap), sampled to match corpus
+   composition.
+3. **Endpoint-directed fill.** THE hard part and the real dependency:
+   the walker is a free DFS and cannot be told "get from A to B". It
+   needs directed search over the grammar.
+4. **Macro placement.** Fill spans with macros of matching character,
+   sampled per the constraint above, falling back to block-by-block.
+5. **Whole-route accept/reject** against the corpus metrics already
+   measured here: 21 distinct types, 0.29 top-block share, 95.2%
+   single-level columns, 351-cell box.
+
+Steps 1, 2, 4 and 5 are straightforward. Step 3 is the work, and
+everything else waits on it.
+
 ## What is still missing
 
-1. **Variant awareness** — the walker should use the air footprint for
-   an elevated block. Affects ~75 drivable blocks (see above), mostly
-   loops, so it is a correctness fix rather than the headline one.
+1. **The planner** (specified above). Every whole-route property has
+   so far been patched with a step-local hack — a column cap for
+   spread, a boost plus reject-retry for surface mix, a recency
+   penalty for variety. Those three work; pacing, checkpoint
+   placement, jump run-ups and flow cannot be patched that way.
 2. **`supports.py` over-generates.** Against the game on a 101-block
    route: 77 pillars match exactly, 24 more are emitted into free
    space the game leaves empty. None land inside the route, so nothing
