@@ -933,6 +933,29 @@ def _cmd_export_route_model(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mine_macros(args: argparse.Namespace) -> int:
+    from src.catalogue.loader import load_catalogue
+    from src.constraints.route_macros import build_macros, reset_macros
+
+    config = load_config(args.config)
+    catalogue = load_catalogue(args.catalogue, collection=args.environment)
+    conn = open_connection(config)
+    if args.reset:
+        reset_macros(conn)
+    report = build_macros(
+        conn, catalogue=catalogue, environment=args.environment,
+        limit=int(args.limit) if args.limit else None,
+        min_map_count=int(args.min_maps),
+    )
+    conn.close()
+    _LOG.info(
+        "mine-macros: maps=%d with_runs=%d runs=%d rows=%d",
+        report.maps_seen, report.maps_with_runs, report.runs,
+        report.rows_written,
+    )
+    return 0
+
+
 def _cmd_mine_jumps(args: argparse.Namespace) -> int:
     from src.catalogue.loader import load_catalogue
     from src.constraints.route_jumps import build_jumps, reset_jumps
@@ -3318,6 +3341,22 @@ def _build_parser() -> argparse.ArgumentParser:
     route_model_cmd.add_argument(
         "--out", type=str, default="data/catalogue/route_model.json")
     route_model_cmd.set_defaults(func=_cmd_export_route_model)
+
+    macros_cmd = sub.add_parser(
+        "mine-macros",
+        help="Mine recurring 4-8 block runs as reusable units. The "
+             "triples were the right data at the wrong granularity: as "
+             "a per-step weight they made maps worse, because the "
+             "strongest ones are same-block runs. As units a booster "
+             "run is placed as a booster section.",
+    )
+    macros_cmd.add_argument(
+        "--catalogue", type=str, default="data/catalogue2/catalogue.ndjson")
+    macros_cmd.add_argument("--environment", type=str, default="Stadium2020")
+    macros_cmd.add_argument("--limit", type=int, default=None)
+    macros_cmd.add_argument("--min-maps", type=int, default=3)
+    macros_cmd.add_argument("--reset", action="store_true")
+    macros_cmd.set_defaults(func=_cmd_mine_macros)
 
     jumps_cmd = sub.add_parser(
         "mine-jumps",
