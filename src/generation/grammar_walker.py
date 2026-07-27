@@ -153,6 +153,25 @@ UNVISITED_FAMILY_BOOST = 5000.0
 # whole route, not a step-local weight. Left for a planner.
 SEQUENCE_WEIGHT = 0.0
 
+# Down-weight a block the route used in the last RECENCY_WINDOW steps.
+#
+# Weighting by corpus breadth alone means the few most popular blocks
+# win every step, so routes came out at 14 distinct block types against
+# a corpus median of 21. Calibrated against that:
+#
+#     none                14 distinct   0.31 top-block share
+#     0.5  window 8       17            0.27
+#     0.25 window 8       18            0.23
+#     0.25 window 14      21            0.23   <- corpus is 21 / 0.29
+#     0.1  window 14      20            0.19
+#
+# Worth noting against the sequence prior, which tried to fix the same
+# symptom by rewarding attested runs and made it worse at every weight:
+# the problem was never that the walker lacked patterns to follow, it
+# was that nothing stopped it reaching for the same block every time.
+RECENCY_WINDOW = 14
+RECENCY_PENALTY = 0.25
+
 Cell = tuple[int, int, int]
 
 
@@ -516,6 +535,8 @@ class GrammarWalker:
         columns: collections.Counter = collections.Counter(
             (c[0], c[2]) for c in occupied
         )
+        # Blocks placed in the last RECENCY_WINDOW steps.
+        recent: collections.deque = collections.deque(maxlen=RECENCY_WINDOW)
         # Requested surfaces the route has already reached.
         visited: set[str] = {
             p for p in self._require if start_id.startswith(p)
@@ -592,6 +613,8 @@ class GrammarWalker:
                 ):
                     continue
                 weight = self._weight(move)
+                if move.block in recent:
+                    weight *= RECENCY_PENALTY
                 if self._model is not None:
                     # NORMALISED share of the context, never the raw
                     # map_count — see RouteModel.sequence_score.
@@ -622,6 +645,7 @@ class GrammarWalker:
                     return True
                 occupied.update(footprint)
                 columns.update(cols)
+                recent.append(move.block)
                 reached = {
                     p for p in self._require
                     if p not in visited and move.block.startswith(p)
@@ -634,6 +658,8 @@ class GrammarWalker:
                 placements.pop()
                 occupied.difference_update(footprint)
                 columns.subtract(cols)
+                if recent:
+                    recent.pop()
                 visited.difference_update(reached)
             return False
 
