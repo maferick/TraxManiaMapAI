@@ -78,7 +78,7 @@ def _cmd_ingest_openplanet_telemetry(args: argparse.Namespace) -> int:
         _LOG.error("no such directory: %s", telemetry_dir)
         return 2
 
-    conn = open_connection(config_path=args.config)
+    conn = open_connection(config)
     try:
         stats = ingest_directory(
             conn, telemetry_dir,
