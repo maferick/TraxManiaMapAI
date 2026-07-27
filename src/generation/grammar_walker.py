@@ -183,14 +183,25 @@ class _Oriented:
     waypoint: str
 
 
-def _orientations(block: BlockDef) -> list[_Oriented]:
-    """Footprints at all four rotations.
+def _orientations(block: BlockDef, kind: str = "ground") -> list[_Oriented]:
+    """Footprints at all four rotations, for one variant kind.
 
     Unlike the clip walker's version this does not require route-clip
     ports, so clipless blocks (every ``Gate*`` arch) are usable.
+
+    ``kind`` matters for a minority of blocks but matters absolutely
+    for those: the game picks ground or air per placement, and for 30
+    drivable blocks — loops and ``Slope2UBottom`` geometry — the two
+    have different footprints. For the other 3,769 they are identical,
+    which is why assuming ground survived this long. Falls back to
+    whichever variant exists, since canopies have an empty ground
+    variant and some blocks are air-only.
     """
-    variant = block.variant("ground", 0)
-    if variant is None:
+    variant = block.variant(kind, 0)
+    if variant is None or not variant.units:
+        other = "air" if kind == "ground" else "ground"
+        variant = block.variant(other, 0)
+    if variant is None or not variant.units:
         return []
     size = variant.size
     return [
@@ -216,6 +227,11 @@ def _POOL_PREFIXES(pool) -> set[str]:
 
 def _shift(cell: Cell, delta: Cell) -> Cell:
     return (cell[0] + delta[0], cell[1] + delta[1], cell[2] + delta[2])
+
+
+def _variant_kind(y: int) -> str:
+    """Which variant the game would pick for a block anchored at ``y``."""
+    return "ground" if y <= GROUND_Y else "air"
 
 
 def _sign(v: int) -> int:
@@ -312,15 +328,18 @@ class GrammarWalker:
         # walker still works on pairwise evidence alone.
         self._model = route_model
 
-        self._cells: dict[tuple[str, int], tuple[Cell, ...]] = {}
+        self._cells: dict[tuple[str, int, str], tuple[Cell, ...]] = {}
         self._waypoint: dict[str, str] = {}
         for block_id in pool:
             block = catalogue.get(block_id)
             if block is None:
                 raise KeyError(f"block not in catalogue: {block_id}")
-            for oriented in _orientations(block):
-                self._cells[(block_id, oriented.rotation)] = oriented.cells
-                self._waypoint[block_id] = oriented.waypoint
+            for kind in ("ground", "air"):
+                for oriented in _orientations(block, kind):
+                    self._cells[(block_id, oriented.rotation, kind)] = (
+                        oriented.cells
+                    )
+                    self._waypoint[block_id] = oriented.waypoint
 
         self._starts = [b for b in pool if self._waypoint.get(b) == "Start"]
         self._finishes = [b for b in pool if self._waypoint.get(b) == "Finish"]
@@ -528,7 +547,10 @@ class GrammarWalker:
         start_rot = self._rng.randrange(4)
         placements = [Placement(start_id, *origin, start_rot)]
         occupied: set[Cell] = {
-            _shift(origin, c) for c in self._cells[(start_id, start_rot)]
+            _shift(origin, c)
+            for c in self._cells[
+                (start_id, start_rot, _variant_kind(origin[1]))
+            ]
         }
         # How many route levels stand over each XZ column. Keeps the
         # line from coiling into a pile — see MAX_LEVELS_PER_COLUMN.
@@ -579,13 +601,17 @@ class GrammarWalker:
             here = (prev.x, prev.y, prev.z)
             source = {
                 _shift(here, c)
-                for c in self._cells[(prev.block_id, prev.rotation)]
+                for c in self._cells[
+                    (prev.block_id, prev.rotation, _variant_kind(prev.y))
+                ]
             }
 
             scored: list[tuple] = []
             for move in moves:
                 anchor, rotation = move.apply(here, prev.rotation)
-                cells = self._cells.get((move.block, rotation))
+                cells = self._cells.get(
+                    (move.block, rotation, _variant_kind(anchor[1]))
+                )
                 if cells is None:
                     continue
                 footprint = [_shift(anchor, c) for c in cells]

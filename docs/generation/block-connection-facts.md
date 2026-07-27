@@ -123,39 +123,54 @@ The inverse is the useful direction. Attested pairs are accepted 99%
 of the time, so a *refused* attested pair is almost always a bug in
 our own model rather than a quirk of the corpus.
 
-## THE BIG GAP: variant is missing from everything
+## Variant: a real gap, but NARROWER than first claimed
 
-**The game chooses a block's variant at placement time, and the
-footprint depends on the variant.** Proven directly: asked to place
-`PlatformPlasticCurve2` at an elevated cell, the editor placed it as
-`variant=1, is_ground=false` — the AIR variant — not the ground
-variant 0 that `load_catalogue(...).variant("ground", 0)` returns
-everywhere in this codebase.
+**Correction.** An earlier version of this document said the variant
+gap was "proven" to explain every geometry disagreement, on the
+evidence that the editor placed `PlatformPlasticCurve2` as
+`variant=1, is_ground=false`. That inference was wrong. Checked
+against the catalogue, that block's four variants — ground 0/1 and
+air 0/1 — have **identical footprints**, so the variant the game chose
+cannot explain anything about its shape.
 
-That one fact explains every geometry disagreement found so far:
+What is actually true, measured across all 3,864 Stadium2020 blocks
+with units:
 
-* All 12 model-vs-game disagreements in the unattested set involve
-  multi-cell blocks. 28% of Stadium2020 blocks have a **non-box**
-  footprint (1065 of 3864), so a wrong variant means a wrong shape.
-* In both "game allows, model forbids" cases the game picked a
-  *smaller* variant, so the overlap our model computed was not real.
-* In the "game refuses, model allows" cases it picked a *bigger* one.
-* `block_placement_grammar` is keyed by (block, block, offset,
-  relative rotation) with **no variant**, so ~1% of its rows are
-  geometrically impossible — `RoadTechStraight` at A-frame offset
-  (1,0,1) from `RoadTechCurve2` lands inside that block's own 2×2
-  footprint, and it is recorded in 175 maps.
+| | blocks |
+|---|---|
+| ground[0] and air[0] have the **same** footprint | 3,769 |
+| ground[0] and air[0] **differ** | 124 |
+| several ground variants, all the **same** shape | 1,802 |
+| several ground variants, **differing** shape | 92 |
 
-Not the cause: `rotate_offset` re-anchoring. Checked across all 3864
-blocks with units — only one (`DecoWallCurve4InPillar`) fails to
-re-anchor to the origin under rotation, and that is its own catalogue
-quirk, not a rotation bug.
+Restricted to drivable surfaces, the exposure is **30 blocks** where
+ground and air shapes differ and **45** whose ground variants differ —
+and both sets are dominated by loop and `Slope2UBottom` geometry the
+walker rarely reaches. So this is worth fixing and is **not** the
+single highest-value item, which is what the previous version claimed.
 
-Nothing is visibly broken today because the walker's occupancy check
-drops the impossible rows silently. But every footprint decision in
-the generator is made on an assumption the game does not share, and
-carrying variant into the catalogue lookup, the grammar key and the
-walker is the single highest-value fix outstanding.
+The generator still assumes `variant("ground", 0)` everywhere while
+the game picks per placement, so an elevated block gets a ground
+footprint. For those ~75 drivable blocks that is a wrong shape.
+
+### The disagreements, re-diagnosed
+
+All twelve were recomputed by hand. Every one is a genuine cell
+overlap under our model, which splits them into two groups:
+
+* **"game refuses, model allows"** (10) — still unexplained. Our model
+  finds no overlap and the game says no.
+* **"game allows, model forbids"** (2) — our model finds a real
+  overlap and the game accepted anyway. For example
+  `RoadTechDiagRightCheckpoint` and `PlatformPlasticCurve2` at
+  `(0,0,-1)` rel 2 share cells `(0,0,0)` and `(1,0,0)`.
+
+The leading hypothesis for the second group is that **`PlaceBlock`
+overwrites** rather than refusing, so both blocks report "placed"
+while the first one is partly destroyed — which would also mean the
+probe harness's "accepted" count is optimistic for overlapping pairs.
+UNTESTED: it needs the editor open. `tools/probe_overwrite.py` runs
+the experiment.
 
 ## Shape: legal is not a track
 
@@ -290,11 +305,9 @@ filter caught `DecoWall` and not `DecoPlatform` / `DecoHill` /
 
 ## What is still missing
 
-1. **Variant everywhere** — see "THE BIG GAP" above. It is the top
-   item: catalogue lookup, grammar key and walker all assume ground
-   variant 0 while the game picks per placement. Fixing it removes the
-   impossible grammar rows and lets the walker build elevated
-   structures with the variants the game would actually choose.
+1. **Variant awareness** — the walker should use the air footprint for
+   an elevated block. Affects ~75 drivable blocks (see above), mostly
+   loops, so it is a correctness fix rather than the headline one.
 2. **`supports.py` over-generates.** Against the game on a 101-block
    route: 77 pillars match exactly, 24 more are emitted into free
    space the game leaves empty. None land inside the route, so nothing

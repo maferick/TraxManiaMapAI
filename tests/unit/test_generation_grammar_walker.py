@@ -542,3 +542,73 @@ class TestRestarts:
             for _ in range(3)
         ]
         assert all(r == runs[0] for r in runs)
+
+
+class TestVariantAwareness:
+    """The game picks ground or air per placement; so must the walker.
+
+    For 3,769 of 3,864 Stadium2020 blocks the two footprints are
+    identical, which is why assuming ground survived so long. For 30
+    drivable blocks — loops and Slope2UBottom geometry — they differ,
+    and there a ground footprint on an elevated block is simply the
+    wrong shape.
+    """
+
+    def test_air_footprint_is_used_when_elevated(self, tmp_path):
+        # Ground variant is 1x1x1; air variant is 1x1x2. If the walker
+        # used the ground shape while elevated it would under-reserve.
+        rec = {
+            "type": "block", "id": "Split", "name": "Split", "page": "",
+            "waypoint": "None", "is_pillar": False,
+            "collection": "Stadium2020",
+            "variants": [
+                {"kind": "ground", "index": 0, "size": [1, 1, 1], "units": [
+                    {"offset": [0, 0, 0], "underground": False,
+                     "terrain_modifier": "", "surface": "", "clips": {}}]},
+                {"kind": "air", "index": 0, "size": [1, 1, 2], "units": [
+                    {"offset": [0, 0, 0], "underground": False,
+                     "terrain_modifier": "", "surface": "", "clips": {}},
+                    {"offset": [0, 0, 1], "underground": False,
+                     "terrain_modifier": "", "surface": "", "clips": {}}]},
+            ],
+        }
+        path = tmp_path / "catalogue.ndjson"
+        lines = [json.dumps({"type": "meta", "schema": "block_catalogue_v1"}),
+                 json.dumps(rec)]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        (tmp_path / "catalogue.done.json").write_text("{}", encoding="utf-8")
+        cat = load_catalogue(path, collection="Stadium2020")
+
+        from src.generation.grammar_walker import _orientations, _variant_kind
+        ground = _orientations(cat["Split"], "ground")[0]
+        air = _orientations(cat["Split"], "air")[0]
+        assert len(ground.cells) == 1
+        assert len(air.cells) == 2
+        assert _variant_kind(9) == "ground"
+        assert _variant_kind(10) == "air"
+        assert _variant_kind(20) == "air"
+
+    def test_falls_back_when_a_variant_is_empty(self, tmp_path):
+        """Canopies carry a ground variant with zero units."""
+        rec = {
+            "type": "block", "id": "Canopy", "name": "Canopy", "page": "",
+            "waypoint": "None", "is_pillar": False,
+            "collection": "Stadium2020",
+            "variants": [
+                {"kind": "ground", "index": 0, "size": [1, 1, 1],
+                 "units": []},
+                {"kind": "air", "index": 0, "size": [1, 1, 1], "units": [
+                    {"offset": [0, 0, 0], "underground": False,
+                     "terrain_modifier": "", "surface": "", "clips": {}}]},
+            ],
+        }
+        path = tmp_path / "catalogue.ndjson"
+        lines = [json.dumps({"type": "meta", "schema": "block_catalogue_v1"}),
+                 json.dumps(rec)]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        (tmp_path / "catalogue.done.json").write_text("{}", encoding="utf-8")
+        cat = load_catalogue(path, collection="Stadium2020")
+
+        from src.generation.grammar_walker import _orientations
+        # Asking for ground must not yield an empty footprint.
+        assert len(_orientations(cat["Canopy"], "ground")[0].cells) == 1
