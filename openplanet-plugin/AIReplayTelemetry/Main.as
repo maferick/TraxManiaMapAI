@@ -15,8 +15,8 @@
 //   3. Sample telemetry every game tick the ghost exposes a
 //      CSmPlayer surface (position, velocity, rotation, inputs,
 //      wheel contact, gear, RPM, current_checkpoint).
-//   4. When the playback ends (ghost reaches finish or runs out),
-//      write the frames to <id>.out.json and back out to the menu.
+//   4. When the playback ends (ghost reaches finish or runs res),
+//      write the frames to <id>.res.json and back res to the menu.
 //
 // Protocol = ai_rig_v1 (same as AIRouteTelemetry, additive fields).
 // The Linux server differentiates jobs by which plugin's
@@ -25,7 +25,7 @@
 //
 // File conventions:
 //   Input:   <PluginStorage>/AIReplayTelemetry/<job_id>.in.json
-//   Output:  <PluginStorage>/AIReplayTelemetry/<job_id>.out.json
+//   Output:  <PluginStorage>/AIReplayTelemetry/<job_id>.res.json
 //   Plugin NEVER removes files it didn't author.
 
 const string PLUGIN_VERSION = "replay-plugin-v0.1";
@@ -41,7 +41,7 @@ const int PLAYGROUND_OPEN_WAIT_SECONDS = 60;
 const int PLAYBACK_WAIT_SECONDS = 300;
 
 // Telemetry sample period. The game runs physics at 100Hz; sampling
-// every tick (~10ms) is feasible but inflates .out.json sharply on
+// every tick (~10ms) is feasible but inflates .res.json sharply on
 // long maps. Default 50ms = 20Hz which preserves enough resolution
 // for trajectory + input reconstruction without blowing past the
 // rig server's per-job byte budget.
@@ -74,16 +74,16 @@ void Main() {
 
 
 array<string> ScanForPending(const string &in rigFolder) {
-    array<string> out;
+    array<string> res;
     array<string> entries = IO::IndexFolder(rigFolder, false);
     for (uint i = 0; i < entries.Length; i++) {
         string path = entries[i];
         if (!path.EndsWith(".in.json")) continue;
         string outPath = path.SubStr(0, path.Length - 8) + ".out.json";
         if (IO::FileExists(outPath)) continue;
-        out.InsertLast(path);
+        res.InsertLast(path);
     }
-    return out;
+    return res;
 }
 
 
@@ -389,36 +389,36 @@ void WriteOut(
     bool finished,
     const string &in exitReason
 ) {
-    Json::Value@ out = Json::Object();
-    out["protocol"] = PROTOCOL;
-    out["job_id"] = jobId;
-    out["run_id"] = runId;
-    out["load_success"] = loadSuccess;
+    Json::Value@ res = Json::Object();
+    res["protocol"] = PROTOCOL;
+    res["job_id"] = jobId;
+    res["run_id"] = runId;
+    res["load_success"] = loadSuccess;
     if (loadError.Length > 0) {
-        out["load_error"] = loadError;
+        res["load_error"] = loadError;
     }
-    out["plugin_version"] = PLUGIN_VERSION;
-    out["sample_period_ms"] = SAMPLE_PERIOD_MS;
-    out["finished"] = finished;
-    out["exit_reason"] = exitReason;
-    out["frame_count"] = int(frames.Length);
+    res["plugin_version"] = PLUGIN_VERSION;
+    res["sample_period_ms"] = SAMPLE_PERIOD_MS;
+    res["finished"] = finished;
+    res["exit_reason"] = exitReason;
+    res["frame_count"] = int(frames.Length);
 
     Json::Value@ framesArr = Json::Array();
     for (uint i = 0; i < frames.Length; i++) {
         framesArr.Add(frames[i].ToJson());
     }
-    out["frames"] = framesArr;
+    res["frames"] = framesArr;
 
     // v0.1 compatibility shims so the rig server's existing
     // aggregator (which knows AIRouteTelemetry's shape) doesn't
     // crash on a missing field. Empty/zero defaults — the new
     // `frames` array carries the actual signal.
-    out["spawn_ok"] = loadSuccess;
-    out["validation_status"] = finished ? "Validated" : "Unknown";
-    out["checkpoint_times_ms"] = Json::Array();
-    out["driven_cells"] = Json::Array();
+    res["spawn_ok"] = loadSuccess;
+    res["validation_status"] = finished ? "Validated" : "Unknown";
+    res["checkpoint_times_ms"] = Json::Array();
+    res["driven_cells"] = Json::Array();
 
-    Json::ToFile(outPath, out);
+    Json::ToFile(outPath, res);
     log("wrote " + outPath
         + " (load=" + loadSuccess
         + " frames=" + frames.Length
