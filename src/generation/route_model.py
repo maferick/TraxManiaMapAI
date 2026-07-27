@@ -11,10 +11,12 @@ recognisable patterns — ``Straight x3`` in 274 maps,
 and a bigram model can only ever reproduce the marginal of those. A
 triple prior reproduces the pattern.
 
-**Which gaps are jumpable.** Not from physics: from the fact that
-every corpus map was published and parses, so it can be driven, so a
-gap its racing line must cross is drivable. See
-``src/constraints/route_jumps.py``.
+**Which gaps are CANDIDATE jumps.** Not from physics: from the fact
+that every corpus map was published and parses, so it can be driven.
+Candidates rather than observations — the axiom licenses only the gaps
+the successful run actually crossed, and an open-end pair may be
+scenery, an unused route or a parallel section. Replay extraction
+promotes them. See ``src/constraints/route_jumps.py``.
 
 Triples are direction-AMBIGUOUS — ``(A,B,C)`` and ``(C,B,A)`` are the
 same physical run, because they were mined from opposing faces rather

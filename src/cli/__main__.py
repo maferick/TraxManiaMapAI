@@ -901,7 +901,7 @@ def _cmd_export_route_model(args: argparse.Namespace) -> int:
             ]
             cur.execute(
                 "SELECT block_a, block_b, dx, dy, dz, rel_rotation, gap, "
-                "map_count FROM block_jump_pairs "
+                "map_count FROM block_candidate_jump_pairs "
                 "WHERE environment = %s AND map_count >= %s",
                 (args.environment, int(args.min_maps)),
             )

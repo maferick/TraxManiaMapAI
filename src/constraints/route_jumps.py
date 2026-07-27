@@ -1,9 +1,18 @@
-"""Learn jumps from the fact that every published map is finishable.
+"""Learn CANDIDATE jumps from the corpus-finishable axiom.
 
-This is the repo owner's observation, and it is what makes jumps
-learnable at all: every map in the corpus was published and parses
-cleanly, so every one of them can be driven start to finish. Therefore
-a gap the racing line **must** cross IS drivable — and we never have to
+They are candidates, not observations, and the distinction is not
+pedantic. The axiom — every published, parsing map can be driven — only
+licenses the gaps the successful run ACTUALLY crossed. An open-end pair
+in a finishable map may equally be scenery, an unused alternative
+route, a shortcut, or two parallel sections that never connect to each
+other at all. Replay extraction is what promotes a candidate to
+observed, and it brings entry speed, direction, airtime and landing
+state with it.
+
+The axiom is what makes jumps learnable at all: every map in the
+corpus was published and parses cleanly, so every one of them can be
+driven start to finish. A gap the racing line **must** cross is
+therefore drivable — and we never have to
 reason about physics, launch angles or speed. Only about which gaps the
 line has no choice but to cross.
 
@@ -16,10 +25,11 @@ The definition that works is **open end to open end**:
 
 * a route block face with no neighbour is a place the racing line stops
 * if another such open face points back at it across empty cells, and
-  the map is finishable, then the car crossed that gap through the air
+  the map is finishable, then a car COULD have crossed it through the
+  air — nothing is in between and the map completes
 
-Nothing else can explain it. There is no block in between, and the map
-demonstrably completes.
+What that does not establish is that the successful run went this way,
+which is the whole reason these are candidates.
 """
 from __future__ import annotations
 
@@ -80,7 +90,7 @@ class JumpReport:
 
 
 _UPSERT = """
-INSERT INTO block_jump_pairs (
+INSERT INTO block_candidate_jump_pairs (
     jump_signature, block_a, block_b, dx, dy, dz, rel_rotation, gap,
     environment, occurrences, map_count, created_by_version
 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -94,7 +104,7 @@ ON DUPLICATE KEY UPDATE
 
 def reset_jumps(conn: Connection) -> None:
     with cursor(conn) as cur:
-        cur.execute("TRUNCATE TABLE block_jump_pairs")
+        cur.execute("TRUNCATE TABLE block_candidate_jump_pairs")
     conn.commit()
 
 

@@ -280,7 +280,7 @@ corpus's 0.29 — marginally more varied than real maps, which is the
 safer side to miss on. The walker never lacked patterns to follow; it
 lacked a reason not to repeat itself.
 
-## Jumps, from the finishability axiom
+## Candidate jumps, from the finishability axiom
 
 Every corpus map was published and parses, so it can be driven —
 therefore a gap its racing line MUST cross is drivable, and no physics
@@ -291,8 +291,16 @@ points back, nothing is in between, and the map completes.
 Proximity was the failed definition — 81% of radius-3 grammar rows
 were coincidence.
 
-`block_jump_pairs`: 3,045 of 4,000 maps have jumps, 218,727
-observations, 3,221 rows. Best attested:
+**They are CANDIDATES, not observations.** The axiom licenses only the
+gaps the successful run actually crossed; an open-end pair may equally
+be scenery, an unused alternative route, a shortcut, or two parallel
+sections. Replay extraction promotes a candidate to `observed`, and
+brings entry speed, direction, airtime and landing state with it —
+much more useful than a binary label. The table is
+`block_candidate_jump_pairs` and carries an `evidence` column.
+
+3,045 of 4,000 maps yield candidates, 218,727 hits, 3,221 rows. Best
+attested:
 `PlatformTechBase -> PlatformTechBase` across a 1-cell gap in 123 maps,
 2-cell in 67; `PlatformPlasticBase` likewise. The classic platform gap
 jump.
@@ -357,6 +365,14 @@ four** — because a platform field is a 2D grid where every tile touches
 four others, and parallel road sections do the same. The graph is not
 path-like, which is precisely why a shortest path had so much freedom
 to cut corners.
+
+**What this does and does not prove.** It proves geometry cannot
+identify the driven successor: four neighbours, no way to choose. It
+does NOT prove that routes revisit blocks often — a run can touch two
+of those four once each while the other two belong to a parallel
+section it never drives. Ambiguity rate and observed revisit rate are
+different quantities, and only replay extraction measures the second.
+An earlier version of this section conflated them.
 
 Also worth knowing: only **126 of 196** maps have both a Start and a
 Finish among catalogue-known blocks. The rest use community custom
