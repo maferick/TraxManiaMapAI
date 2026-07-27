@@ -77,6 +77,47 @@ def _artifact_hash_from_map_file(map_file: str | None) -> str | None:
     return None
 
 
+def ensure_snapshot(conn, snapshot: str, *, version: str) -> None:
+    """Create the ingestion_snapshots row for a capture batch if absent.
+
+    A capture run is its own ingestion event with its own provenance, so
+    it gets its own snapshot rather than borrowing the TMX one. Reusing
+    a scrape's snapshot id would make the captures look like they came
+    from TMX, and `replays.ingestion_snapshot` is a foreign key, so the
+    row has to exist before any capture can be attached.
+
+    Rate limit is 0: this reads a local game client, not a rate-limited
+    community API.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ingestion_snapshots WHERE snapshot_id = %s",
+            (snapshot,),
+        )
+        if cur.fetchone():
+            return
+        cur.execute(
+            """
+            INSERT INTO ingestion_snapshots (
+                snapshot_id, source_system, started_at, completed_at,
+                user_agent, rate_limit_rps, resolved_config_hash,
+                code_version, notes
+            ) VALUES (%s,%s,NOW(6),NOW(6),%s,0,%s,%s,%s)
+            """,
+            (
+                snapshot,
+                SOURCE_SYSTEM,
+                f"AIReplayTelemetry/{version}",
+                hashlib.sha256(version.encode()).hexdigest(),
+                version,
+                "in-game ghost playback capture; positions only, "
+                "no inputs (a ghost exposes no input surface)",
+            ),
+        )
+    conn.commit()
+    _LOG.info("created ingestion snapshot %s", snapshot)
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -97,6 +138,8 @@ def ingest_directory(
     stats = IngestStats()
     files = sorted(telemetry_dir.glob("*.telemetry.json"))
     _LOG.info("found %d telemetry artifact(s) in %s", len(files), telemetry_dir)
+    if files and not dry_run:
+        ensure_snapshot(conn, snapshot, version=version)
 
     for path in files:
         stats.seen += 1
