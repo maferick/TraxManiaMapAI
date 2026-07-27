@@ -301,6 +301,22 @@ class CandidateIndex:
     def free_hit(self, x: float, y: float, z: float) -> bool:
         return any(b.contains(x, y, z) for b in self._boxes)
 
+    def grid_candidates(
+        self, x: float, y: float, z: float, *, dy: int = 0
+    ) -> tuple[int, ...]:
+        """Placement indices whose footprint holds this position.
+
+        Identity, not membership: coverage only needs to know THAT a
+        block is under the car, route inference needs to know WHICH.
+        """
+        cx, cy, cz = to_cell(x, y, z)
+        return tuple(self._cells.get((cx, cy + dy, cz), ()))
+
+    def free_candidates(self, x: float, y: float, z: float) -> tuple[int, ...]:
+        return tuple(
+            b.placement_index for b in self._boxes if b.contains(x, y, z)
+        )
+
 
 def classify_airborne(samples: Sequence[Mapping[str, float]]) -> list[bool]:
     """Flag ballistic samples from kinematics alone.
