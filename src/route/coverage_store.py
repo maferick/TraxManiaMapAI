@@ -70,6 +70,7 @@ def compute_coverage(
     item_cells: Mapping[tuple[int, int, int], int],
     catalogue,
     *,
+    anchored: bool = True,
     free_anchor: str = "center",
     free_pad_m: float = 8.0,
     checkpoint_window: int = 10,
@@ -189,7 +190,18 @@ def compute_coverage(
 
     # Reason, with a confidence, not a verdict. Free-form on purpose:
     # the reasons are still being discovered.
-    if ground_pct >= 0.8:
+    if not anchored:
+        # The ghost never entered the scene, so every sample sits at the
+        # origin and there is no trajectory to cover. Reporting this as
+        # a coverage failure would blame the map for a capture problem
+        # and drag the cohort distribution down with rows that measure
+        # nothing.
+        classification, confidence = "no_movement_anchor", 1.0
+        reason = (
+            "capture has no movement anchor; the ghost never entered the "
+            "scene, so coverage is undefined rather than poor"
+        )
+    elif ground_pct >= 0.8:
         classification, confidence = "block_covered", ground_pct
         reason = "majority of grounded samples resolve to block candidates"
     elif terrain_pct >= 0.5:

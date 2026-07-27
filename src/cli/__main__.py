@@ -221,6 +221,9 @@ def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
                 doc["samples"],
                 doc.get("checkpoint_sample_indices") or [],
                 placements, items, catalogue,
+                anchored=bool(
+                    (doc.get("extra") or {}).get("clock_rebased_to_race_start")
+                ),
                 free_anchor=args.free_anchor, free_pad_m=args.free_pad,
             )
             persist(
