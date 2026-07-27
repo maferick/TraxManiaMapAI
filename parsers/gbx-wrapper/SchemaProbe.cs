@@ -77,6 +77,66 @@ internal static class SchemaProbe
                 }
             }
         }
+        // Embedded ZIP inventory. A map carries the custom items it
+        // uses, so this is the route to custom-item geometry that needs
+        // no external download. Inventory only: no mesh parsing. The
+        // question answered here is whether the .Item.Gbx assets the
+        // map REFERENCES are actually PRESENT in its own zip, because
+        // if they are not, the embedded route is a dead end.
+        var zip = new Dictionary<string, object?>();
+        var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var obj in map.AnchoredObjects ?? new List<CGameCtnAnchoredObject>())
+        {
+            var author = obj.ItemModel.Author ?? "";
+            // Nadeo stock items are not embedded and would not be
+            // expected in the zip; only community items matter here.
+            if (author.Equals("Nadeo", StringComparison.OrdinalIgnoreCase)) continue;
+            referenced.Add(obj.ItemModel.Id.ToString());
+        }
+        zip["referenced_custom_items"] = referenced.Count;
+
+        var entries = new List<string>();
+        if (map.EmbeddedZipData is { Length: > 0 } bytes)
+        {
+            zip["zip_bytes"] = bytes.Length;
+            try
+            {
+                using var ms = new MemoryStream(bytes);
+                using var archive = new System.IO.Compression.ZipArchive(
+                    ms, System.IO.Compression.ZipArchiveMode.Read);
+                foreach (var e in archive.Entries) entries.Add(e.FullName);
+            }
+            catch (Exception ex)
+            {
+                zip["zip_error"] = $"{ex.GetType().Name}: {ex.Message}";
+            }
+        }
+        else
+        {
+            zip["zip_bytes"] = 0;
+        }
+        zip["entry_count"] = entries.Count;
+        zip["item_gbx_count"] = entries.Count(
+            e => e.EndsWith(".Item.Gbx", StringComparison.OrdinalIgnoreCase));
+        zip["block_gbx_count"] = entries.Count(
+            e => e.EndsWith(".Block.Gbx", StringComparison.OrdinalIgnoreCase));
+        zip["entries_sample"] = entries.Take(6).ToList();
+
+        // How many referenced custom items are actually resolvable in
+        // the zip, matched on the entry's file stem.
+        int resolved = 0;
+        foreach (var id in referenced)
+        {
+            var stem = id.Replace('\\', '/').Split('/').Last();
+            if (entries.Any(e => e.Replace('\\', '/').Split('/').Last()
+                    .Equals(stem, StringComparison.OrdinalIgnoreCase)))
+            {
+                resolved++;
+            }
+        }
+        zip["referenced_resolved_in_zip"] = resolved;
+        result["embedded"] = zip;
+
         result["live"] = live;
         return result;
     }
