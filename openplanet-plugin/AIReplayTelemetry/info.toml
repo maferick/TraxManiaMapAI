@@ -1,10 +1,11 @@
 name = "AI Replay Telemetry"
 author = "TraxManiaMapAI"
 category = "Utility"
-version = "0.1.0"
+version = "0.2.0"
 
-# TM2020 only. The plugin uses CTrackMania-specific APIs and the
-# CSmPlayer telemetry surface (position / velocity / inputs).
+# TM2020 only. The plugin uses CTrackMania-specific APIs and samples
+# ghosts through CSmArenaRulesMode (Ghost_Add / Ghost_GetPosition).
+# Position only: a ghost exposes no velocity or input surface.
 siteid = 0
 
 [script]

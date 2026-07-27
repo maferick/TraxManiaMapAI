@@ -2,12 +2,41 @@
 
 ## Status
 
-**Open, unstaffed.** This file is the charter, not a progress log.
-Full route inference on TM2020 is blocked on authoritative per-tick
-motion telemetry (see `docs/roadmap.md` PR 5 status and
-`docs/reverse-engineering/tm2020-replay-telemetry-spike.md`). The
-offline GBX.NET path cannot decode position samples. This workstream
-carries the parallel effort to unblock that via an in-game exporter.
+**Capture works, 2026-07-27.** The exporter runs and produces validated
+per-frame trajectories. What is delivered:
+
+- `openplanet-plugin/AIReplayTelemetry` v0.2 plays a map's own author
+  ghost and samples its position every 50ms.
+- `src/replay/openplanet_adapter.py` converts rig output into the
+  canonical `ReplayTelemetry` shape, differentiating velocity.
+- `tools/capture_replay_telemetry.py` drives single jobs or a JSONL
+  batch.
+- `tests/unit/test_openplanet_adapter.py`, 11 offline tests.
+
+**Validation**: a 20-map pilot on the Stadium2020 linked-checkpoint gold
+set gave 17/20 exact agreement and **zero disagreements** against the
+offline GBX.NET metadata, matching finish time and checkpoint count to
+the millisecond. The 3 losses are maps whose race never starts
+(`player_seen=true, race_time=0ms`), not capture failures.
+
+**Corpus reality check**: of 763 `LinkedCheckpoint` maps only 545 are
+Stadium2020, and only 334 of those embed an author ghost. The claim that
+every published map carries one is false.
+
+Still open, in order:
+
+1. Coordinate reconciliation. Captures are in metres; `block_placements`
+   is in grid cells. This is called out under Risks below and is now the
+   load-bearing unknown, because route inference cannot start until a
+   trajectory can be resolved to blocks.
+2. Ingestion. The `ingest-openplanet-telemetry` command and the
+   `replays.openplanet_telemetry_path` column described below are NOT
+   built; artifacts are currently loose JSON.
+3. Bulk capture of the remaining ~314 ghosted maps.
+
+The offline GBX.NET path still cannot decode position samples, which is
+why in-game playback is required at all. See
+`docs/reverse-engineering/tm2020-replay-telemetry-spike.md`.
 
 Parking this in its own file — rather than folding it into an existing
 PR — because it is:
