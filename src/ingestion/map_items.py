@@ -60,6 +60,24 @@ def derive_cell(
     )
 
 
+# BlockUnitCoord is a byte triple and 255 is its "unset" sentinel: an
+# item only carries a real one when it is snapped to a block position.
+# MEASURED on the captured cohort: 8,655 of 20,817 items (41.6%) report
+# 255. Storing that verbatim would put those items at cell 255, i.e.
+# nowhere, and silently poison item candidate generation. Where it IS
+# set it confirms the grid calibration: 11,488 of 12,162 agree exactly
+# with the cell derived from the absolute position, and the remainder
+# differ by exactly one cell at a boundary.
+BLOCK_UNIT_UNSET = 255
+
+
+def _block_unit(item: dict[str, Any]) -> tuple[int | None, int | None, int | None]:
+    vals = (item.get("cell_x"), item.get("cell_y"), item.get("cell_z"))
+    if any(v is None or v >= BLOCK_UNIT_UNSET for v in vals):
+        return (None, None, None)
+    return vals
+
+
 def _row(item: dict[str, Any], index: int) -> tuple:
     abs_x, abs_y, abs_z = item.get("abs_x"), item.get("abs_y"), item.get("abs_z")
     cell = derive_cell(abs_x, abs_y, abs_z)
@@ -69,7 +87,7 @@ def _row(item: dict[str, Any], index: int) -> tuple:
         item.get("collection") or "",
         item.get("author") or "",
         abs_x, abs_y, abs_z,
-        item.get("cell_x"), item.get("cell_y"), item.get("cell_z"),
+        *_block_unit(item),
         cell[0], cell[1], cell[2],
         item.get("pitch"), item.get("yaw"), item.get("roll"),
         item.get("scale"),
@@ -102,10 +120,11 @@ def ingest_map_items(
     rows = []
     for i, item in enumerate(items):
         r = _row(item, i)
-        # Source BlockUnitCoord vs the cell derived from abs position.
-        # These agreed exactly on the item checked by hand, so a
-        # disagreement is a calibration signal worth surfacing rather
-        # than silently trusting one side.
+        # Source BlockUnitCoord vs the cell derived from abs position,
+        # counted only where the source is actually set. A real
+        # disagreement means the grid calibration is drifting and must
+        # not be masked by trusting one side; the expected rate is a few
+        # percent, all of them one cell apart at a boundary.
         if r[6] is not None and r[9] is not None and (r[6], r[7], r[8]) != (r[9], r[10], r[11]):
             mismatches += 1
         rows.append((map_id, parser_version) + r + (version, src))
