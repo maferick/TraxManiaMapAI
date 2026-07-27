@@ -98,6 +98,8 @@ class RigNotRunning(RuntimeError):
 def submit(
     map_file: str,
     replay_file: str = "",
+    ghost_url: str = "",
+    ghost_urls: list[str] | None = None,
     *,
     run_id: str,
     timeout_s: float = DEFAULT_TIMEOUT_S,
@@ -126,6 +128,8 @@ def submit(
                 "run_id": run_id,
                 "map_file": map_file,
                 "replay_file": replay_file,
+                "ghost_url": ghost_url,
+                "ghost_urls": ghost_urls or [],
                 "deadline_unix": deadline_unix,
             }
         ),
@@ -175,6 +179,8 @@ def _iter_manifest(path: Path) -> Iterator[dict[str, Any]]:
 def _attempt(
     map_file: str,
     replay_file: str,
+    ghost_url: str,
+    ghost_urls: list[str] | None = None,
     *,
     replay_id: str,
     run_id: str,
@@ -182,7 +188,8 @@ def _attempt(
 ) -> tuple[str, dict[str, Any] | None, Any]:
     """One submit + adapt. Returns (status, raw_doc, telemetry_or_None)."""
     try:
-        doc = submit(map_file, replay_file, run_id=run_id, timeout_s=timeout_s)
+        doc = submit(map_file, replay_file, ghost_url, ghost_urls,
+                     run_id=run_id, timeout_s=timeout_s)
     except (RigTimeout, RigNotRunning) as exc:
         _LOG.error("%s: %s", replay_id, exc)
         return "failed", None, None
@@ -208,9 +215,39 @@ def _attempt(
     return "ok", doc, telemetry
 
 
+
+def _split_multi(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """One rig document with ghosts_multi -> per-ghost single-shape docs.
+
+    Each element is given the same envelope the single-ghost adapter
+    reads, so multi-ghost capture needs no second adaptation path.
+    """
+    multi = doc.get("ghosts_multi") or []
+    out = []
+    for rec in multi:
+        d = {
+            "protocol": doc.get("protocol"),
+            "job_id": doc.get("job_id"),
+            "run_id": doc.get("run_id"),
+            "load_success": doc.get("load_success"),
+            "plugin_version": doc.get("plugin_version"),
+            "sample_period_ms": doc.get("sample_period_ms"),
+            "finished": rec.get("finished"),
+            "exit_reason": rec.get("exit_reason"),
+            "frame_count": len(rec.get("frames") or []),
+            "ghost": rec.get("ghost") or {},
+            "start_frame_index": rec.get("start_frame_index", -1),
+            "frames": rec.get("frames") or [],
+        }
+        out.append(d)
+    return out
+
+
 def capture_one(
     map_file: str,
     replay_file: str = "",
+    ghost_url: str = "",
+    ghost_urls: list[str] | None = None,
     *,
     replay_id: str,
     out_dir: Path,
@@ -236,8 +273,8 @@ def capture_one(
     telemetry = None
     for attempt in range(retries + 1):
         status, doc, telemetry = _attempt(
-            map_file, replay_file, replay_id=replay_id,
-            run_id=run_id, timeout_s=timeout_s,
+            map_file, replay_file, ghost_url, ghost_urls,
+            replay_id=replay_id, run_id=run_id, timeout_s=timeout_s,
         )
         if status in ("ok", "skipped"):
             break
@@ -260,6 +297,29 @@ def capture_one(
         _LOG.error("%s: no usable capture after %d attempts",
                    replay_id, retries + 1)
         return "failed"
+
+    multi = (doc or {}).get("ghosts_multi") or []
+    if len(multi) > 1:
+        wrote = 0
+        for gi, gdoc in enumerate(_split_multi(doc), start=1):
+            gid = f"{replay_id}#g{gi}"
+            try:
+                gtele = telemetry_from_rig_output(gdoc, source_replay_id=gid)
+            except RigOutputError as exc:
+                _LOG.warning("%s: unusable (%s)", gid, exc)
+                continue
+            if not gtele.extra.get("clock_rebased_to_race_start"):
+                _LOG.warning("%s: no movement anchor, skipping", gid)
+                continue
+            gpayload = telemetry_to_dict(gtele)
+            gpayload["extra"]["map_file"] = map_file
+            telemetry_from_dict(gpayload)
+            gpath = out_dir / f"{gid}.telemetry.json"
+            gpath.write_text(json.dumps(gpayload, indent=2), encoding="utf-8")
+            _LOG.info("%s: %d samples, finish=%s", gid,
+                      len(gtele.samples), gtele.finish_time_ms)
+            wrote += 1
+        return "ok" if wrote else "failed"
 
     payload = telemetry_to_dict(telemetry)
     # Record which map file was driven. `maps` has no map_uid column, so
@@ -338,6 +398,8 @@ def main() -> int:
         status = capture_one(
             job["map_file"],
             job.get("replay_file") or "",
+            job.get("ghost_url") or "",
+            job.get("ghost_urls") or None,
             replay_id=replay_id,
             out_dir=args.out_dir,
             run_id=run_id,

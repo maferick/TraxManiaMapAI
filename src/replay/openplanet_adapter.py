@@ -229,6 +229,7 @@ def telemetry_from_rig_output(
         "start_frame_index": start_frame_index,
         "trimmed_lead_frames": trimmed_lead_frames,
         "clock_rebased_to_race_start": anchored,
+        "ghost_source": ghost.get("source"),
         "ghost_nickname": ghost.get("nickname"),
         "ghost_nb_respawns": ghost.get("nb_respawns"),
         "ghost_checkpoint_times_ms": list(split_times),

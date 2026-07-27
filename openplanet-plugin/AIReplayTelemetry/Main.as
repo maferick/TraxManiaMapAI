@@ -217,6 +217,29 @@ void ProcessJob(const string &in inPath) {
     // which is the normal case for corpus work.
     string replayFile = body.HasKey("replay_file")
         ? string(body["replay_file"]) : "";
+    // Optional. Ghost DOWNLOAD URLs (trackmania.io / Nadeo services).
+    // The GAME performs the authenticated download via Ghost_Download,
+    // so no replay file ever touches disk. This is how leaderboard
+    // ghosts are captured: TMX replay uploads are measured dead (239 of
+    // 250 eligible maps had none) while Nadeo leaderboards had records
+    // on 100% of sampled eligible maps.
+    //
+    // SEVERAL urls in one job play SIMULTANEOUSLY: Ghost_Add returns a
+    // per-instance MwId and Ghost_GetPosition/Ghost_IsReplayOver take
+    // that id, so one map load amortises over all its ghosts. That is
+    // a 4-5x throughput gain, and it is the whole reason the multi
+    // form exists.
+    string ghostUrl = body.HasKey("ghost_url")
+        ? string(body["ghost_url"]) : "";
+    array<string> ghostUrls;
+    if (body.HasKey("ghost_urls")) {
+        Json::Value@ arr = body["ghost_urls"];
+        for (uint i = 0; i < arr.Length; i++) {
+            ghostUrls.InsertLast(string(arr[i]));
+        }
+    } else if (ghostUrl.Length > 0) {
+        ghostUrls.InsertLast(ghostUrl);
+    }
     int64 deadlineUnix = int64(body["deadline_unix"]);
     string donePath = inPath.SubStr(0, inPath.Length - 8) + ".out.json";
 
@@ -325,8 +348,49 @@ void ProcessJob(const string &in inPath) {
     CGameGhostScript@ ghost = null;
     CWebServicesTaskResult_GhostListScript@ task = null;
     string ghostSource = "";
+    // Multi-ghost bookkeeping. Single-URL jobs are just N=1.
+    array<CGameGhostScript@> dlGhosts;
+    array<string> dlUrls;
+    array<MwId> dlTaskIds;
 
-    if (replayFile.Length > 0) {
+    if (ghostUrls.Length > 0) {
+        // Leaderboard ghosts by URL. Pattern proven by the published
+        // RaceAgainstSpecificGhosts plugin: Ghost_Download("", url),
+        // then poll. The empty FileName means "do not persist". A
+        // failed download skips that ghost rather than killing the
+        // job: one dead URL must not waste the map load for the rest.
+        ghostSource = "leaderboard_ghost";
+        for (uint u = 0; u < ghostUrls.Length; u++) {
+            log("Ghost_Download('" + ghostUrls[u] + "')");
+            CWebServicesTaskResult_GhostScript@ dl =
+                dataFileMgr.Ghost_Download("", ghostUrls[u]);
+            if (dl is null) continue;
+            int dlDeadline = Time::Stamp + REPLAY_LOAD_WAIT_SECONDS;
+            while (dl.IsProcessing && Time::Stamp < dlDeadline
+                   && Time::Stamp < deadlineUnix) {
+                yield();
+                sleep(100);
+            }
+            if (dl.IsProcessing || !dl.HasSucceeded || dl.Ghost is null) {
+                log("ghost url skipped: " + (dl.IsProcessing
+                    ? "still processing"
+                    : dl.ErrorType + " / " + dl.ErrorCode));
+                dataFileMgr.TaskResult_Release(dl.Id);
+                continue;
+            }
+            dlGhosts.InsertLast(dl.Ghost);
+            dlUrls.InsertLast(ghostUrls[u]);
+            dlTaskIds.InsertLast(dl.Id);
+        }
+        if (dlGhosts.Length == 0) {
+            WriteOut(donePath, jobId, runId, false,
+                     "no ghost url produced a ghost",
+                     frames, ghostResult, false, "load_error");
+            app.BackToMainMenu();
+            return;
+        }
+        @ghost = dlGhosts[0];
+    } else if (replayFile.Length > 0) {
         ghostSource = "replay_file";
         log("Replay_Load('" + replayFile + "')");
         @task = dataFileMgr.Replay_Load(replayFile);
@@ -390,9 +454,25 @@ void ProcessJob(const string &in inPath) {
     log("ghost via " + ghostSource + ": " + string(ghost.Nickname)
         + " time=" + int(ghost.Result.Time) + "ms");
 
-    // IsGhostLayer = true: play it as an overlay ghost rather than as a
-    // competing racer.
-    MwId ghostInstance = pgs.Ghost_Add(ghost, true);
+    // Unify: every path below works on N ghosts; the single-ghost
+    // paths are simply N=1.
+    array<CGameGhostScript@> allGhosts;
+    if (dlGhosts.Length > 0) {
+        for (uint i = 0; i < dlGhosts.Length; i++) {
+            allGhosts.InsertLast(dlGhosts[i]);
+        }
+    } else {
+        allGhosts.InsertLast(ghost);
+    }
+
+    // IsGhostLayer = true: play them as overlay ghosts rather than as
+    // competing racers. They start together at race start.
+    array<MwId> instances;
+    for (uint i = 0; i < allGhosts.Length; i++) {
+        instances.InsertLast(pgs.Ghost_Add(allGhosts[i], true));
+    }
+    MwId ghostInstance = instances[0];
+    log("added " + instances.Length + " ghost instance(s)");
 
     // -----------------------------------------------------------------
     // Sampling loop. Reads the GHOST, not the operator's car.
@@ -424,13 +504,22 @@ void ProcessJob(const string &in inPath) {
     // silently corrupt every checkpoint index downstream.
     int movedFrameIndex = -1;
 
+    // Per-ghost state, index-parallel with `instances`. The legacy
+    // single-ghost variables above alias ghost 0 so the output stays
+    // backward compatible.
+    uint N = instances.Length;
+    array<array<Frame@>> gFrames(N);
+    array<bool> gSpawned(N);
+    array<bool> gOver(N);
+    array<int> gMoved(N);
+    for (uint i = 0; i < N; i++) { gMoved[i] = -1; }
+
     while (Time::Stamp < playbackDeadline
            && Time::Stamp < deadlineUnix
-           && frames.Length < uint(MAX_FRAMES)) {
+           && gFrames[0].Length < uint(MAX_FRAMES)) {
         yield();
 
         int t = int(pgs.Now) - clockOrigin;
-        vec3 p = pgs.Ghost_GetPosition(ghostInstance);
 
         // Diagnostic only. Never sampled into a Frame.
         if (!spawned && playground.GameTerminals.Length > 0) {
@@ -446,44 +535,61 @@ void ProcessJob(const string &in inPath) {
             }
         }
 
-        Frame@ f = Frame();
-        f.t_ms = t;
-        f.x = p.x;
-        f.y = p.y;
-        f.z = p.z;
-        frames.InsertLast(f);
+        bool allOver = true;
+        for (uint i = 0; i < N; i++) {
+            vec3 p = pgs.Ghost_GetPosition(instances[i]);
+            Frame@ f = Frame();
+            f.t_ms = t;
+            f.x = p.x;
+            f.y = p.y;
+            f.z = p.z;
+            gFrames[i].InsertLast(f);
 
-        // Spawn detection. Ghost_IsReplayOver is true before the replay
-        // starts, so trusting it from frame 0 ends every job empty.
-        //
-        // Do NOT restructure this as a timeout that "gives up waiting"
-        // and lets the loop proceed as if started. A previous build did
-        // exactly that and it cost 7 of 20 pilot maps: once the fallback
-        // fired, this branch stopped running, so a ghost that appeared
-        // later was never anchored even though it drove the whole track
-        // and produced hundreds of good frames.
-        if (!spawned
-            && (Math::Abs(p.x) > ORIGIN_EPSILON_M
-                || Math::Abs(p.y) > ORIGIN_EPSILON_M
-                || Math::Abs(p.z) > ORIGIN_EPSILON_M)) {
-            spawned = true;
-            movedFrameIndex = int(frames.Length) - 1;
-            log("ghost entered the scene at t=" + t + "ms (frame "
-                + movedFrameIndex + ")");
+            // Spawn detection, per ghost. Ghost_IsReplayOver is true
+            // before the replay starts, so trusting it from frame 0
+            // ends every job empty.
+            //
+            // Do NOT restructure this as a timeout that "gives up
+            // waiting" and lets the loop proceed as if started. A
+            // previous build did exactly that and it cost 7 of 20
+            // pilot maps: once the fallback fired, this branch stopped
+            // running, so a ghost that appeared later was never
+            // anchored even though it drove the whole track.
+            if (!gSpawned[i]
+                && (Math::Abs(p.x) > ORIGIN_EPSILON_M
+                    || Math::Abs(p.y) > ORIGIN_EPSILON_M
+                    || Math::Abs(p.z) > ORIGIN_EPSILON_M)) {
+                gSpawned[i] = true;
+                gMoved[i] = int(gFrames[i].Length) - 1;
+            }
+            if (gSpawned[i]) {
+                if (!gOver[i] && pgs.Ghost_IsReplayOver(instances[i])) {
+                    gOver[i] = true;
+                }
+                if (!gOver[i]) allOver = false;
+            } else {
+                allOver = false;
+            }
         }
 
-        if (spawned) {
-            if (pgs.Ghost_IsReplayOver(ghostInstance)) {
-                replayOver = true;
-                break;
-            }
-        } else if (t > GHOST_SPAWN_WAIT_MS) {
-            // Never appeared. Bail rather than burn the full playback
-            // ceiling on a ghost that is not coming.
+        bool anySpawned = false;
+        for (uint i = 0; i < N; i++) {
+            if (gSpawned[i]) { anySpawned = true; break; }
+        }
+        if (allOver) break;
+        if (!anySpawned && t > GHOST_SPAWN_WAIT_MS) {
+            // None ever appeared. Bail rather than burn the ceiling on
+            // ghosts that are not coming.
             break;
         }
         sleep(SAMPLE_PERIOD_MS);
     }
+
+    // Alias ghost 0 into the legacy fields.
+    frames = gFrames[0];
+    spawned = gSpawned[0];
+    replayOver = gOver[0];
+    movedFrameIndex = gMoved[0];
 
     string exitReason;
     if (frames.Length >= uint(MAX_FRAMES)) {
@@ -502,17 +608,57 @@ void ProcessJob(const string &in inPath) {
     ghostResult["diag_player_seen"] = playerSeen;
     ghostResult["diag_player_race_time_ms"] = maxPlayerRaceTime;
 
-    pgs.Ghost_Remove(ghostInstance);
-    // Only the Replay_Load path allocates a task result. The
-    // author-ghost path has nothing to release.
+    for (uint i = 0; i < instances.Length; i++) {
+        pgs.Ghost_Remove(instances[i]);
+    }
+    // The author-ghost path allocates no task results; the others do.
     if (task !is null) {
         dataFileMgr.TaskResult_Release(task.Id);
+    }
+    for (uint i = 0; i < dlTaskIds.Length; i++) {
+        dataFileMgr.TaskResult_Release(dlTaskIds[i]);
     }
     app.BackToMainMenu();
 
     ghostResult["source"] = ghostSource;
-    WriteOut(donePath, jobId, runId, true, "",
-             frames, ghostResult, replayOver, exitReason, movedFrameIndex);
+
+    // Multi-ghost payload: one record per ghost, each self-contained in
+    // the same shape the single-ghost adapter reads, so the driver can
+    // split the document into one artifact per ghost.
+    Json::Value@ multi = Json::Array();
+    for (uint i = 0; i < N; i++) {
+        Json::Value@ g = GhostResultToJson(allGhosts[i]);
+        g["source"] = ghostSource;
+        if (i < dlUrls.Length) g["url"] = dlUrls[i];
+        Json::Value@ rec = Json::Object();
+        rec["ghost"] = g;
+        rec["start_frame_index"] = gMoved[i];
+        rec["finished"] = gOver[i];
+        rec["exit_reason"] = gOver[i] ? "finished"
+            : (gSpawned[i] ? "playback_timeout" : "ghost_never_spawned");
+        Json::Value@ fa = Json::Array();
+        for (uint k = 0; k < gFrames[i].Length; k++) {
+            fa.Add(gFrames[i][k].ToJson());
+        }
+        rec["frames"] = fa;
+        multi.Add(rec);
+    }
+    ghostResult["multi_count"] = int(N);
+
+    WriteOutMulti(donePath, jobId, runId, frames, ghostResult, replayOver,
+                  exitReason, movedFrameIndex, multi);
+}
+
+
+// Wrapper keeping the legacy single-ghost envelope intact and adding
+// the per-ghost array beside it.
+void WriteOutMulti(
+    const string &in donePath, int jobId, const string &in runId,
+    array<Frame@> &in frames, Json::Value@ ghostResult, bool finished,
+    const string &in exitReason, int startFrameIndex, Json::Value@ multi
+) {
+    WriteOut(donePath, jobId, runId, true, "", frames, ghostResult,
+             finished, exitReason, startFrameIndex, multi);
 }
 
 
@@ -536,7 +682,8 @@ void WriteOut(
     Json::Value@ ghostResult,
     bool finished,
     const string &in exitReason,
-    int startFrameIndex = -1
+    int startFrameIndex = -1,
+    Json::Value@ multi = null
 ) {
     Json::Value@ doc = Json::Object();
     doc["protocol"] = PROTOCOL;
@@ -556,6 +703,9 @@ void WriteOut(
     // "checkpoint splits cannot be aligned to frames" rather than
     // defaulting to frame 0.
     doc["start_frame_index"] = startFrameIndex;
+    if (multi !is null) {
+        doc["ghosts_multi"] = multi;
+    }
 
     Json::Value@ framesArr = Json::Array();
     for (uint i = 0; i < frames.Length; i++) {
