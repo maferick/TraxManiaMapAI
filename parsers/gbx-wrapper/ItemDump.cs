@@ -31,8 +31,10 @@ internal static class ItemDump
     // types with client updates, so a fixed projection would silently
     // drop any new role. Storing the raw form lets a later pass extract
     // fields we cannot name yet, without reparsing 18,935 maps.
-    private static Dictionary<string, object?> DumpWaypoint(
-        GBX.NET.Engines.Game.CGameWaypointSpecialProperty wp)
+    // Takes object rather than the concrete waypoint type: GBX.NET does
+    // not expose that type name under Engines.Game, and MapParser
+    // likewise only ever pattern-matches it. Reflection needs no name.
+    private static Dictionary<string, object?> DumpWaypoint(object wp)
     {
         var dict = new Dictionary<string, object?>();
         foreach (var prop in wp.GetType().GetProperties(
