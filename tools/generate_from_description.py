@@ -88,6 +88,12 @@ def main() -> int:
                          "blocks three cells apart are the same row, "
                          "and the second kind dominates. Enabling this "
                          "raises the evidence bar for gaps tenfold")
+    ap.add_argument("--route-model",
+                    default="data/catalogue/route_model.json",
+                    help="ordered three-block runs mined from the corpus; "
+                         "used as a sequence prior so boosters come in "
+                         "runs and slopes chain, rather than each block "
+                         "being chosen on pairwise evidence alone")
     ap.add_argument("--priors", default="data/catalogue/face_priors.json")
     ap.add_argument("--rules", default="data/catalogue/pillar_rules.json")
     ap.add_argument("--template", default="data/catalogue/template48.Map.Gbx")
@@ -152,6 +158,16 @@ def main() -> int:
         pool = resolve_pool(
             spec.family_list, catalogue, max_footprint=spec.max_footprint
         )
+        model = None
+        if Path(args.route_model).is_file():
+            from src.generation.route_model import RouteModel
+            model = RouteModel.from_json(args.route_model)
+        else:
+            _LOG.info(
+                "no route model at %s — falling back to pairwise "
+                "evidence (run mine-route-sequences + export-route-model)",
+                args.route_model,
+            )
         walker = GrammarWalker(
             catalogue, PlacementGrammar.from_json(args.grammar), pool,
             seed=spec.seed, min_maps=args.min_maps,
@@ -163,6 +179,7 @@ def main() -> int:
             require_prefixes=[
                 FAMILIES[n].prefix for n in spec.family_list
             ],
+            route_model=model,
         )
     else:
         block_ids, clips = resolve(

@@ -119,6 +119,20 @@ NO_CLIP_MIN_MAPS_FACTOR = 5
 # reached, so it steers the route rather than filling it.
 UNVISITED_FAMILY_BOOST = 5000.0
 
+# Weight multiplier for a move the corpus has actually been observed to
+# make NEXT, given the block before the current one.
+#
+# A bigram walker reproduces the marginal: it knows Straight is common
+# after Straight, but not that Straight x3 is a pattern in 274 maps or
+# that SpecialTurbo2 comes in RUNS of three in 83. Multiplying by the
+# triple's own map_count lets an attested continuation of a run beat an
+# unrelated block that merely happens to be a popular neighbour.
+#
+# Unattested runs are weighted DOWN, never forbidden. The corpus is a
+# sample; refusing everything it has not seen collapses the vocabulary
+# to a handful of patterns and makes every map identical.
+SEQUENCE_WEIGHT = 3.0
+
 Cell = tuple[int, int, int]
 
 
@@ -235,6 +249,7 @@ class GrammarWalker:
         block_bias: dict[str, float] | None = None,
         route_only: bool = True,
         require_prefixes: list[str] | None = None,
+        route_model=None,
     ) -> None:
         self._seed = seed
         self._rng = random.Random(seed)
@@ -254,6 +269,9 @@ class GrammarWalker:
         # against a few dozen for the PlatformGrassToRoadTech bridge,
         # so a plain weighted walk never crosses over.
         self._require = tuple(require_prefixes or ())
+        # Ordered three-block runs mined from the corpus. Optional: the
+        # walker still works on pairwise evidence alone.
+        self._model = route_model
 
         self._cells: dict[tuple[str, int], tuple[Cell, ...]] = {}
         self._waypoint: dict[str, str] = {}
@@ -492,7 +510,10 @@ class GrammarWalker:
                 for c in cells
             )
 
-        def dfs(prev: Placement, incoming: Cell | None, steps: int) -> bool:
+        def dfs(
+            prev: Placement, incoming: Cell | None, steps: int,
+            before: str | None = None,
+        ) -> bool:
             nonlocal expansions
             expansions += 1
             if expansions > max_expansions:
@@ -551,6 +572,13 @@ class GrammarWalker:
                 ):
                     continue
                 weight = self._weight(move)
+                if self._model is not None:
+                    seen = self._model.sequence_weight(
+                        before, prev.block_id, move.block,
+                        move.offset, move.rel_rotation,
+                    )
+                    if seen:
+                        weight *= 1.0 + SEQUENCE_WEIGHT * seen
                 if any(columns[col] for col in cols):
                     # Passing back over ground the line already covers.
                     # Legal — 4.2% of corpus columns are a bridge — but
@@ -577,7 +605,9 @@ class GrammarWalker:
                     if p not in visited and move.block.startswith(p)
                 }
                 visited.update(reached)
-                if dfs(nxt, _reverse_offset(move), steps + 1):
+                if dfs(
+                    nxt, _reverse_offset(move), steps + 1, prev.block_id,
+                ):
                     return True
                 placements.pop()
                 occupied.difference_update(footprint)

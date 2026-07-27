@@ -878,6 +878,61 @@ def _cmd_mine_route_sequences(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_route_model(args: argparse.Namespace) -> int:
+    """Export ordered triples + jumps for offline generation."""
+    import json as _json
+
+    from src.storage.mariadb import cursor as _cursor
+
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        with _cursor(conn) as cur:
+            cur.execute(
+                "SELECT block_a, block_b, block_c, dx2, dy2, dz2, rel2, "
+                "map_count FROM block_route_sequences "
+                "WHERE n = 3 AND environment = %s AND map_count >= %s",
+                (args.environment, int(args.min_maps)),
+            )
+            triples = [
+                [str(a), str(b), str(c), int(dx), int(dy), int(dz),
+                 int(rel), int(mc)]
+                for a, b, c, dx, dy, dz, rel, mc in cur.fetchall()
+            ]
+            cur.execute(
+                "SELECT block_a, block_b, dx, dy, dz, rel_rotation, gap, "
+                "map_count FROM block_jump_pairs "
+                "WHERE environment = %s AND map_count >= %s",
+                (args.environment, int(args.min_maps)),
+            )
+            jumps = [
+                [str(a), str(b), int(dx), int(dy), int(dz), int(rel),
+                 int(gap), int(mc)]
+                for a, b, dx, dy, dz, rel, gap, mc in cur.fetchall()
+            ]
+    finally:
+        conn.close()
+
+    doc = {
+        "schema": "route_model_v1",
+        "environment": args.environment,
+        "min_maps": int(args.min_maps),
+        # [a, b, c, dx2, dy2, dz2, rel2, map_count] — B->C given that
+        # A came before B. Direction-ambiguous by construction.
+        "triples": triples,
+        # [a, b, dx, dy, dz, rel, gap, map_count]
+        "jumps": jumps,
+    }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(_json.dumps(doc), encoding="utf-8")
+    _LOG.info(
+        "export-route-model: %d triples, %d jumps -> %s",
+        len(triples), len(jumps), out,
+    )
+    return 0
+
+
 def _cmd_mine_jumps(args: argparse.Namespace) -> int:
     from src.catalogue.loader import load_catalogue
     from src.constraints.route_jumps import build_jumps, reset_jumps
@@ -3250,6 +3305,19 @@ def _build_parser() -> argparse.ArgumentParser:
     seq_cmd.add_argument("--min-maps", type=int, default=3)
     seq_cmd.add_argument("--reset", action="store_true")
     seq_cmd.set_defaults(func=_cmd_mine_route_sequences)
+
+    route_model_cmd = sub.add_parser(
+        "export-route-model",
+        help="Export ordered triples and mined jumps as one JSON for "
+             "offline generation: what the corpus puts NEXT in a run, "
+             "and which gaps it is known to jump.",
+    )
+    route_model_cmd.add_argument("--environment", type=str,
+                                 default="Stadium2020")
+    route_model_cmd.add_argument("--min-maps", type=int, default=5)
+    route_model_cmd.add_argument(
+        "--out", type=str, default="data/catalogue/route_model.json")
+    route_model_cmd.set_defaults(func=_cmd_export_route_model)
 
     jumps_cmd = sub.add_parser(
         "mine-jumps",
