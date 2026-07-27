@@ -57,6 +57,27 @@ stoppable, but that ordering makes any early stop
 **systematically biased toward short tracks**. A partial bulk run is not
 a valid sample of the cohort.
 
+## Bulk capture distribution (2026-07-27, complete)
+
+330 captures, one per map, snapshot `goldset-bulk-2026-07-27`,
+matcher `block_matcher-0.3`. 334 ghosted maps attempted; 4 produced no
+artifact.
+
+| capture_status | n | share |
+|---|---|---|
+| valid | 284 | 86.1% |
+| no_movement (race never starts) | 26 | 7.9% |
+| incomplete (300s playback ceiling) | 20 | 6.1% |
+
+Route class among valid: block_covered 261 (91.9%), unresolved_elevated
+20 (7.0%), terrain_offroad 3 (1.1%). Aggregate source contribution:
+grid 81.4%, free 9.9%, item 2.5%, baked 0.7%, terrain 1.2%; checkpoint
+coverage 97.7%.
+
+Gaps within block_covered: mean 23 m, 62% <=16 m, 96% <=100 m, max
+316 m. Data-derived eligibility proposal (to be confirmed, not frozen):
+`valid AND block_covered AND longest_gap_m <= 100` -> ~250 captures.
+
 Still open, in order:
 
 1. Coordinate reconciliation. Captures are in metres; `block_placements`
