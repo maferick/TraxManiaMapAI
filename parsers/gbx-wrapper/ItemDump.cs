@@ -74,8 +74,31 @@ internal static class ItemDump
             });
         }
 
+        // BakedBlocks too. They are CGameCtnBlock like Blocks but live
+        // in a separate collection and are equally absent from
+        // block_placements. TM2020 puts the auto-generated terrain here,
+        // and a car CAN drive on terrain, so an off-road stretch has no
+        // row anywhere in the corpus. Emitted alongside items because
+        // the question they answer is the same one: what is under the
+        // car when block_placements says nothing is?
+        var baked = new List<Dictionary<string, object?>>();
+        foreach (var b in map.BakedBlocks ?? new List<CGameCtnBlock>())
+        {
+            if (b.IsFree) continue;
+            baked.Add(new Dictionary<string, object?>
+            {
+                ["name"] = b.Name,
+                ["x"] = b.Coord.X,
+                ["y"] = b.Coord.Y,
+                ["z"] = b.Coord.Z,
+                ["dir"] = (int)b.Direction,
+            });
+        }
+
         return new Dictionary<string, object?>
         {
+            ["baked"] = baked,
+            ["baked_total"] = baked.Count,
             ["map_uid"] = map.MapUid,
             ["title"] = map.MapName,
             ["blocks_total"] = map.Blocks?.Count ?? 0,
