@@ -30,7 +30,39 @@ internal static class Diagnose
             ["baked_blocks_total"] = map.BakedBlocks?.Count ?? 0,
             ["anchored_objects_total"] = map.AnchoredObjects?.Count ?? 0,
             ["mood_candidates"] = ReflectMatching(map, new[] { "Mood", "Decoration", "Day", "Weather" }),
+            // Does the map carry the author's VALIDATION REPLAY?
+            //
+            // Every published map embeds the run its author used to
+            // validate it — that is what the ExtractValidationReplay
+            // plugin pulls out. A validation ghost is a guaranteed
+            // successful finish, so if GBX.NET can reach it offline the
+            // whole corpus becomes ~19k known-good replays without the
+            // game in the loop, and without touching TMX. Only 30
+            // replays were ever ingested, and none for the 763
+            // linked-checkpoint maps, so this is the difference between
+            // having a gold set and not.
+            ["ghost_candidates"] = ReflectMatching(
+                map, new[] { "Ghost", "Validate", "Validation", "Record" }),
         };
+
+        if (map.ChallengeParameters is not null)
+        {
+            result["challenge_parameters"] = DumpProperties(map.ChallengeParameters);
+            var vg = map.ChallengeParameters.RaceValidateGhost;
+            result["validation_ghost_present"] = vg is not null;
+            if (vg is not null)
+            {
+                result["validation_ghost"] = new Dictionary<string, object?>
+                {
+                    ["_type"] = vg.GetType().FullName,
+                    ["login"] = vg.GhostLogin,
+                    ["nickname"] = vg.GhostNickname,
+                    ["race_time_ms"] = vg.RaceTime?.TotalMilliseconds,
+                    ["checkpoints"] = vg.Checkpoints?.Length ?? 0,
+                    ["samples"] = vg.SampleData?.Samples?.Count ?? 0,
+                };
+            }
+        }
 
         if (map.AnchoredObjects is { Count: > 0 })
         {
