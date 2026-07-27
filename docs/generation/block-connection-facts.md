@@ -253,8 +253,17 @@ Two dead ends worth not repeating:
   rewarding attested runs rewards repetition. Default is 0.
 
 So the ordered evidence exists and is the only such evidence in the
-project, but consuming it needs something that shapes a whole route
-rather than one step. `SEQUENCE_WEIGHT` is left in place at 0.
+project, but consuming it as a per-step weight is the wrong
+granularity. `SEQUENCE_WEIGHT` is left in place at 0.
+
+**The variety gap it was aimed at had a much cheaper cause.** Routes
+carried 14 distinct block types against the corpus's 21 simply because
+weighting by breadth lets the most popular blocks win every step.
+Down-weighting a block used in the last 14 placements (`RECENCY_PENALTY`)
+lands exactly on 21, with a top-block share of 0.23 against the
+corpus's 0.29 — marginally more varied than real maps, which is the
+safer side to miss on. The walker never lacked patterns to follow; it
+lacked a reason not to repeat itself.
 
 ## Jumps, from the finishability axiom
 
@@ -293,10 +302,7 @@ filter caught `DecoWall` and not `DecoPlatform` / `DecoHill` /
 3. **Nothing measures drivability.** Every check here is structural.
    Whether a route is actually *fun* or even completable needs the
    replay corpus, and the finishability gate still owns that.
-4. **Generated routes are too repetitive.** 14 distinct route block
-   types per map against the corpus's 21. The sequence prior made this
-   worse, not better; something that shapes the whole route is needed.
-5. **Junction blocks are used as through-pieces.** `RoadTechBranchTShaped`
+4. **Junction blocks are used as through-pieces.** `RoadTechBranchTShaped`
    (3 clipped faces) and `*BranchCross` (4) get placed inline. Harmless
    — they are drivable straight through — but they read as stubs.
    Cannot be flagged by face count alone, because `PlatformPlasticBase`
