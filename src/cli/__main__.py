@@ -397,6 +397,27 @@ def _cmd_export_construction(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mine_driven_transitions(args: argparse.Namespace) -> int:
+    """Mine observed transitions + run lengths from driven paths."""
+    from src.learning.driven_transitions import (
+        analyse, export_artifact, mine, persist,
+    )
+
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        mined, run_lengths = mine(
+            conn, extractor_version=args.extractor_version)
+        n = persist(conn, mined)
+    finally:
+        conn.close()
+    analysis = analyse(mined, run_lengths)
+    export_artifact(mined, run_lengths, analysis, args.out)
+    _LOG.info("persisted %d transition rows", n)
+    print(json.dumps(analysis, indent=1))
+    return 0
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     try:
         applied = migrate(config_path=args.config)
@@ -3154,6 +3175,17 @@ def _build_parser() -> argparse.ArgumentParser:
     export_cons_cmd.add_argument("--extractor-version", type=str,
                                  default="driven_path-0.1")
     export_cons_cmd.set_defaults(func=_cmd_export_construction)
+
+    mine_dt_cmd = sub.add_parser(
+        "mine-driven-transitions",
+        help="Mine observed block transitions from driven paths",
+    )
+    mine_dt_cmd.add_argument("--extractor-version", type=str,
+                             default="driven_path-0.1")
+    mine_dt_cmd.add_argument(
+        "--out", type=str,
+        default="data/artifacts/telemetry/driven_transitions_v0.1.json")
+    mine_dt_cmd.set_defaults(func=_cmd_mine_driven_transitions)
 
     parse_maps_cmd = sub.add_parser(
         "parse-maps",
