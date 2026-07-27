@@ -309,14 +309,21 @@ void ProcessJob(const string &in inPath) {
         f.wheel_contact = SafeWheelContact(api);
         f.gear = int(api.EngineCurGear);
         f.rpm  = int(api.EngineRpm);
-        f.cp_index = int(api.CurrentNbCheckpoints);
-        f.finished = api.RaceFinished ? 1 : 0;
+        // NEITHER CurrentNbCheckpoints NOR RaceFinished EXISTS.
+        // PR #81 invented both; they appear nowhere in Openplanet.h.
+        // The real API (struct CSmScriptPlayer, line ~23330) gives:
+        //   RaceWaypointTimes  MwFastBuffer<uint>, one entry per
+        //                      waypoint crossed — its Length is the
+        //                      checkpoint count
+        //   EndTime            set when the run ends
+        f.cp_index = int(api.RaceWaypointTimes.Length);
+        f.finished = (api.EndTime > 0) ? 1 : 0;
         f.lap = int(api.CurrentLapNumber);
         f.race_respawns = int(api.CurrentRaceRespawns);
         f.lap_respawns = int(api.CurrentLapRespawns);
         frames.InsertLast(f);
 
-        if (api.RaceFinished) {
+        if (api.EndTime > 0) {
             finishedFlag = true;
             // Capture a couple of trailing frames after finish for
             // post-finish visualisation, then stop.

@@ -423,6 +423,19 @@ directly:
 where it increments — an explicit event, not a residual outlier to be
 thresholded. Both are now recorded per frame by AIReplayTelemetry.
 
+**Check members against `~/OpenplanetNext/Openplanet.h` FIRST.** It is
+a 31,379-line offline dump of the whole game API — every class, member
+and enum. Grepping it is free and instant, and it would have caught
+every accessor mistake made here: `m_TargetedDistance` (absent),
+`CGameScriptPlayer` vs `CSmScriptPlayer` (wrong base type), and
+`RaceFinished` / `CurrentNbCheckpoints` (invented by PR #81, present
+nowhere in the API). One caveat when grepping it: the declarations are
+`struct`, not `class`, so a parser looking for `class` finds nothing.
+
+It does NOT cover the Openplanet scripting namespaces (`Meta::`,
+`Reflection::`, `IO::`) — only game classes. For those, the reflection
+probe or a throwaway plugin is still the way.
+
 **How to check a member exists without risking a plugin.** In
 AngelScript an unknown member is a COMPILE-time error that takes the
 whole plugin down, so a guess costs a reload cycle
