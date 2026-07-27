@@ -100,6 +100,74 @@ def _cmd_ingest_openplanet_telemetry(args: argparse.Namespace) -> int:
     return 1 if stats.invalid else 0
 
 
+def _cmd_ingest_map_items(args: argparse.Namespace) -> int:
+    """Populate map_items for a cohort of maps.
+
+    Scoped to a cohort on purpose. The Stadium2020 corpus holds
+    15,262,391 items against 646,125 for the linked-checkpoint gold set,
+    so a full backfill is a separate decision with its own disk check,
+    not something to trigger by accident.
+    """
+    from src.ingestion.map_items import ingest_maps
+
+    config = load_config(args.config)
+    gbx_cfg = (config.get("parsers") or {}).get("gbx") or {}
+    executable = Path(
+        args.parser_executable
+        or gbx_cfg.get("executable")
+        or "./parsers/gbx-wrapper/bin/Release/net8.0/GbxWrapper"
+    )
+    timeout = float(gbx_cfg.get("timeout_seconds", 30.0))
+
+    conn = open_connection(config)
+    parser = SubprocessParser(
+        executable=executable,
+        parser_version=args.parser_version,
+        timeout_seconds=timeout,
+    )
+    try:
+        with conn.cursor() as cur:
+            if args.captured:
+                # Only maps we actually hold telemetry for. That is the
+                # cohort whose coverage we are about to analyse.
+                cur.execute(
+                    """
+                    SELECT DISTINCT m.id, m.raw_artifact_path
+                      FROM maps m JOIN replays r ON r.map_id = m.id
+                     WHERE r.openplanet_telemetry_path IS NOT NULL
+                       AND m.raw_artifact_path IS NOT NULL
+                    """
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT DISTINCT m.id, m.raw_artifact_path
+                      FROM maps m
+                      JOIN map_checkpoints c
+                        ON c.map_id = m.id AND c.tag = 'LinkedCheckpoint'
+                     WHERE m.environment = 'Stadium2020'
+                       AND m.raw_artifact_path IS NOT NULL
+                    """
+                )
+            rows = [(r[0], r[1]) for r in cur.fetchall()]
+        if args.limit:
+            rows = rows[: args.limit]
+        _LOG.info("ingesting items for %d map(s)", len(rows))
+        stats = ingest_maps(conn, parser, rows, version=args.parser_version)
+    finally:
+        conn.close()
+
+    if stats.unit_coord_mismatches:
+        # Source BlockUnitCoord disagreeing with the cell derived from
+        # the absolute position would mean the grid calibration is off.
+        _LOG.warning(
+            "%d item(s) had BlockUnitCoord != derived cell; "
+            "investigate before trusting item candidates",
+            stats.unit_coord_mismatches,
+        )
+    return 1 if stats.failed_maps else 0
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     try:
         applied = migrate(config_path=args.config)
@@ -2797,6 +2865,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ingest_openplanet_cmd.add_argument("--dry-run", action="store_true")
     ingest_openplanet_cmd.set_defaults(func=_cmd_ingest_openplanet_telemetry)
+
+    ingest_items_cmd = sub.add_parser(
+        "ingest-map-items",
+        help="Populate map_items (anchored objects) for a cohort",
+    )
+    ingest_items_cmd.add_argument(
+        "--captured", action="store_true",
+        help="only maps that already have telemetry captures",
+    )
+    ingest_items_cmd.add_argument("--limit", type=int, default=None)
+    ingest_items_cmd.add_argument("--parser-executable", type=str, default=None)
+    ingest_items_cmd.add_argument("--parser-version", type=str, default="items-0.1")
+    ingest_items_cmd.set_defaults(func=_cmd_ingest_map_items)
 
     parse_maps_cmd = sub.add_parser(
         "parse-maps",

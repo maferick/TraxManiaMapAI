@@ -50,6 +50,19 @@ class SubprocessParser(ParserClient):
     def parse_replay(self, artifact_path: Path) -> ParseResult:
         return self._invoke("replay", f"{artifact_path}\n")
 
+    def dump_items(self, artifact_path: Path) -> ParseResult:
+        """Invoke the wrapper's ``dump-items`` command.
+
+        Returns every ``CGameCtnAnchoredObject`` placement in the map,
+        plus its non-free ``BakedBlocks``. Neither is covered by
+        ``block_placements``, and on item-built maps the waypoints are
+        items rather than blocks, so this is what pins a route there.
+
+        Transform and identity only: no item geometry is resolved,
+        because none is available offline.
+        """
+        return self._invoke("dump-items", f"{artifact_path}\n")
+
     def probe_pak(self, pak_path: Path) -> ParseResult:
         """Invoke the wrapper's ``probe-pak`` command.
 

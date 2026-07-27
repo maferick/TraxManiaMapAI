@@ -26,6 +26,25 @@ namespace TraxMania.GbxWrapper;
 
 internal static class ItemDump
 {
+    // Reflect the whole waypoint object, not just the fields we know
+    // today. Tag is documented as free-form and Nadeo adds waypoint
+    // types with client updates, so a fixed projection would silently
+    // drop any new role. Storing the raw form lets a later pass extract
+    // fields we cannot name yet, without reparsing 18,935 maps.
+    private static Dictionary<string, object?> DumpWaypoint(
+        GBX.NET.Engines.Game.CGameWaypointSpecialProperty wp)
+    {
+        var dict = new Dictionary<string, object?>();
+        foreach (var prop in wp.GetType().GetProperties(
+                     System.Reflection.BindingFlags.Public
+                     | System.Reflection.BindingFlags.Instance))
+        {
+            try { dict[prop.Name] = prop.GetValue(wp)?.ToString(); }
+            catch (Exception ex) { dict[prop.Name] = $"<throws: {ex.GetType().Name}>"; }
+        }
+        return dict;
+    }
+
     public static Dictionary<string, object?> DumpFromPath(string path)
     {
         var map = Gbx.ParseNode<CGameCtnChallenge>(path)
@@ -66,11 +85,24 @@ internal static class ItemDump
                 ["pivot_z"] = pivot.Z,
 
                 ["flags"] = obj.Flags,
-                // A waypoint-bearing item IS a checkpoint or finish, so
-                // it matters for route pinning, not just coverage.
-                ["is_waypoint"] = obj.WaypointSpecialProperty is not null,
-                ["snapped_on_block"] = obj.SnappedOnBlock?.ToString(),
-                ["snapped_on_item"] = obj.SnappedOnItem?.ToString(),
+
+                // A waypoint-bearing item IS a checkpoint, finish or
+                // spawn. On item-built maps the waypoints are items
+                // rather than blocks, so this is what pins a route:
+                // adding item anchors moved checkpoint-region coverage
+                // from 0.0% to 65.6% on one pilot map and from 70% to
+                // 100% on another, while barely moving surface
+                // coverage. Reducing this to a boolean would discard
+                // exactly the signal that made ingestion worthwhile.
+                //
+                // Tag is a free-form string, NOT an enum: TM2020 ships
+                // at least Spawn / Goal / Checkpoint / LinkedCheckpoint
+                // / StartFinish and Nadeo adds more with client
+                // updates. Order is non-zero only on LinkedCheckpoint.
+                ["waypoint_tag"] = obj.WaypointSpecialProperty?.Tag,
+                ["waypoint_order"] = obj.WaypointSpecialProperty?.Order,
+                ["waypoint_raw"] = obj.WaypointSpecialProperty is { } wp
+                    ? DumpWaypoint(wp) : null,
             });
         }
 
