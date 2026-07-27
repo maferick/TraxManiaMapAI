@@ -40,7 +40,8 @@ public static class Program
              && args[0] != "dump-block-catalogue"
              && args[0] != "scan-item-donors"
              && args[0] != "probe-pak"
-             && args[0] != "dump-items"))
+             && args[0] != "dump-items"
+             && args[0] != "probe-schema"))
         {
             Console.Error.WriteLine(
                 "usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay"
@@ -101,6 +102,7 @@ public static class Program
                 "scan-item-donors" => ItemDonorScan.ScanFromStdinJson(stdinLine),
                 "probe-pak" => PakProbe.ProbeFromPath(stdinLine),
                 "dump-items" => ItemDump.DumpFromPath(stdinLine),
+                "probe-schema" => SchemaProbe.ProbeFromPath(stdinLine),
                 _ => throw new InvalidOperationException("unreachable"),
             };
             EmitSuccess(payload);
