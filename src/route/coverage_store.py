@@ -42,7 +42,7 @@ from src.route.block_matcher import (
 
 _LOG = logging.getLogger(__name__)
 
-MATCHER_VERSION = "block_matcher-0.2"
+MATCHER_VERSION = "block_matcher-0.3"  # 0.3 adds baked-block candidates
 AIRBORNE_METHOD = "ballistic_vertical_accel"
 AIRBORNE_METHOD_VERSION = "g=-24.0,tol=8.0"
 
@@ -76,6 +76,7 @@ def compute_coverage(
     checkpoint_indices: Sequence[int],
     placements: Sequence[Placement],
     item_cells: Mapping[tuple[int, int, int], int],
+    baked_cells: Mapping[tuple[int, int, int], int],
     catalogue,
     *,
     anchored: bool = True,
@@ -91,7 +92,7 @@ def compute_coverage(
     n = len(samples)
 
     covered = [False] * n
-    src_grid = src_free = src_item = 0
+    src_grid = src_free = src_item = src_baked = 0
     grounded = airborne = 0
     terrain_samples = 0
     terrain: dict[tuple[int, int, int], dict[str, Any]] = {}
@@ -120,10 +121,16 @@ def compute_coverage(
         f = index.free_hit(x, y, z) if not g else False
         cell = to_cell(x, y, z)
         it = (not g and not f) and cell in item_cells
-        covered[i] = g or f or it
+        # Baked blocks are a distinct fourth source: game-generated
+        # drivable surface that no other collection records. Anchor-only
+        # and NOT radius-expanded, because these names are absent from
+        # the catalogue so any extent would be invented.
+        bk = (not g and not f and not it) and cell in baked_cells
+        covered[i] = g or f or it or bk
         src_grid += g
         src_free += f
         src_item += it
+        src_baked += bk
 
         if covered[i]:
             continue
@@ -271,6 +278,7 @@ def compute_coverage(
             "covered_grid": src_grid,
             "covered_free": src_free,
             "covered_item": src_item,
+            "covered_baked": src_baked,
             "covered_any": covered_any,
             "checkpoint_samples": cp_tot,
             "checkpoint_covered": cp_cov,
@@ -400,4 +408,36 @@ def load_item_cells(conn, map_id: int, radius: int = 1) -> dict:
                 for dz in range(-radius, radius + 1):
                     for dy in (0, -1):
                         cells.setdefault((cx + dx, cy + dy, cz + dz), item_id)
+    return cells
+
+
+def load_baked_cells(conn, map_id: int) -> dict:
+    """Candidate cells from non-terrain baked blocks.
+
+    ANCHOR ONLY, deliberately not radius-expanded. These block names are
+    absent from the placeable catalogue, so there is no footprint to
+    expand and a radius would be an invented extent rather than a
+    measured one, exactly the inadequate-proxy problem already seen with
+    item anchors.
+
+    Base terrain is excluded: ground-plane driving is already accounted
+    for as TERRAIN_GROUND, and every map carries 2,304 `Grass` cells
+    covering the whole ground, so admitting them would drive every
+    ground-level map to ~100% coverage while meaning nothing.
+
+    Clip blocks are excluded too. A clip is a connection marker, not a
+    surface to drive on.
+    """
+    cells: dict[tuple[int, int, int], int] = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, x, y, z FROM map_baked_blocks
+             WHERE map_id = %s AND base_terrain = 0 AND is_clip = 0
+               AND x IS NOT NULL
+            """,
+            (map_id,),
+        )
+        for row_id, x, y, z in cur.fetchall():
+            cells.setdefault((x, y, z), row_id)
     return cells

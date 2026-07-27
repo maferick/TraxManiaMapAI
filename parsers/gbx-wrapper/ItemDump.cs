@@ -115,17 +115,45 @@ internal static class ItemDump
         // row anywhere in the corpus. Emitted alongside items because
         // the question they answer is the same one: what is under the
         // car when block_placements says nothing is?
+        // BakedBlocks are full CGameCtnBlock objects, not name+anchor
+        // pairs, so emit the whole surface. Verified by reflection on
+        // the installed GBX.NET rather than assumed from the file-format
+        // docs: Coord, Direction, Flags, Variant, SubVariant, IsGround,
+        // IsClip, IsGhost, IsPillar, WaypointSpecialProperty and a full
+        // BlockModel Ident are all present.
         var baked = new List<Dictionary<string, object?>>();
+        int bakedIndex = 0;
         foreach (var b in map.BakedBlocks ?? new List<CGameCtnBlock>())
         {
-            if (b.IsFree) continue;
+            var pos = b.AbsolutePositionInMap;
             baked.Add(new Dictionary<string, object?>
             {
+                ["placement_index"] = bakedIndex++,
                 ["name"] = b.Name,
+                // Full identity. Name alone is ambiguous across
+                // collections in the same way item ids are.
+                ["model_id"] = b.BlockModel.Id.ToString(),
+                ["model_collection"] = b.BlockModel.Collection.ToString(),
+                ["model_author"] = b.BlockModel.Author,
                 ["x"] = b.Coord.X,
                 ["y"] = b.Coord.Y,
                 ["z"] = b.Coord.Z,
                 ["dir"] = (int)b.Direction,
+                ["flags"] = b.Flags,
+                ["variant"] = (int)b.Variant,
+                ["sub_variant"] = (int)b.SubVariant,
+                ["is_ground"] = b.IsGround,
+                ["is_clip"] = b.IsClip,
+                ["is_free"] = b.IsFree,
+                ["is_ghost"] = b.IsGhost,
+                ["is_pillar"] = b.IsPillar,
+                ["abs_x"] = pos?.X,
+                ["abs_y"] = pos?.Y,
+                ["abs_z"] = pos?.Z,
+                ["waypoint_tag"] = b.WaypointSpecialProperty?.Tag,
+                ["waypoint_order"] = b.WaypointSpecialProperty?.Order,
+                ["waypoint_raw"] = b.WaypointSpecialProperty is { } bwp
+                    ? DumpWaypoint(bwp) : null,
             });
         }
 

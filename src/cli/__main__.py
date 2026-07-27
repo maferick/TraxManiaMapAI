@@ -153,7 +153,10 @@ def _cmd_ingest_map_items(args: argparse.Namespace) -> int:
         if args.limit:
             rows = rows[: args.limit]
         _LOG.info("ingesting items for %d map(s)", len(rows))
-        stats = ingest_maps(conn, parser, rows, version=args.parser_version)
+        stats = ingest_maps(
+            conn, parser, rows, version=args.parser_version,
+            skip_base_terrain=args.skip_base_terrain,
+        )
     finally:
         conn.close()
 
@@ -180,7 +183,8 @@ def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
 
     from src.catalogue.loader import load_catalogue
     from src.route.coverage_store import (
-        compute_coverage, load_item_cells, load_placements, persist,
+        compute_coverage, load_baked_cells, load_item_cells,
+        load_placements, persist,
     )
 
     config = load_config(args.config)
@@ -190,6 +194,7 @@ def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
         "free_anchor": args.free_anchor,
         "free_pad_m": args.free_pad,
         "item_radius": args.item_radius,
+        "baked_candidates": not args.no_baked,
         "checkpoint_window": 10,
     }
 
@@ -217,10 +222,11 @@ def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
             doc = _json.loads(f.read_text(encoding="utf-8"))
             placements = load_placements(conn, map_id)
             items = load_item_cells(conn, map_id, radius=args.item_radius)
+            baked = ({} if args.no_baked else load_baked_cells(conn, map_id))
             result = compute_coverage(
                 doc["samples"],
                 doc.get("checkpoint_sample_indices") or [],
-                placements, items, catalogue,
+                placements, items, baked, catalogue,
                 anchored=bool(
                     (doc.get("extra") or {}).get("clock_rebased_to_race_start")
                 ),
@@ -2960,6 +2966,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="only maps that already have telemetry captures",
     )
     ingest_items_cmd.add_argument("--limit", type=int, default=None)
+    ingest_items_cmd.add_argument(
+        "--skip-base-terrain", action="store_true",
+        help="omit the 2,304-cell Grass ground layer per map; it is "
+             "redundant for matching since TERRAIN_GROUND covers it",
+    )
     ingest_items_cmd.add_argument("--parser-executable", type=str, default=None)
     ingest_items_cmd.add_argument("--parser-version", type=str, default="items-0.1")
     ingest_items_cmd.set_defaults(func=_cmd_ingest_map_items)
@@ -2976,6 +2987,10 @@ def _build_parser() -> argparse.ArgumentParser:
                               default="center")
     coverage_cmd.add_argument("--free-pad", type=float, default=8.0)
     coverage_cmd.add_argument("--item-radius", type=int, default=1)
+    coverage_cmd.add_argument(
+        "--no-baked", action="store_true",
+        help="ablation: exclude baked-block candidates",
+    )
     coverage_cmd.add_argument("--item-ingestion-version", type=str,
                               default="items-0.1")
     coverage_cmd.add_argument("--coverage-version", type=str,
