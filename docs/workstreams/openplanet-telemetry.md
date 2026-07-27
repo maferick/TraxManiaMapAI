@@ -23,6 +23,40 @@ the millisecond. The 3 losses are maps whose race never starts
 Stadium2020, and only 334 of those embed an author ghost. The claim that
 every published map carries one is false.
 
+## Cohort selection funnel
+
+Every exclusion between the linked-checkpoint set and the capture
+manifest, so the representativeness of any result computed on the cohort
+can be judged rather than assumed.
+
+| stage | maps | excluded | reason |
+|---|---|---|---|
+| `LinkedCheckpoint` maps | 763 | | the gold set as originally scoped |
+| Stadium2020 only | 545 | 218 | other TM games; TMX hosts several |
+| artifact present on disk | 545 | 0 | all resolved |
+| `diagnose-map` parsed | 544 | 1 | one unparseable artifact |
+| embeds an author ghost | 334 | 210 | no validation ghost to drive |
+| already captured (pilot) | 314 | 20 | in the manifest as a separate batch |
+
+So the bulk manifest is **314 maps, 61.3% of the Stadium2020
+linked-checkpoint population**, and the dominant exclusion by far is the
+absence of an embedded author ghost (210 maps, 38.5%). That exclusion is
+not random with respect to anything we have checked, and nothing yet
+rules out that ghost-less maps differ systematically from ghosted ones.
+Treat cohort results as representative of *ghosted* linked-checkpoint
+Stadium2020 maps, not of the corpus.
+
+**The 20-map pilot is deliberately NOT representative.** It was drawn
+from a 15-60s band spread evenly across that band, to fit a sitting.
+The full 334 run 2s to 25,811s (p25 20s, p50 34s, p75 52s, p95 501s), so
+the pilot omits both the very short and the long tail. Distribution
+statistics must come from the bulk run, not the pilot.
+
+The bulk manifest is ordered by race time ascending so that it is
+stoppable, but that ordering makes any early stop
+**systematically biased toward short tracks**. A partial bulk run is not
+a valid sample of the cohort.
+
 Still open, in order:
 
 1. Coordinate reconciliation. Captures are in metres; `block_placements`
