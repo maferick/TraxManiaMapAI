@@ -224,6 +224,7 @@ def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
                 anchored=bool(
                     (doc.get("extra") or {}).get("clock_rebased_to_race_start")
                 ),
+                exit_reason=str((doc.get("extra") or {}).get("exit_reason") or ""),
                 free_anchor=args.free_anchor, free_pad_m=args.free_pad,
             )
             persist(
@@ -236,9 +237,10 @@ def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
             done += 1
             m = result.metrics
             _LOG.info(
-                "replay %-6s %-20s ground %5.1f%%  cp %5.1f%%  terrain %5.1f%%  "
-                "gap %dm/%dms",
-                replay_id, m["classification"],
+                "replay %-6s %-12s %-20s ground %5.1f%%  cp %5.1f%%  "
+                "terrain %5.1f%%  gap %dm/%dms",
+                replay_id, m["capture_status"],
+                m["route_surface_class"] or "-",
                 100 * m["covered_any"] / max(1, m["samples_grounded"]),
                 100 * m["checkpoint_covered"] / max(1, m["checkpoint_samples"]),
                 100 * m["terrain_ground_samples"] / max(1, m["samples_grounded"]),

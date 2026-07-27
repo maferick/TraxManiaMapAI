@@ -2,11 +2,19 @@
 
 Writes ``replay_telemetry_coverage`` and ``replay_terrain_cells``.
 
+Two independent axes, never merged. ``capture_status`` says whether a
+usable trajectory was obtained at all; ``route_surface_class`` says what
+the car was on, and is NULL whenever the capture is not valid. Merging
+them once already produced a wrong answer: captures whose ghost never
+spawned were labelled a route class, which blames the map for a rig
+failure. Every coverage denominator filters on
+``capture_status = 'valid'``.
+
 Continuous metrics only. No eligibility verdict is computed or stored:
 thresholds have to come from the distribution across the captured
-cohort, and a 17-map pilot cannot fix one. ``classification`` records
-WHY a capture looks poor, with a confidence, so a gate can be derived
-later without re-running any matching.
+cohort, and a 17-map pilot cannot fix one. The class records WHY a
+capture looks poor, with a confidence, so a gate can be derived later
+without re-running any matching.
 
 Every input that can move a number is part of the row key, so a re-run
 under a new matcher or after item ingestion lands adds a row instead of
@@ -71,6 +79,7 @@ def compute_coverage(
     catalogue,
     *,
     anchored: bool = True,
+    exit_reason: str = "",
     free_anchor: str = "center",
     free_pad_m: float = 8.0,
     checkpoint_window: int = 10,
@@ -188,35 +197,64 @@ def compute_coverage(
     ground_pct = covered_any / grounded if grounded else 0.0
     terrain_pct = terrain_samples / grounded if grounded else 0.0
 
-    # Reason, with a confidence, not a verdict. Free-form on purpose:
-    # the reasons are still being discovered.
+    # Two independent axes. Capture validity first: if we did not obtain
+    # a trajectory, the route question is unanswerable and must not be
+    # answered anyway. Route class is NULL for any invalid capture, and
+    # every coverage denominator filters on capture_status = 'valid'.
+    capture_status = "valid"
+    capture_failure_reason = None
+    route_class = None
+    route_confidence = None
+    route_reason = None
+
     if not anchored:
-        # The ghost never entered the scene, so every sample sits at the
-        # origin and there is no trajectory to cover. Reporting this as
-        # a coverage failure would blame the map for a capture problem
-        # and drag the cohort distribution down with rows that measure
-        # nothing.
-        classification, confidence = "no_movement_anchor", 1.0
-        reason = (
-            "capture has no movement anchor; the ghost never entered the "
-            "scene, so coverage is undefined rather than poor"
+        capture_status = "no_movement"
+        capture_failure_reason = (
+            "ghost never entered the scene; every sample sits at the "
+            "origin, so there is no trajectory to classify"
         )
-    elif ground_pct >= 0.8:
-        classification, confidence = "block_covered", ground_pct
-        reason = "majority of grounded samples resolve to block candidates"
-    elif terrain_pct >= 0.5:
-        classification, confidence = "terrain_offroad", terrain_pct
-        reason = (
-            f"{100*terrain_pct:.0f}% of grounded samples are on the ground "
-            "plane off the built track"
+    elif exit_reason in ("playback_timeout", "max_frames_capped"):
+        capture_status = "incomplete"
+        capture_failure_reason = (
+            f"playback ended without finishing (exit_reason={exit_reason})"
         )
-    else:
-        classification = "unresolved_elevated"
-        confidence = 1.0 - ground_pct - terrain_pct
-        reason = (
-            "unmatched samples are elevated, not on terrain; candidate "
-            "geometry may be missing (item geometry is not modelled)"
-        )
+    elif grounded == 0:
+        capture_status = "corrupt"
+        capture_failure_reason = "no grounded samples in an anchored capture"
+
+    if capture_status == "valid":
+        # Thresholds here are PROVISIONAL and describe the surface, not
+        # eligibility. No gate is stored: usable/quarantined has to be
+        # derived from the cohort distribution once bulk capture lands.
+        if ground_pct >= 0.8:
+            route_class, route_confidence = "block_covered", ground_pct
+            route_reason = (
+                "most grounded samples resolve to block candidates"
+            )
+        elif terrain_pct >= 0.5:
+            route_class, route_confidence = "terrain_offroad", terrain_pct
+            route_reason = (
+                f"{100*terrain_pct:.0f}% of grounded samples are on the "
+                "ground plane off the built track"
+            )
+        elif terrain_pct >= 0.2:
+            # Substantial terrain but neither surface dominant. Kept
+            # distinct because a route that alternates between built
+            # track and off-road is a different modelling problem from
+            # one that is mostly either.
+            route_class = "mixed"
+            route_confidence = min(ground_pct, terrain_pct)
+            route_reason = (
+                f"{100*ground_pct:.0f}% on blocks, {100*terrain_pct:.0f}% "
+                "on terrain; neither dominant"
+            )
+        else:
+            route_class = "unresolved_elevated"
+            route_confidence = max(0.0, 1.0 - ground_pct - terrain_pct)
+            route_reason = (
+                "unmatched samples are elevated, not on terrain; candidate "
+                "geometry may be missing (item geometry is not modelled)"
+            )
 
     for rec in terrain.values():
         rec["mean_heading_rad"] = (
@@ -245,9 +283,14 @@ def compute_coverage(
             "terrain_ground_samples": terrain_samples,
             "terrain_ground_distance_m": terrain_m,
             "terrain_ground_duration_ms": terrain_ms,
-            "classification": classification,
-            "classification_confidence": round(max(0.0, min(1.0, confidence)), 4),
-            "classification_reason": reason,
+            "capture_status": capture_status,
+            "capture_failure_reason": capture_failure_reason,
+            "route_surface_class": route_class,
+            "route_surface_confidence": (
+                round(max(0.0, min(1.0, route_confidence)), 4)
+                if route_confidence is not None else None
+            ),
+            "route_surface_reason": route_reason,
         },
         terrain_cells=terrain,
     )
