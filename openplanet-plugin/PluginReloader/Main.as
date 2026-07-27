@@ -5,14 +5,16 @@
 // TMMapControl and AIReplayTelemetry. Each one needed the operator.
 // Automating it turns a two-minute round trip into a two-second one.
 //
-// UNVERIFIED SURFACE. Openplanet's `Meta` namespace is not in
-// Openplanet.h — that dump covers GAME classes, not the scripting
-// API — so unlike every other accessor used in this repo, these calls
-// could not be checked before writing them. That is exactly why this
-// is its own plugin: if Meta::GetPluginFromID or Plugin::Reload do not
-// exist, only this file fails to compile and everything else keeps
-// running. If it does fail, read the error and fix the names; the
-// bootstrap reload is the one that always has to be manual.
+// The `Meta` namespace is NOT in Openplanet.h — that dump covers game
+// classes, not the scripting API — so unlike every other accessor here
+// these calls could not be grepped first. Isolating them in their own
+// plugin was the mitigation, and it worked: the first version passed
+// a string to Meta::ReloadPlugin, which wants a Meta::Plugin@, and
+// nothing else was affected. AngelScript prints the correct signature
+// on an overload mismatch, so read the log rather than guessing again.
+//
+// The bootstrap load is always manual, and a NEW plugin folder may
+// need Openplanet to rescan rather than just reload.
 //
 // Protocol, matching the other plugins:
 //   <PluginStorage>/PluginReloader/<id>.cmd.json   {"plugin":"TMMapControl"}
@@ -79,7 +81,9 @@ void Handle(const string &in cmdPath, const string &in resPath) {
     res["reloading"] = plugin.Name;
     Json::ToFile(resPath, res);
     log("reloading " + target);
-    Meta::ReloadPlugin(target);
+    // Takes the handle, not the id — the compiler prints the signature
+    // on a mismatch, which is the fastest way to get these right.
+    Meta::ReloadPlugin(plugin);
 }
 
 
