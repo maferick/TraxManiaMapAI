@@ -168,6 +168,86 @@ def _cmd_ingest_map_items(args: argparse.Namespace) -> int:
     return 1 if stats.failed_maps else 0
 
 
+def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
+    """Measure and persist coverage for every capture we hold.
+
+    Stores continuous metrics only. Thresholds for a usable/quarantined
+    gate must come from the distribution across the captured cohort, so
+    nothing here decides eligibility.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from src.catalogue.loader import load_catalogue
+    from src.route.coverage_store import (
+        compute_coverage, load_item_cells, load_placements, persist,
+    )
+
+    config = load_config(args.config)
+    catalogue = load_catalogue(args.catalogue, collection="Stadium2020")
+    params = {
+        "row_tolerance": [0, -1],
+        "free_anchor": args.free_anchor,
+        "free_pad_m": args.free_pad,
+        "item_radius": args.item_radius,
+        "checkpoint_window": 10,
+    }
+
+    conn = open_connection(config)
+    done = failed = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, map_id, openplanet_telemetry_path,
+                       openplanet_telemetry_hash
+                  FROM replays
+                 WHERE openplanet_telemetry_path IS NOT NULL
+                """
+            )
+            captures = cur.fetchall()
+        _LOG.info("computing coverage for %d capture(s)", len(captures))
+
+        for replay_id, map_id, path, tele_hash in captures:
+            f = _Path(path)
+            if not f.is_file():
+                _LOG.warning("replay %s: artifact missing at %s", replay_id, path)
+                failed += 1
+                continue
+            doc = _json.loads(f.read_text(encoding="utf-8"))
+            placements = load_placements(conn, map_id)
+            items = load_item_cells(conn, map_id, radius=args.item_radius)
+            result = compute_coverage(
+                doc["samples"],
+                doc.get("checkpoint_sample_indices") or [],
+                placements, items, catalogue,
+                free_anchor=args.free_anchor, free_pad_m=args.free_pad,
+            )
+            persist(
+                conn, replay_id, result,
+                telemetry_hash=tele_hash or "",
+                params=params,
+                item_ingestion_version=args.item_ingestion_version,
+                version=args.coverage_version,
+            )
+            done += 1
+            m = result.metrics
+            _LOG.info(
+                "replay %-6s %-20s ground %5.1f%%  cp %5.1f%%  terrain %5.1f%%  "
+                "gap %dm/%dms",
+                replay_id, m["classification"],
+                100 * m["covered_any"] / max(1, m["samples_grounded"]),
+                100 * m["checkpoint_covered"] / max(1, m["checkpoint_samples"]),
+                100 * m["terrain_ground_samples"] / max(1, m["samples_grounded"]),
+                int(m["longest_gap_m"]), int(m["longest_gap_ms"]),
+            )
+    finally:
+        conn.close()
+
+    _LOG.info("persisted %d coverage row(s), %d failed", done, failed)
+    return 1 if failed else 0
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     try:
         applied = migrate(config_path=args.config)
@@ -2878,6 +2958,24 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_items_cmd.add_argument("--parser-executable", type=str, default=None)
     ingest_items_cmd.add_argument("--parser-version", type=str, default="items-0.1")
     ingest_items_cmd.set_defaults(func=_cmd_ingest_map_items)
+
+    coverage_cmd = sub.add_parser(
+        "compute-telemetry-coverage",
+        help="Measure and persist per-capture block/item/terrain coverage",
+    )
+    coverage_cmd.add_argument(
+        "--catalogue", type=str,
+        default="data/catalogue2/catalogue.ndjson",
+    )
+    coverage_cmd.add_argument("--free-anchor", choices=("corner", "center"),
+                              default="center")
+    coverage_cmd.add_argument("--free-pad", type=float, default=8.0)
+    coverage_cmd.add_argument("--item-radius", type=int, default=1)
+    coverage_cmd.add_argument("--item-ingestion-version", type=str,
+                              default="items-0.1")
+    coverage_cmd.add_argument("--coverage-version", type=str,
+                              default="coverage-0.1")
+    coverage_cmd.set_defaults(func=_cmd_compute_telemetry_coverage)
 
     parse_maps_cmd = sub.add_parser(
         "parse-maps",
