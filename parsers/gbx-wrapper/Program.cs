@@ -3,7 +3,7 @@
 // Contract (must match src/parsers/README.md v1):
 //   argv:           "map" | "replay" | "diagnose-map" | "diagnose-replay"
 //                   | "emit-map" | "emit-map-from-blocks"
-//                   | "dump-block-info" | "probe-pak"
+//                   | "dump-block-info" | "probe-pak" | "dump-items"
 //   stdin:          single line —
 //                     • parse / diagnose / dump-block-info / probe-pak:
 //                         absolute path to artifact
@@ -39,7 +39,8 @@ public static class Program
              && args[0] != "dump-block-info"
              && args[0] != "dump-block-catalogue"
              && args[0] != "scan-item-donors"
-             && args[0] != "probe-pak"))
+             && args[0] != "probe-pak"
+             && args[0] != "dump-items"))
         {
             Console.Error.WriteLine(
                 "usage: gbx-wrapper <map|replay|diagnose-map|diagnose-replay"
@@ -99,6 +100,7 @@ public static class Program
                 "dump-block-catalogue" => BlockCatalogue.DumpFromStdinJson(stdinLine),
                 "scan-item-donors" => ItemDonorScan.ScanFromStdinJson(stdinLine),
                 "probe-pak" => PakProbe.ProbeFromPath(stdinLine),
+                "dump-items" => ItemDump.DumpFromPath(stdinLine),
                 _ => throw new InvalidOperationException("unreachable"),
             };
             EmitSuccess(payload);
