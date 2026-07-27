@@ -56,6 +56,50 @@ _INGEST_STAGE = "ingest_maps"
 _INGEST_STAGE_VERSION = "0.1.0"
 
 
+def _cmd_ingest_openplanet_telemetry(args: argparse.Namespace) -> int:
+    """Attach in-game ghost captures to the corpus.
+
+    The captures are the only source of TM2020 position samples: the
+    offline GBX path decodes none (RaceValidateGhost reports samples=0
+    corpus-wide), so these rows are what route inference reads.
+    """
+    from src.ingestion.openplanet_telemetry import ingest_directory
+
+    config = load_config(args.config)
+    snapshot = args.snapshot or (
+        config.get("ingestion", {}).get("snapshot", {}).get("id")
+    )
+    if not snapshot:
+        _LOG.error("--snapshot required (or set ingestion.snapshot.id)")
+        return 2
+
+    telemetry_dir = Path(args.telemetry_dir)
+    if not telemetry_dir.is_dir():
+        _LOG.error("no such directory: %s", telemetry_dir)
+        return 2
+
+    conn = open_connection(config_path=args.config)
+    try:
+        stats = ingest_directory(
+            conn, telemetry_dir,
+            snapshot=snapshot,
+            version=args.capture_version,
+            dry_run=args.dry_run,
+        )
+    finally:
+        conn.close()
+
+    if stats.unmatched:
+        # Not fatal. A capture of a generated map has no corpus row by
+        # design, so this is expected noise in a mixed directory and only
+        # a problem when it is unexpectedly large.
+        _LOG.warning(
+            "%d capture(s) had no matching map: %s",
+            stats.unmatched, ", ".join(stats.unmatched_files[:5]),
+        )
+    return 1 if stats.invalid else 0
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     try:
         applied = migrate(config_path=args.config)
@@ -2738,6 +2782,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="skip .Replay.Gbx downloads; just record metadata",
     )
     ingest_replays_cmd.set_defaults(func=_cmd_ingest_replays)
+
+    ingest_openplanet_cmd = sub.add_parser(
+        "ingest-openplanet-telemetry",
+        help="Attach in-game ghost telemetry captures to replays rows",
+    )
+    ingest_openplanet_cmd.add_argument(
+        "--telemetry-dir", type=str, required=True,
+        help="directory of <id>.telemetry.json artifacts",
+    )
+    ingest_openplanet_cmd.add_argument("--snapshot", type=str, default=None)
+    ingest_openplanet_cmd.add_argument(
+        "--capture-version", type=str, default="openplanet-capture-0.2",
+    )
+    ingest_openplanet_cmd.add_argument("--dry-run", action="store_true")
+    ingest_openplanet_cmd.set_defaults(func=_cmd_ingest_openplanet_telemetry)
 
     parse_maps_cmd = sub.add_parser(
         "parse-maps",

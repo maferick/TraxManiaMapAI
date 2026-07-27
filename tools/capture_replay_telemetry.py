@@ -262,6 +262,11 @@ def capture_one(
         return "failed"
 
     payload = telemetry_to_dict(telemetry)
+    # Record which map file was driven. `maps` has no map_uid column, so
+    # the join back to the corpus goes through the artifact content hash,
+    # which is the basename corpus artifacts are stored under. Without
+    # this the capture cannot be linked to its map at ingest time.
+    payload["extra"]["map_file"] = map_file
 
     # Round-trip through the canonical parser before claiming success.
     # The workstream's acceptance bar is "passes from_dict validation",
