@@ -328,6 +328,47 @@ repetition collapse that killed the sequence prior. A planner must
 either sample the varied tail deliberately or weight within a
 same-length, same-character bucket.
 
+## Canonical order: geometry alone cannot give it
+
+An autoregressive model over "next block" — and the planner below —
+both need each corpus map as an ORDERED sequence. Three attempts, all
+measured:
+
+| method | result |
+|---|---|
+| clip-matched Start→Finish path | 2.8% of maps |
+| face-contact Start→Finish shortest path | 19%, chains averaging 19 blocks — short-circuiting |
+| chain-walk through degree-2 blocks | **not viable, see below** |
+
+The third was the promising one: if a racing line is almost a path
+graph, ordering is a walk rather than a search. Measured over 196 maps,
+route blocks only:
+
+| face-adjacent route neighbours | share |
+|---|---|
+| 0 | 5.9% |
+| 1 | 7.0% |
+| **2** | **23.6%** |
+| 3 | 21.1% |
+| **4** | **41.2%** |
+
+Only a quarter of route blocks have degree 2 and **41% have degree
+four** — because a platform field is a 2D grid where every tile touches
+four others, and parallel road sections do the same. The graph is not
+path-like, which is precisely why a shortest path had so much freedom
+to cut corners.
+
+Also worth knowing: only **126 of 196** maps have both a Start and a
+Finish among catalogue-known blocks. The rest use community custom
+gates or Multilap.
+
+**So order is not recoverable from geometry.** It needs the driven
+path — replay telemetry — which is the one unambiguous source and is
+already the repo's stated contract (see CLAUDE.md, "Replay-ground-truth
+learning"). The 20Hz telemetry plugin exists from PR #81 and has never
+been run at scale. That is the dependency for any sequence model, and
+for the planner.
+
 ## The planner, specified
 
 Not built. The design, so it is not re-derived:
