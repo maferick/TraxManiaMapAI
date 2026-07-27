@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -379,6 +380,21 @@ def _cmd_extract_driven_paths(args: argparse.Namespace) -> int:
         teleports,
     )
     return 1 if failed else 0
+
+
+def _cmd_export_construction(args: argparse.Namespace) -> int:
+    """Export construction-token sequences for model training."""
+    from src.learning.construction_export import export_sequences
+
+    config = load_config(args.config)
+    conn = open_connection(config)
+    try:
+        stats = export_sequences(
+            conn, args.out, extractor_version=args.extractor_version)
+    finally:
+        conn.close()
+    print(json.dumps(stats.as_dict(), indent=1))
+    return 0
 
 
 def _cmd_migrate(args: argparse.Namespace) -> int:
@@ -3129,6 +3145,15 @@ def _build_parser() -> argparse.ArgumentParser:
                             default="block_matcher-0.3")
     driven_cmd.add_argument("--max-gap-m", type=float, default=100.0)
     driven_cmd.set_defaults(func=_cmd_extract_driven_paths)
+
+    export_cons_cmd = sub.add_parser(
+        "export-construction-sequences",
+        help="Export driven-path visits as construction token streams",
+    )
+    export_cons_cmd.add_argument("--out", type=str, required=True)
+    export_cons_cmd.add_argument("--extractor-version", type=str,
+                                 default="driven_path-0.1")
+    export_cons_cmd.set_defaults(func=_cmd_export_construction)
 
     parse_maps_cmd = sub.add_parser(
         "parse-maps",
