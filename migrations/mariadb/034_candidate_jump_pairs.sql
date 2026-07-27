@@ -7,15 +7,18 @@
 -- in a finishable map may equally be scenery, an unused alternative
 -- route, a shortcut, or two parallel sections that never connect.
 --
--- So the rows are candidates. Replay extraction promotes one to
--- `observed` when an inferred driven sequence crosses it, and at that
+-- Replay extraction promotes a candidate to observed, and at that
 -- point the row can also carry entry speed, direction, airtime and
--- landing state — far more useful than a binary "a gap appears in a
--- finishable map".
+-- landing state.
+--
+-- NOTE both statements are guarded. DDL is not transactional in
+-- MariaDB, so the first attempt at this migration renamed the table
+-- and then failed on the ALTER, leaving the schema half-moved with
+-- nothing recorded as applied. (The ALTER failed because the runner
+-- splits on semicolons and the COMMENT text contained one.)
 
-RENAME TABLE block_jump_pairs TO block_candidate_jump_pairs;
+RENAME TABLE IF EXISTS block_jump_pairs TO block_candidate_jump_pairs;
 
 ALTER TABLE block_candidate_jump_pairs
-    ADD COLUMN evidence VARCHAR(16) NOT NULL DEFAULT 'candidate'
-        COMMENT 'candidate = open-end pair in a finishable map; observed = a replay crossed it',
-    ADD KEY idx_jump_evidence (evidence, map_count);
+    ADD COLUMN IF NOT EXISTS evidence VARCHAR(16) NOT NULL DEFAULT 'candidate',
+    ADD KEY IF NOT EXISTS idx_jump_evidence (evidence, map_count);
