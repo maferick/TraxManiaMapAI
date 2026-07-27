@@ -128,10 +128,30 @@ UNVISITED_FAMILY_BOOST = 5000.0
 # triple's own map_count lets an attested continuation of a run beat an
 # unrelated block that merely happens to be a popular neighbour.
 #
-# Unattested runs are weighted DOWN, never forbidden. The corpus is a
-# sample; refusing everything it has not seen collapses the vocabulary
-# to a handful of patterns and makes every map identical.
-SEQUENCE_WEIGHT = 3.0
+# MEASURED AND DEFAULTED OFF. This did not work, and the number is 0
+# so that the mechanism stays available without being on by mistake.
+#
+# Corpus baseline over 145 maps: median 21 distinct route block types
+# per map, most-used block 29% of the line. Generated routes already
+# sit at 14 distinct / 0.31 — too repetitive BEFORE any prior. Adding
+# the sequence prior moved both the wrong way at every weight tried:
+#
+#     bigram only   14 distinct   0.31 top-block share
+#     w = 0.5       14            0.33
+#     w = 1.5       13            0.36
+#     w = 3.0       13            0.40
+#     w = 8.0       11            0.40
+#
+# The reason is structural, not a tuning failure: the strongest triples
+# ARE same-block runs (Straight x3 in 274 maps, SpecialTurbo2 x3 in
+# 83), so rewarding attested runs rewards repetition. A real map's
+# variety comes from many different local patterns across the whole
+# line, which a greedy per-step multiplier cannot express.
+#
+# The triples remain worth having — they are the only ordered evidence
+# in the project — but consuming them needs something that shapes the
+# whole route, not a step-local weight. Left for a planner.
+SEQUENCE_WEIGHT = 0.0
 
 Cell = tuple[int, int, int]
 
@@ -573,12 +593,14 @@ class GrammarWalker:
                     continue
                 weight = self._weight(move)
                 if self._model is not None:
-                    seen = self._model.sequence_weight(
+                    # NORMALISED share of the context, never the raw
+                    # map_count — see RouteModel.sequence_score.
+                    score = self._model.sequence_score(
                         before, prev.block_id, move.block,
                         move.offset, move.rel_rotation,
                     )
-                    if seen:
-                        weight *= 1.0 + SEQUENCE_WEIGHT * seen
+                    if score:
+                        weight *= 1.0 + SEQUENCE_WEIGHT * score
                 if any(columns[col] for col in cols):
                     # Passing back over ground the line already covers.
                     # Legal — 4.2% of corpus columns are a bridge — but

@@ -77,6 +77,37 @@ class RouteModel:
         )
         return cls(triples, ordered, str(doc.get("environment", "")))
 
+    def sequence_score(
+        self,
+        before: str | None,
+        current: str,
+        candidate: str,
+        offset: tuple[int, int, int],
+        rel_rotation: int,
+    ) -> float:
+        """This run's share of its context, 0..1.
+
+        NORMALISED, not the raw map_count. Multiplying a move weight by
+        the raw count crushes everything: the top triple is attested in
+        274 maps, so even a 0.1 coefficient is a 28x boost, and the
+        walker collapses onto a handful of patterns. Measured against
+        the corpus (median 21 distinct route block types per map, the
+        most-used block 29% of the line), the raw form pushed distinct
+        types DOWN from 16 to 11 and the top-block share UP from 0.29
+        to 0.36 — worse on both counts than no prior at all.
+        """
+        if before is None:
+            return 0.0
+        context = self._triples.get((before, current))
+        if not context:
+            return 0.0
+        seen = context.get(
+            (candidate, offset[0], offset[1], offset[2], rel_rotation), 0
+        )
+        if not seen:
+            return 0.0
+        return seen / max(context.values())
+
     def sequence_weight(
         self,
         before: str | None,

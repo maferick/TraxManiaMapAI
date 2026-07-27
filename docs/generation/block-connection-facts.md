@@ -227,6 +227,58 @@ All measured the hard way; see `tools/tm_mcp/server.py`.
   negative (rejected topology); `Validable` means the structure is
   accepted and it is waiting for a driver.
 
+## Ordered runs: mined, and NOT yet usable as a weight
+
+`block_route_sequences` holds ordered three-block runs from 3,636 of
+4,000 maps (90.9%). The top patterns are real design, not noise:
+`Straight x3` in 274 maps, **`SpecialTurbo2 x3` in 83 — boosters come
+in runs**, `Curve1 -> Straight -> Straight` in 59, `SlopeStraight x3`
+descending in 46 and ascending in 40,
+`Straight -> Straight -> Checkpoint` in 46.
+
+Two dead ends worth not repeating:
+
+* **A Start->Finish shortest path is not a racing line.** On
+  clip-matched links it reconstructed 2.8% of maps; on face contact
+  19%, but those chains averaged 19 blocks because breadth-first
+  short-circuits across a track that loops back near itself. The
+  working extraction is **opposing-face triples**, which need no route
+  order at all.
+* **Feeding the triples in as a per-step weight makes maps worse.**
+  Corpus baseline is 21 distinct route block types per map with the
+  most-used block at 29% of the line. Generated routes already sit at
+  14 / 0.31 — too repetitive before any prior — and the sequence prior
+  moved both the wrong way at every weight (down to 11 / 0.40). The
+  cause is structural: the strongest triples ARE same-block runs, so
+  rewarding attested runs rewards repetition. Default is 0.
+
+So the ordered evidence exists and is the only such evidence in the
+project, but consuming it needs something that shapes a whole route
+rather than one step. `SEQUENCE_WEIGHT` is left in place at 0.
+
+## Jumps, from the finishability axiom
+
+Every corpus map was published and parses, so it can be driven —
+therefore a gap its racing line MUST cross is drivable, and no physics
+reasoning is required. A jump is **an open end facing another open end
+across empty cells**: the line stops at a face, another stopped face
+points back, nothing is in between, and the map completes.
+
+Proximity was the failed definition — 81% of radius-3 grammar rows
+were coincidence.
+
+`block_jump_pairs`: 3,045 of 4,000 maps have jumps, 218,727
+observations, 3,221 rows. Best attested:
+`PlatformTechBase -> PlatformTechBase` across a 1-cell gap in 123 maps,
+2-cell in 67; `PlatformPlasticBase` likewise. The classic platform gap
+jump.
+
+**Filter to drivable surfaces.** The first run's top "jump" was
+`DecoPlatformBase -> DecoPlatformBase` in 323 maps — scattered
+decoration whose open faces happen to point at each other. The support
+filter caught `DecoWall` and not `DecoPlatform` / `DecoHill` /
+`WaterBase`.
+
 ## What is still missing
 
 1. **Variant everywhere** — see "THE BIG GAP" above. It is the top
@@ -241,7 +293,10 @@ All measured the hard way; see `tools/tm_mcp/server.py`.
 3. **Nothing measures drivability.** Every check here is structural.
    Whether a route is actually *fun* or even completable needs the
    replay corpus, and the finishability gate still owns that.
-4. **Junction blocks are used as through-pieces.** `RoadTechBranchTShaped`
+4. **Generated routes are too repetitive.** 14 distinct route block
+   types per map against the corpus's 21. The sequence prior made this
+   worse, not better; something that shapes the whole route is needed.
+5. **Junction blocks are used as through-pieces.** `RoadTechBranchTShaped`
    (3 clipped faces) and `*BranchCross` (4) get placed inline. Harmless
    — they are drivable straight through — but they read as stubs.
    Cannot be flagged by face count alone, because `PlatformPlasticBase`
