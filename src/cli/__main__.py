@@ -259,6 +259,128 @@ def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _cmd_extract_driven_paths(args: argparse.Namespace) -> int:
+    """Run driven-path extraction over gated captures and persist visits.
+
+    The gate is the data-derived one: capture valid, route class
+    block_covered, longest unmatched gap at most --max-gap-m. Items are
+    not Viterbi candidates in this extractor version, so item-covered
+    stretches surface as OFF_SURFACE rows -- labelled, never stitched.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from src.catalogue.loader import load_catalogue
+    from src.route.block_matcher import to_cell
+    from src.route.coverage_store import load_placements
+    from src.route.driven_path import (
+        AIRBORNE, DRIVEN_PATH_VERSION, extract_driven_path,
+    )
+
+    config = load_config(args.config)
+    catalogue = load_catalogue(args.catalogue, collection="Stadium2020")
+    conn = open_connection(config)
+    done = failed = 0
+    cp_hit = cp_tot = teleports = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.replay_id, r.map_id, r.openplanet_telemetry_path
+                  FROM replay_telemetry_coverage c
+                  JOIN replays r ON r.id = c.replay_id
+                 WHERE c.matcher_version = %s
+                   AND c.capture_status = 'valid'
+                   AND c.route_surface_class = 'block_covered'
+                   AND c.longest_gap_m <= %s
+                """,
+                (args.matcher_version, args.max_gap_m),
+            )
+            eligible = cur.fetchall()
+        _LOG.info("gate passes %d capture(s)", len(eligible))
+
+        for replay_id, map_id, tele_path in eligible:
+            f = _Path(tele_path)
+            if not f.is_file():
+                _LOG.warning("replay %s: telemetry missing", replay_id)
+                failed += 1
+                continue
+            doc = _json.loads(f.read_text(encoding="utf-8"))
+            placements = load_placements(conn, map_id)
+
+            # Waypoint cells for validation: block waypoints from
+            # map_checkpoints plus item waypoints from map_items.
+            waypoints = {}
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT tag, placement, x, y, z, abs_x, abs_y, abs_z "
+                    "FROM map_checkpoints WHERE map_id = %s", (map_id,))
+                for tag, placement, gx, gy, gz, ax, ay, az in cur.fetchall():
+                    if placement == 'grid' and gx is not None:
+                        waypoints[(gx, gy, gz)] = tag
+                    elif ax is not None:
+                        waypoints[to_cell(float(ax), float(ay), float(az))] = tag
+                cur.execute(
+                    "SELECT cell_x, cell_y, cell_z, waypoint_tag FROM map_items "
+                    "WHERE map_id = %s AND waypoint_tag IS NOT NULL "
+                    "AND cell_x IS NOT NULL", (map_id,))
+                for cx, cy, cz, tag in cur.fetchall():
+                    waypoints[(cx, cy, cz)] = tag
+
+            try:
+                path = extract_driven_path(
+                    doc["samples"], placements, catalogue,
+                    checkpoint_indices=doc.get("checkpoint_sample_indices") or (),
+                    waypoint_cells=waypoints,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _LOG.error("replay %s: extraction failed (%s)", replay_id, exc)
+                failed += 1
+                continue
+
+            rows = []
+            for vi, v in enumerate(path.visits):
+                state = ("block" if v.state >= 0 else
+                         "airborne" if v.state == AIRBORNE else "off_surface")
+                rows.append((
+                    replay_id, DRIVEN_PATH_VERSION, vi, state,
+                    v.state if v.state >= 0 else None,
+                    v.block_type if v.state >= 0 else None,
+                    v.first_sample, v.last_sample, v.enter_ms, v.exit_ms,
+                    DRIVEN_PATH_VERSION,
+                ))
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM driven_block_visits WHERE replay_id = %s "
+                    "AND extractor_version = %s",
+                    (replay_id, DRIVEN_PATH_VERSION))
+                cur.executemany(
+                    """
+                    INSERT INTO driven_block_visits (
+                        replay_id, extractor_version, visit_index, state,
+                        placement_id, block_type, first_sample, last_sample,
+                        enter_ms, exit_ms, created_by_version
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, rows)
+            conn.commit()
+            done += 1
+            cp_hit += path.checkpoint_hits
+            cp_tot += path.checkpoint_total
+            teleports += path.stats["teleports"]
+            if done % 25 == 0:
+                _LOG.info("...%d done", done)
+    finally:
+        conn.close()
+
+    _LOG.info(
+        "driven paths: %d extracted, %d failed; checkpoint consistency "
+        "%d/%d = %.1f%%; total teleports %d",
+        done, failed, cp_hit, cp_tot, 100 * cp_hit / max(1, cp_tot),
+        teleports,
+    )
+    return 1 if failed else 0
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     try:
         applied = migrate(config_path=args.config)
@@ -2996,6 +3118,17 @@ def _build_parser() -> argparse.ArgumentParser:
     coverage_cmd.add_argument("--coverage-version", type=str,
                               default="coverage-0.1")
     coverage_cmd.set_defaults(func=_cmd_compute_telemetry_coverage)
+
+    driven_cmd = sub.add_parser(
+        "extract-driven-paths",
+        help="Viterbi driven-path extraction over gated captures",
+    )
+    driven_cmd.add_argument("--catalogue", type=str,
+                            default="data/catalogue2/catalogue.ndjson")
+    driven_cmd.add_argument("--matcher-version", type=str,
+                            default="block_matcher-0.3")
+    driven_cmd.add_argument("--max-gap-m", type=float, default=100.0)
+    driven_cmd.set_defaults(func=_cmd_extract_driven_paths)
 
     parse_maps_cmd = sub.add_parser(
         "parse-maps",
