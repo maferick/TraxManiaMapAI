@@ -240,6 +240,13 @@ void ProcessJob(const string &in inPath) {
     } else if (ghostUrl.Length > 0) {
         ghostUrls.InsertLast(ghostUrl);
     }
+    // Capture the map's own author ghost ALONGSIDE the leaderboard
+    // ghosts rather than instead of them. The expensive part of a job
+    // is the map load, and the author ghost is a different and
+    // guaranteed-finishable line, so taking both costs one extra
+    // instance and yields one extra sequence.
+    bool includeAuthor = body.HasKey("include_author")
+        && bool(body["include_author"]);
     int64 deadlineUnix = int64(body["deadline_unix"]);
     string donePath = inPath.SubStr(0, inPath.Length - 8) + ".out.json";
 
@@ -381,6 +388,17 @@ void ProcessJob(const string &in inPath) {
             dlGhosts.InsertLast(dl.Ghost);
             dlUrls.InsertLast(ghostUrls[u]);
             dlTaskIds.InsertLast(dl.Id);
+        }
+        if (includeAuthor && app.RootMap !is null) {
+            // Front of the list so ghost 0 stays the author's line,
+            // keeping the legacy single-ghost fields meaningful.
+            CGameGhostScript@ authorGhost =
+                dataFileMgr.Map_GetAuthorGhost(app.RootMap);
+            if (authorGhost !is null) {
+                dlGhosts.InsertAt(0, authorGhost);
+                dlUrls.InsertAt(0, "");
+                ghostSource = "mixed_author_and_leaderboard";
+            }
         }
         if (dlGhosts.Length == 0) {
             WriteOut(donePath, jobId, runId, false,

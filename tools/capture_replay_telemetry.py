@@ -100,6 +100,7 @@ def submit(
     replay_file: str = "",
     ghost_url: str = "",
     ghost_urls: list[str] | None = None,
+    include_author: bool = False,
     *,
     run_id: str,
     timeout_s: float = DEFAULT_TIMEOUT_S,
@@ -130,6 +131,7 @@ def submit(
                 "replay_file": replay_file,
                 "ghost_url": ghost_url,
                 "ghost_urls": ghost_urls or [],
+                "include_author": include_author,
                 "deadline_unix": deadline_unix,
             }
         ),
@@ -181,6 +183,7 @@ def _attempt(
     replay_file: str,
     ghost_url: str,
     ghost_urls: list[str] | None = None,
+    include_author: bool = False,
     *,
     replay_id: str,
     run_id: str,
@@ -189,7 +192,7 @@ def _attempt(
     """One submit + adapt. Returns (status, raw_doc, telemetry_or_None)."""
     try:
         doc = submit(map_file, replay_file, ghost_url, ghost_urls,
-                     run_id=run_id, timeout_s=timeout_s)
+                     include_author, run_id=run_id, timeout_s=timeout_s)
     except (RigTimeout, RigNotRunning) as exc:
         _LOG.error("%s: %s", replay_id, exc)
         return "failed", None, None
@@ -248,6 +251,7 @@ def capture_one(
     replay_file: str = "",
     ghost_url: str = "",
     ghost_urls: list[str] | None = None,
+    include_author: bool = False,
     *,
     replay_id: str,
     out_dir: Path,
@@ -273,7 +277,7 @@ def capture_one(
     telemetry = None
     for attempt in range(retries + 1):
         status, doc, telemetry = _attempt(
-            map_file, replay_file, ghost_url, ghost_urls,
+            map_file, replay_file, ghost_url, ghost_urls, include_author,
             replay_id=replay_id, run_id=run_id, timeout_s=timeout_s,
         )
         if status in ("ok", "skipped"):
@@ -400,6 +404,7 @@ def main() -> int:
             job.get("replay_file") or "",
             job.get("ghost_url") or "",
             job.get("ghost_urls") or None,
+            bool(job.get("include_author")),
             replay_id=replay_id,
             out_dir=args.out_dir,
             run_id=run_id,
