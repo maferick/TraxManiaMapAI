@@ -188,6 +188,30 @@ RECENCY_PENALTY = 0.25
 # gaps.
 JUMP_BIAS = 0.04
 
+# Weight of the DRIVEN successor preference (src/generation/driven_prior).
+#
+# Not the same mechanism as SEQUENCE_WEIGHT above, and the difference is
+# exactly why that one is 0 and this one is not: the geometric prior's
+# strongest patterns were same-block runs, so it rewarded repetition.
+# The driven prior is restricted to DISTINCT-type transitions at load
+# (it cannot reward a repeat at all), scored by n_maps breadth rather
+# than raw counts, and normalised per from-type into [0, 1], so the
+# multiplier is bounded in [1, 1 + DRIVEN_WEIGHT].
+#
+# Measured 2026-07-28 (12 routes, 2 descriptions x 6 seeds, harness with
+# min_maps=20 and none of the tuned pipeline extras, so RELATIVE effect
+# is the meaningful number):
+#
+#     prior OFF     12.3 distinct   0.383 top share
+#     weight 0.5    11.5            0.378
+#     weight 1.0    12.6            0.366   <- best on both
+#     weight 2.0    11.8            0.369
+#
+# Modest, directionally right (top share is the metric that runs too
+# high), and structurally incapable of the repetition failure. Kept ON
+# at the measured best; anyone re-tuning should re-measure, not guess.
+DRIVEN_WEIGHT = 1.0
+
 Cell = tuple[int, int, int]
 
 
@@ -322,6 +346,8 @@ class GrammarWalker:
         require_prefixes: list[str] | None = None,
         route_model=None,
         jump_bias: float = JUMP_BIAS,
+        driven_prior=None,
+        driven_weight: float = DRIVEN_WEIGHT,
     ) -> None:
         self._seed = seed
         self._rng = random.Random(seed)
@@ -345,6 +371,8 @@ class GrammarWalker:
         # walker still works on pairwise evidence alone.
         self._model = route_model
         self._jump_bias = jump_bias
+        self._driven_prior = driven_prior
+        self._driven_weight = driven_weight
 
         self._cells: dict[tuple[str, int, str], tuple[Cell, ...]] = {}
         self._waypoint: dict[str, str] = {}
@@ -703,6 +731,11 @@ class GrammarWalker:
                     )
                     if score:
                         weight *= 1.0 + SEQUENCE_WEIGHT * score
+                if self._driven_prior is not None:
+                    share = self._driven_prior.share(
+                        prev.block_id, move.block)
+                    if share:
+                        weight *= 1.0 + self._driven_weight * share
                 if move.is_gap:
                     weight *= self._jump_bias
                 if any(columns[col] for col in cols):
