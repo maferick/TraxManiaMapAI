@@ -83,3 +83,8 @@ data/catalogue/item_donor.Map.Gbx
 # corpus scan outputs
 discover.json
 donors2.json
+
+# Local training venv (torch/CUDA, hundreds of MB)
+.venv-train/
+# Model artifacts live on disk, not in git
+data/artifacts/models/
