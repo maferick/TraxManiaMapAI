@@ -2521,6 +2521,8 @@ def _cmd_ingest_maps(args: argparse.Namespace) -> int:
             max_maps=args.limit,
             download_artifacts=not args.no_download_artifacts,
             random_count=args.random,
+            after_map_id=args.after_map_id,
+            environment=args.environment,
         )
         try:
             stats = ingestor.run()
@@ -3062,6 +3064,16 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_maps_cmd.add_argument("--limit", type=int, default=None)
     ingest_maps_cmd.add_argument("--parser-version", type=str, default="0.0.0")
     ingest_maps_cmd.add_argument("--no-download-artifacts", action="store_true")
+    ingest_maps_cmd.add_argument(
+        "--after-map-id", type=int, default=None,
+        help="continue paging DOWNWARD from this TMX MapId (the listing "
+             "is newest-first); omit to start at the newest map",
+    )
+    ingest_maps_cmd.add_argument(
+        "--environment", type=int, default=None,
+        help="TMX environment id filter; 1 = Stadium2020 (4=BlueBay, "
+             "2/3/5 = other legacy collections)",
+    )
     ingest_maps_cmd.add_argument(
         "--random",
         type=int,

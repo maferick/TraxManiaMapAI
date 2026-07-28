@@ -270,6 +270,8 @@ class MapIngestor:
         max_maps: int | None = None,
         download_artifacts: bool = True,
         random_count: int | None = None,
+        after_map_id: int | None = None,
+        environment: int | None = None,
     ) -> None:
         self._tmx = tmx
         self._conn = conn
@@ -280,11 +282,18 @@ class MapIngestor:
         self._max_maps = max_maps
         self._download_artifacts = download_artifacts
         self._random_count = random_count
+        self._after_map_id = after_map_id
+        self._environment = environment
 
     def _summaries(self):
         if self._random_count is not None:
             return self._tmx.iter_random_summaries(count=self._random_count)
-        return self._tmx.iter_map_summaries()
+        # Newest-first ordering: no `after` starts at the newest map on
+        # the site and pages back through older ones. `environment=1`
+        # keeps only Stadium2020, so nothing we would later purge is
+        # ever downloaded.
+        return self._tmx.iter_map_summaries(
+            after_map_id=self._after_map_id, environment=self._environment)
 
     def run(self) -> IngestionStats:
         stats = IngestionStats(

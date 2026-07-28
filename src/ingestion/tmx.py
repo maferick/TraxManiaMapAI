@@ -240,15 +240,32 @@ class TmxClient:
         return payload
 
     def iter_map_summaries(
-        self, *, after_map_id: int | None = None
+        self, *, after_map_id: int | None = None,
+        environment: int | None = None,
     ) -> Iterator[TmxMapSummary]:
-        """Yield summaries, paging by ``after={last MapId}`` until ``More`` is False."""
+        """Yield summaries, paging until ``More`` is False.
+
+        MEASURED, not assumed: the listing is ordered NEWEST FIRST and
+        ``after={MapId}`` continues DOWNWARD from there (older maps), so
+        omitting it starts at the newest map on the site. An earlier
+        version of this docstring claimed ascending order and the
+        resume flag was built on that mistake.
+
+        ``environment`` filters server-side and is an INTEGER, not a
+        name: 1 = Stadium2020, 4 = BlueBay, with 2/3/5 the remaining
+        legacy collections. Confirmed by cross-checking two maps whose
+        GBX collection we already had. ``TitlePack`` is NOT a usable
+        discriminator here, it reads ``TMStadium`` for every one of
+        them.
+        """
         last_seen = after_map_id
         while True:
             params: dict[str, object] = {
                 "fields": self._summary_fields_param(),
                 "count": self._page_size,
             }
+            if environment is not None:
+                params["environment"] = int(environment)
             if last_seen is not None:
                 params["after"] = last_seen
             payload = self._get_json(self._endpoints["list_maps"], params)
