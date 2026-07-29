@@ -104,8 +104,20 @@ def main() -> int:
     )
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+    # Do NOT set pad_token = eos_token here.
+    #
+    # MEASURED: with pad == eos, DataCollatorForLanguageModeling masks
+    # every pad position out of the labels, which masks the GENUINE
+    # trailing EOS as well. Verified directly: zero eos ids survive in
+    # the label tensor, so the model is never taught to stop. That is
+    # why v0.1 and v0.3 both rambled to the token cap on 20+ of 24
+    # samples while 83% of the corpus is short sequences, and why 5x
+    # the data changed the length not at all.
+    #
+    # A distinct pad token keeps the two roles separate: padding is
+    # ignored, the real end-of-sequence is learned.
+    if tok.pad_token is None or tok.pad_token_id == tok.eos_token_id:
+        tok.add_special_tokens({"pad_token": "<|pad|>"})
 
     def encode(batch):
         out = tok(
@@ -121,6 +133,9 @@ def main() -> int:
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.bfloat16, device_map="cuda:0")
+    # The added pad token grows the vocabulary by one.
+    if len(tok) != model.get_input_embeddings().weight.shape[0]:
+        model.resize_token_embeddings(len(tok))
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
     model = get_peft_model(model, LoraConfig(
