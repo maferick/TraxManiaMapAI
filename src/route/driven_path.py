@@ -155,10 +155,16 @@ def _adjacency(
     produced slabs meeting at their corners with nothing to drive
     across, so a corner neighbour is not a continuation.
     """
+    # Same co-location guard as the candidate index: without a cap, a
+    # map with thousands of blocks at one coordinate makes each of them
+    # a neighbour of all the others and the graph goes quadratic.
+    from src.route.block_matcher import MAX_PLACEMENTS_PER_CELL
     cell_owner: dict[tuple, list[int]] = {}
     for pid, cells in footprints.items():
         for c in cells:
-            cell_owner.setdefault(c, []).append(pid)
+            owners = cell_owner.setdefault(c, [])
+            if len(owners) < MAX_PLACEMENTS_PER_CELL:
+                owners.append(pid)
     out: dict[int, set] = {pid: set() for pid in footprints}
     deltas = ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1),
               (0, 1, 0), (0, -1, 0), (0, 0, 0))

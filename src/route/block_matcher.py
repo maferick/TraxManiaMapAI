@@ -257,6 +257,21 @@ def free_placement_box(
     )
 
 
+# Cap on placements indexed per cell.
+#
+# MEASURED: map 6002 carries 4,096 blocks at EACH of several identical
+# coordinates (4096 = 64**2, so editor spam or a generated pattern, not
+# real geometry). Indexing them all makes every co-located block a
+# neighbour of every other, and the adjacency graph goes quadratic:
+# 4,096**2 per cell is ~17M edges, which OOM-killed extraction on a
+# 23 GB host repeatedly.
+#
+# A cell cannot meaningfully hold dozens of distinct drivable surfaces,
+# so keeping a bounded number is lossless for candidate generation and
+# turns a degenerate map from fatal into merely uninteresting.
+MAX_PLACEMENTS_PER_CELL = 16
+
+
 class CandidateIndex:
     """Per-map index answering "which blocks could this sample be on?"."""
 
@@ -273,6 +288,7 @@ class CandidateIndex:
         )
         self._boxes: list[OrientedBox] = []
         self.n_grid = self.n_free = 0
+        self.dropped_colocated = 0
         self.unknown_blocks: set[str] = set()
 
         for p in placements:
@@ -287,7 +303,11 @@ class CandidateIndex:
                     self.n_free += 1
                 continue
             for cell in grid_footprint_cells(p, catalogue):
-                self._cells[cell].append(p.index)
+                bucket = self._cells[cell]
+                if len(bucket) < MAX_PLACEMENTS_PER_CELL:
+                    bucket.append(p.index)
+                else:
+                    self.dropped_colocated += 1
             self.n_grid += 1
 
     @property
