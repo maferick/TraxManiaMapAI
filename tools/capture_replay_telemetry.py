@@ -372,6 +372,11 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path,
                         default=Path("data/artifacts/telemetry"))
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
+    parser.add_argument(
+        "--max-consecutive-failures", type=int, default=8,
+        help="abort the batch after this many failures in a row; a wedged "
+             "game fails every job and only a restart fixes it",
+    )
     parser.add_argument("--keep-raw", action="store_true",
                         help="also write the unadapted rig .out.json")
     args = parser.parse_args()
@@ -392,8 +397,24 @@ def main() -> int:
             "id": args.id,
         }]
 
+    # Circuit breaker. A wedged game reports "title script API never
+    # ready" for every job, and without this the driver marches through
+    # the whole manifest failing each one. That is not just wasted time:
+    # it burns maps that a later resume would otherwise retry, and it
+    # buries the one useful signal (the game needs restarting) under
+    # thousands of identical errors. Measured twice: the game wedges
+    # after an external interruption and never recovers on its own.
     tally = {"ok": 0, "skipped": 0, "failed": 0}
+    consecutive_failures = 0
     for index, job in enumerate(jobs, start=1):
+        if consecutive_failures >= args.max_consecutive_failures:
+            _LOG.error(
+                "ABORTING: %d consecutive failures. The game is almost "
+                "certainly wedged (title script API never ready); restart "
+                "TM2020 and re-run, resume skips what is already captured.",
+                consecutive_failures,
+            )
+            break
         replay_id = (
             job.get("id")
             or Path(job.get("replay_file") or job["map_file"]).stem
@@ -412,6 +433,7 @@ def main() -> int:
             keep_raw=args.keep_raw,
         )
         tally[status] += 1
+        consecutive_failures = 0 if status in ("ok", "skipped") else consecutive_failures + 1
 
     _LOG.info(
         "captured %d, skipped %d (no author ghost), failed %d, of %d",

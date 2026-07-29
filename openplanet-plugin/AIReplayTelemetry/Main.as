@@ -117,7 +117,15 @@ void Main() {
         yield();
         array<string> pending = ScanForPending(rigFolder);
         for (uint i = 0; i < pending.Length; i++) {
-            ProcessJob(pending[i]);
+            // One bad job must never take the endpoint down. Without
+            // this, a single uncaught exception ends Main() and every
+            // subsequent job in the batch fails on the driver timeout
+            // with no indication why.
+            try {
+                ProcessJob(pending[i]);
+            } catch {
+                log("job failed: " + getExceptionInfo());
+            }
         }
         sleep(SCAN_INTERVAL_MS);
     }
@@ -368,6 +376,7 @@ void ProcessJob(const string &in inPath) {
         // job: one dead URL must not waste the map load for the rest.
         ghostSource = "leaderboard_ghost";
         for (uint u = 0; u < ghostUrls.Length; u++) {
+            yield();
             log("Ghost_Download('" + ghostUrls[u] + "')");
             CWebServicesTaskResult_GhostScript@ dl =
                 dataFileMgr.Ghost_Download("", ghostUrls[u]);
@@ -485,9 +494,16 @@ void ProcessJob(const string &in inPath) {
 
     // IsGhostLayer = true: play them as overlay ghosts rather than as
     // competing racers. They start together at race start.
+    // yield() between adds: Openplanet aborts any script that runs
+    // 1000ms without yielding, and Ghost_Add is expensive enough that
+    // eleven in a row blows that budget. When it fired, the abort killed
+    // Main() itself, so the plugin stopped answering and EVERY later job
+    // in the batch failed on the 420s driver timeout, not just the one
+    // that tripped it.
     array<MwId> instances;
     for (uint i = 0; i < allGhosts.Length; i++) {
         instances.InsertLast(pgs.Ghost_Add(allGhosts[i], true));
+        yield();
     }
     MwId ghostInstance = instances[0];
     log("added " + instances.Length + " ghost instance(s)");
@@ -645,6 +661,7 @@ void ProcessJob(const string &in inPath) {
     // split the document into one artifact per ghost.
     Json::Value@ multi = Json::Array();
     for (uint i = 0; i < N; i++) {
+        yield();
         Json::Value@ g = GhostResultToJson(allGhosts[i]);
         g["source"] = ghostSource;
         if (i < dlUrls.Length) g["url"] = dlUrls[i];
@@ -656,6 +673,7 @@ void ProcessJob(const string &in inPath) {
             : (gSpawned[i] ? "playback_timeout" : "ghost_never_spawned");
         Json::Value@ fa = Json::Array();
         for (uint k = 0; k < gFrames[i].Length; k++) {
+            if (k % 500 == 0) yield();
             fa.Add(gFrames[i][k].ToJson());
         }
         rec["frames"] = fa;
@@ -685,6 +703,15 @@ void WriteOutMulti(
 // ---------------------------------------------------------------------
 
 Json::Value@ ReadJson(const string &in path) {
+    // The driver deletes its own .in.json when a job exceeds its
+    // timeout, so by the time a backlogged job reaches us the file may
+    // legitimately be gone. That is a race, not corruption, and it must
+    // not throw: an uncaught exception here aborts Main() itself, which
+    // stops the plugin answering and fails EVERY later job in the batch.
+    if (!IO::FileExists(path)) {
+        log("job file vanished (driver timed out first): " + path);
+        return null;
+    }
     IO::File f(path, IO::FileMode::Read);
     string content = f.ReadToEnd();
     f.Close();
@@ -727,6 +754,7 @@ void WriteOut(
 
     Json::Value@ framesArr = Json::Array();
     for (uint i = 0; i < frames.Length; i++) {
+        if (i % 500 == 0) yield();
         framesArr.Add(frames[i].ToJson());
     }
     doc["frames"] = framesArr;
