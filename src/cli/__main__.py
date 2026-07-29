@@ -221,7 +221,16 @@ def _cmd_compute_telemetry_coverage(args: argparse.Namespace) -> int:
                 failed += 1
                 continue
             doc = _json.loads(f.read_text(encoding="utf-8"))
-            placements = load_placements(conn, map_id)
+            # Up to 11 captures share one map, so reloading its
+            # placements per capture reread the same tens of thousands
+            # of rows. Caching one map at a time is what keeps this
+            # inside memory; the previous version was OOM-killed at
+            # 3,125 of 7,081.
+            if map_id != cache_map_id:
+                cache_placements = load_placements(conn, map_id)
+                cache_waypoints = None
+                cache_map_id = map_id
+            placements = cache_placements
             items = load_item_cells(conn, map_id, radius=args.item_radius)
             baked = ({} if args.no_baked else load_baked_cells(conn, map_id))
             result = compute_coverage(
@@ -294,12 +303,22 @@ def _cmd_extract_driven_paths(args: argparse.Namespace) -> int:
                    AND c.capture_status = 'valid'
                    AND c.route_surface_class = 'block_covered'
                    AND c.longest_gap_m <= %s
+                   AND (%s = 0 OR c.replay_id NOT IN (
+                         SELECT replay_id FROM driven_block_visits
+                          WHERE extractor_version = %s))
+                 ORDER BY r.map_id
                 """,
-                (args.matcher_version, args.max_gap_m),
+                (args.matcher_version, args.max_gap_m,
+                 0 if args.redo else 1, DRIVEN_PATH_VERSION),
             )
             eligible = cur.fetchall()
-        _LOG.info("gate passes %d capture(s)", len(eligible))
+        if args.limit:
+            eligible = eligible[: args.limit]
+        _LOG.info("gate passes %d capture(s) still to extract", len(eligible))
 
+        cache_map_id = None
+        cache_placements = None
+        cache_waypoints = None
         for replay_id, map_id, tele_path in eligible:
             f = _Path(tele_path)
             if not f.is_file():
@@ -307,26 +326,35 @@ def _cmd_extract_driven_paths(args: argparse.Namespace) -> int:
                 failed += 1
                 continue
             doc = _json.loads(f.read_text(encoding="utf-8"))
-            placements = load_placements(conn, map_id)
 
-            # Waypoint cells for validation: block waypoints from
-            # map_checkpoints plus item waypoints from map_items.
-            waypoints = {}
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT tag, placement, x, y, z, abs_x, abs_y, abs_z "
-                    "FROM map_checkpoints WHERE map_id = %s", (map_id,))
-                for tag, placement, gx, gy, gz, ax, ay, az in cur.fetchall():
-                    if placement == 'grid' and gx is not None:
-                        waypoints[(gx, gy, gz)] = tag
-                    elif ax is not None:
-                        waypoints[to_cell(float(ax), float(ay), float(az))] = tag
-                cur.execute(
-                    "SELECT cell_x, cell_y, cell_z, waypoint_tag FROM map_items "
-                    "WHERE map_id = %s AND waypoint_tag IS NOT NULL "
-                    "AND cell_x IS NOT NULL", (map_id,))
-                for cx, cy, cz, tag in cur.fetchall():
-                    waypoints[(cx, cy, cz)] = tag
+            # Up to 11 captures share one map, so reloading its
+            # placements and waypoints per capture reread the same tens
+            # of thousands of rows each time. Caching one map at a time
+            # is what keeps this inside memory: the uncached version was
+            # OOM-killed at 3,125 of 7,081 captures.
+            if map_id != cache_map_id:
+                cache_placements = load_placements(conn, map_id)
+                cache_waypoints = {}
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT tag, placement, x, y, z, abs_x, abs_y, abs_z "
+                        "FROM map_checkpoints WHERE map_id = %s", (map_id,))
+                    for tag, placement, gx, gy, gz, ax, ay, az in cur.fetchall():
+                        if placement == 'grid' and gx is not None:
+                            cache_waypoints[(gx, gy, gz)] = tag
+                        elif ax is not None:
+                            cache_waypoints[
+                                to_cell(float(ax), float(ay), float(az))] = tag
+                    cur.execute(
+                        "SELECT cell_x, cell_y, cell_z, waypoint_tag "
+                        "FROM map_items WHERE map_id = %s "
+                        "AND waypoint_tag IS NOT NULL AND cell_x IS NOT NULL",
+                        (map_id,))
+                    for cx, cy, cz, tag in cur.fetchall():
+                        cache_waypoints[(cx, cy, cz)] = tag
+                cache_map_id = map_id
+            placements = cache_placements
+            waypoints = cache_waypoints
 
             try:
                 path = extract_driven_path(
@@ -3177,6 +3205,15 @@ def _build_parser() -> argparse.ArgumentParser:
     driven_cmd.add_argument("--matcher-version", type=str,
                             default="block_matcher-0.3")
     driven_cmd.add_argument("--max-gap-m", type=float, default=100.0)
+    driven_cmd.add_argument(
+        "--limit", type=int, default=None,
+        help="process at most N captures this run; the command resumes, "
+             "so it can be chunked",
+    )
+    driven_cmd.add_argument(
+        "--redo", action="store_true",
+        help="re-extract captures that already have visits",
+    )
     driven_cmd.set_defaults(func=_cmd_extract_driven_paths)
 
     export_cons_cmd = sub.add_parser(
