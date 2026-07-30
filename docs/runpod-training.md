@@ -14,9 +14,9 @@ files cross the wire in, one directory comes back.
 
 | GPU | base model | notes |
 |---|---|---|
-| 4090 24GB | Qwen/Qwen2.5-7B | budget option |
-| L40S / A6000 48GB | Qwen/Qwen2.5-14B | recommended |
-| A100/H100 80GB | 14B (fast) or 32B | 32B is an experiment |
+| 4090 24GB | Qwen/Qwen3-8B-Base | budget option |
+| A100 SXM 80GB ($1.49/h) | Qwen/Qwen3-14B-Base | RECOMMENDED: batch 2-4 at 16k ctx, ~2.5-4h, ~$5 |
+| L40S / A6000 48GB | Qwen/Qwen3-14B-Base | fits, batch 1, slower |
 
 Template: any recent PyTorch CUDA image (torch >= 2.4). Disk: 60 GB+
 (model shards + corpus + checkpoints).
@@ -34,6 +34,11 @@ scp tools/sample_construction_lm.py src/learning/construction_text.py root@<POD_
 (`sample_construction_lm.py` imports `construction_text` via the repo
 layout; on the pod, drop both in /workspace and add
 `sys.path`/copy as needed — it has no other repo dependencies.)
+
+Base models, not Instruct: this is a from-scratch synthetic
+grammar, chat tuning underneath only fights it. VERIFY the -Base
+variant exists on HF before starting (Qwen withheld base weights for
+some Qwen3 sizes); fallbacks in order: Qwen3-8B-Base, Qwen2.5-14B.
 
 ## 3. Pod setup
 
@@ -57,13 +62,13 @@ Finish, which was the measured corpus defect).
 ```bash
 python train_construction_lm.py \
   --corpus raw_map_sequences_v0.2.jsonl \
-  --model Qwen/Qwen2.5-14B \
+  --model Qwen/Qwen3-14B-Base \
   --out construction-lm-v06 \
   --max-len 16384 --drop-overlong \
   --batch 1 --accum 16 --epochs 3
 ```
 
-24 GB card: same but `--model Qwen/Qwen2.5-7B --max-len 8192`.
+24 GB card: same but `--model Qwen/Qwen3-8B-Base --max-len 8192`.
 
 Rough wall-clock at 48 GB / 14B: 4-8 h for 3 epochs over ~12k maps.
 Watch the first 50 steps: the `vram step N` telemetry lines print
@@ -77,7 +82,7 @@ means something changed.
 ```bash
 python sample_construction_lm.py \
   --adapter construction-lm-v06/final \
-  --base Qwen/Qwen2.5-14B \
+  --base Qwen/Qwen3-14B-Base \
   --n 24 --max-new 14000 \
   --out samples_v06.json
 ```
