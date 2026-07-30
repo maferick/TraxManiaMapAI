@@ -252,13 +252,24 @@ def main() -> int:
             output_dir=str(args.out),
             num_train_epochs=args.epochs,
             per_device_train_batch_size=args.batch,
+            # MEASURED (v0.6 pod run, 2026-07-30): HF's eval batch
+            # defaults to 8 regardless of train batch. At 10240 tokens
+            # that is a ~40 GiB logits allocation — the first eval
+            # OOM'd a 14B run at epoch 1 and, because evaluation runs
+            # BEFORE the epoch save, took 4.7 h of training with it.
+            # Eval must never be heavier than a training step.
+            per_device_eval_batch_size=1,
+            prediction_loss_only=True,
             gradient_accumulation_steps=args.accum,
             learning_rate=args.lr,
             lr_scheduler_type="cosine",
             warmup_ratio=0.05,
             logging_steps=10,
             eval_strategy="epoch",
-            save_strategy="epoch",
+            # Save on steps, not epochs: an epoch-end crash otherwise
+            # loses the whole epoch (see above — it did).
+            save_strategy="steps",
+            save_steps=80,
             save_total_limit=2,
             bf16=True,
             report_to=[],
