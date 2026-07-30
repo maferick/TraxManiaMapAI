@@ -173,6 +173,16 @@ def main() -> int:
     model = AutoModelForCausalLM.from_pretrained(
         args.base, torch_dtype=torch.bfloat16, device_map="cuda:0")
     if not args.baseline:
+        # An adapter trained with a resized embedding will not load
+        # against the stock base unless the row counts match, so adopt
+        # the checkpoint's size before applying it.
+        import safetensors.torch as _st
+        sd = _st.load_file(str(args.adapter / "adapter_model.safetensors"))
+        for k, v in sd.items():
+            if k.endswith("embed_tokens.weight"):
+                if v.shape[0] != model.get_input_embeddings().weight.shape[0]:
+                    model.resize_token_embeddings(v.shape[0])
+                break
         model = PeftModel.from_pretrained(model, str(args.adapter))
     model.eval()
 
@@ -209,7 +219,10 @@ def main() -> int:
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(
-            {"metrics": m, "samples": texts[:5]}, indent=1), encoding="utf-8")
+            # Write every sample, not a preview slice: realise_generated_map
+            # consumes this file to build actual .Map.Gbx artifacts, and
+            # truncating here silently caps how many maps can be tested.
+            {"metrics": m, "samples": texts}, indent=1), encoding="utf-8")
     return 0
 
 

@@ -20,18 +20,25 @@ const string PLUGIN_VERSION = "api-probe-v0.1";
 // Classes worth dumping. CSmScriptPlayer is the one AIReplayTelemetry
 // already samples from.
 const array<string> TYPES = {
-    "CSmScriptPlayer",
-    "CSmPlayer",
-    "CSmArenaClient",
-    "CSmScriptPlayerScore",
+    "CGameCtnEditorFree",
+    "CGameEditorPluginMap",
+    "CGameCtnEditorCommon",
+    "CTrackMania",
     "CGameCtnChallenge"
 };
 
 // Substrings worth calling out in the log, so the answer is visible
 // without reading 400 member names.
+// Second question (2026-07-29): leaving the editor raises a modal
+// "The map has been changed. Do you want to save your changes?", which
+// swallows BackToMainMenu() and makes load_map return the PREVIOUS
+// map. Looking for whatever marks the map clean, or quits without
+// prompting, so the answer is given in-process instead of by clicking
+// the screen.
 const array<string> INTERESTING = {
-    "espawn", "eset", "Lap", "lap", "Checkpoint", "heckpoint",
-    "Finish", "inish", "RaceState", "StartTime", "Spawn"
+    "Modif", "modif", "Dirty", "dirty", "Save", "save",
+    "Quit", "quit", "Exit", "exit", "Close", "close",
+    "Prompt", "prompt", "Dialog", "dialog", "Changed", "changed"
 };
 
 

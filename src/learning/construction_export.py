@@ -60,6 +60,7 @@ class ExportStats:
     jumps: int = 0
     gaps: int = 0
     skipped: int = 0
+    post_finish_visits: int = 0   # dropped: entered after finish_time_ms
     vocabulary: set = field(default_factory=set)
 
     def as_dict(self) -> dict[str, Any]:
@@ -72,6 +73,7 @@ class ExportStats:
             "jumps": self.jumps,
             "gaps": self.gaps,
             "skipped": self.skipped,
+            "post_finish_visits": self.post_finish_visits,
             "vocabulary_size": len(self.vocabulary),
         }
 
@@ -217,6 +219,22 @@ def export_sequences(conn, out_path, *, extractor_version: str) -> ExportStats:
                     (replay_id,),
                 )
                 meta = cur.fetchone()
+
+            # Truncate at the finish crossing. MEASURED 2026-07-29:
+            # without this, 51% of exported sequences had no Finish
+            # block and ended on *Base scenery instead -- the ghost
+            # keeps recording after the line, so the sequence tail was
+            # post-finish coasting, and the trained model then ended 29%
+            # of its generations "anywhere", which the editor rejects.
+            # Every replay here finished (finish_time_ms is the ground
+            # truth), so visits entered after that instant are not part
+            # of the run. The visit STRADDLING the line is kept.
+            finish_ms = meta[1] if meta else None
+            if finish_ms:
+                kept_visits = [v for v in visits
+                               if v["enter_ms"] <= finish_ms]
+                stats.post_finish_visits += len(visits) - len(kept_visits)
+                visits = kept_visits
 
             tokens = visits_to_tokens(visits, placements, stats)
             if not tokens:

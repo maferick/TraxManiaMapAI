@@ -77,6 +77,10 @@ def main() -> int:
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--accum", type=int, default=4)
     ap.add_argument("--max-len", type=int, default=1024)
+    ap.add_argument("--drop-overlong", action="store_true",
+                    help="drop sequences longer than max-len instead of "
+                         "truncating them (truncation clips the Finish "
+                         "and teaches 'end anywhere')")
     ap.add_argument("--eval-frac", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=13)
     ap.add_argument("--dump-split", type=Path, default=None,
@@ -119,6 +123,23 @@ def main() -> int:
     if tok.pad_token is None or tok.pad_token_id == tok.eos_token_id:
         tok.add_special_tokens({"pad_token": "<|pad|>"})
 
+    if args.drop_overlong:
+        # Drop whole sequences that exceed max_len instead of letting
+        # the encoder truncate them. Truncation is the one thing the
+        # raw-map corpus must never meet: a map cut mid-sequence loses
+        # its Finish and teaches "end anywhere" — the exact defect the
+        # 2026-07-29 in-game run traced to the telemetry corpus (69% of
+        # NotValidable verdicts were missing-finish). Losing the 0.1%
+        # longest maps entirely is the cheaper bias.
+        def fits(t):
+            return len(tok(t + tok.eos_token)["input_ids"]) <= args.max_len
+
+        n_tr, n_ev = len(train_texts), len(eval_texts)
+        train_texts = [t for t in train_texts if fits(t)]
+        eval_texts = [t for t in eval_texts if fits(t)]
+        _LOG.info("drop-overlong: removed %d train / %d eval sequences",
+                  n_tr - len(train_texts), n_ev - len(eval_texts))
+
     def encode(batch):
         out = tok(
             [t + tok.eos_token for t in batch["text"]],
@@ -133,8 +154,12 @@ def main() -> int:
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.bfloat16, device_map="cuda:0")
-    # The added pad token grows the vocabulary by one.
-    if len(tok) != model.get_input_embeddings().weight.shape[0]:
+    # Only ever GROW. Qwen ships an embedding matrix padded well past
+    # the tokenizer length (151,936 rows vs 151,665 tokens), so resizing
+    # to len(tok) SHRINKS it and the checkpoint then refuses to load
+    # against a stock base model. The new pad id fits in the existing
+    # rows, so usually nothing needs to happen at all.
+    if len(tok) > model.get_input_embeddings().weight.shape[0]:
         model.resize_token_embeddings(len(tok))
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
@@ -146,8 +171,82 @@ def main() -> int:
     ))
     model.print_trainable_parameters()
 
+    class ChunkedLossTrainer(Trainer):
+        """Cross-entropy in checkpointed chunks along the sequence.
+
+        MEASURED (v0.5, 2026-07-29): HF's stock causal-LM loss
+        materialises the full fp32 logits for the whole sequence —
+        seq_len x 151,936 vocab — which spiked 16.05 GiB at 4,096
+        tokens and 8.97 GiB at 2,048, OOMing a 16 GB card twice (and
+        `expandable_segments` is not honoured on Windows, so 6.6 GiB
+        of fragmentation stacked on top). The model forward itself is
+        fine; only the loss upcast explodes.
+
+        Chunking alone would NOT fix it: every chunk's .float() copy
+        stays alive in the autograd graph, same peak. Wrapping each
+        chunk in torch.utils.checkpoint frees the fp32 copy after its
+        partial sum and recomputes it during backward, so the peak is
+        one 256-token chunk (~0.16 GiB) instead of the whole sequence.
+        Token-sum / valid-count normalisation, same semantics as the
+        stock loss for batch size 1.
+        """
+
+        def compute_loss(self, model, inputs, return_outputs=False,
+                         **kwargs):
+            import torch.utils.checkpoint as _ckpt
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+            shift_logits = outputs.logits[:, :-1, :]
+            shift_labels = labels[:, 1:]
+            valid = (shift_labels != -100).sum().clamp(min=1)
+
+            def chunk_ce(lg, lb):
+                return torch.nn.functional.cross_entropy(
+                    lg.float().reshape(-1, lg.shape[-1]), lb.reshape(-1),
+                    ignore_index=-100, reduction="sum")
+
+            chunk = 256
+            loss = shift_logits.new_zeros((), dtype=torch.float32)
+            for i in range(0, shift_logits.shape[1], chunk):
+                lb = shift_labels[:, i:i + chunk]
+                if (lb != -100).any():
+                    loss = loss + _ckpt.checkpoint(
+                        chunk_ce, shift_logits[:, i:i + chunk], lb,
+                        use_reentrant=False)
+            loss = loss / valid
+            return (loss, outputs) if return_outputs else loss
+
+    from transformers import TrainerCallback
+
+    class EmptyCacheCallback(TrainerCallback):
+        """Release cached allocator blocks every N steps.
+
+        MEASURED (v0.5 third launch): with wildly varying sequence
+        lengths (p50 947 / max 4571 tokens) the caching allocator
+        fragments until a long sequence no longer fits contiguously,
+        Windows WDDM then silently spills to SHARED memory, and step
+        time goes 10 s -> 436 s without any error. Flushing the cache
+        periodically costs milliseconds and keeps allocations packed.
+        """
+
+        def on_step_end(self, targs, state, control, **kwargs):
+            # With pad_to_multiple_of quantising shapes, flushes are
+            # insurance, not the fix — rare on purpose, since each one
+            # forces slow re-warming cudaMallocs on the next step.
+            if state.global_step % 100 == 0:
+                torch.cuda.empty_cache()
+            if state.global_step % 50 == 0:
+                # Telemetry for the spill failure mode: if reserved
+                # runs far ahead of allocated, fragmentation is
+                # rebuilding and a silent shared-memory crawl is next.
+                _LOG.info(
+                    "vram step %d: allocated %.2f GiB, reserved %.2f GiB",
+                    state.global_step,
+                    torch.cuda.memory_allocated() / 2**30,
+                    torch.cuda.memory_reserved() / 2**30)
+
     args.out.mkdir(parents=True, exist_ok=True)
-    trainer = Trainer(
+    trainer = ChunkedLossTrainer(
         model=model,
         args=TrainingArguments(
             output_dir=str(args.out),
@@ -167,7 +266,17 @@ def main() -> int:
         ),
         train_dataset=ds_train,
         eval_dataset=ds_eval,
-        data_collator=DataCollatorForLanguageModeling(tok, mlm=False),
+        # pad_to_multiple_of quantises batch shapes to a handful of
+        # sizes. MEASURED (vram_probe, 2026-07-29): one full step at
+        # 2048 peaks at 3.40 GiB — yet live runs climbed to 15.6 GiB
+        # and died with driver-level OOMs. The difference is the
+        # allocator: ~990 distinct sequence lengths each reserve new
+        # cache blocks until the pool fragments beyond recovery.
+        # Four shapes instead of a thousand costs ~15% pad compute
+        # (labels on pads are masked) and removes the failure mode.
+        data_collator=DataCollatorForLanguageModeling(
+            tok, mlm=False, pad_to_multiple_of=512),
+        callbacks=[EmptyCacheCallback()],
     )
     trainer.train()
     trainer.save_model(str(args.out / "final"))

@@ -30,7 +30,7 @@
 //   {"op":"save","name":"MyMap"}
 //   {"op":"validate"}
 
-const string PLUGIN_VERSION = "tm-map-control-v0.2";
+const string PLUGIN_VERSION = "tm-map-control-v0.4";
 const string PROTOCOL = "tm_mcp_v1";
 const int SCAN_INTERVAL_MS = 400;
 
@@ -166,6 +166,45 @@ void ProcessCommand(const string &in inPath) {
             // found an editor — so calling this from the menu-ish
             // limbo the game sits in after quitting a map failed
             // silently and burned the full 60s wait.
+            // Leave an open editor through the editor's OWN quit path
+            // before touching the menu.
+            //
+            // MEASURED 2026-07-29: merely opening a generated map dirties
+            // it (the editor normalises the file on load), so leaving
+            // raises the modal "The map has been changed. Do you want to
+            // save your changes?". That modal swallows BackToMainMenu(),
+            // the old editor stays up, and load_map then reports success
+            // holding the PREVIOUS map — a whole 5-map validation run came
+            // back as one map measured five times.
+            //
+            // QuickQuit() is the no-prompt path (reflection over
+            // CGameEditorPluginMap lists Quit / QuickQuit /
+            // *AndSetResult; plain Quit is the one that asks). Discarding
+            // is correct here: the .Map.Gbx on disk is the artifact under
+            // test and the editor must not rewrite it.
+            // MEASURED 2026-07-30: QuickQuit alone did NOT close a
+            // dirtied editor — three consecutive loads found it still
+            // holding the old map 35+ s later. Whatever raises the
+            // "save your changes?" prompt survives it. The prompt is a
+            // game-side yes/no dialog, so ANSWER it from here:
+            // CGameApp.BasicDialogs (Openplanet.h:255) exposes
+            // AskYesNo_No(). "No" is the only correct answer — the
+            // .Map.Gbx on disk is the artifact under test and the
+            // editor must never rewrite it. Calling it with no dialog
+            // up is a no-op, so it rides the whole wait loop.
+            if (editor !is null) {
+                auto quitPmt = editor.PluginMapType;
+                if (quitPmt !is null) {
+                    quitPmt.QuickQuit();
+                }
+                for (int i = 0; i < 75; i++) {
+                    yield();
+                    if (cast<CGameCtnEditorFree>(app.Editor) is null) break;
+                    app.BasicDialogs.AskYesNo_No();
+                    sleep(200);
+                }
+            }
+            res["quick_quit_used"] = (editor !is null);
             app.BackToMainMenu();
             // Wait for the OLD editor to actually go away first. Without
             // this the loop below finds the editor that is still open,
@@ -176,6 +215,9 @@ void ProcessCommand(const string &in inPath) {
             while (cast<CGameCtnEditorFree>(app.Editor) !is null
                    && Time::Stamp < waitUntil) {
                 yield();
+                // Keep dismissing the save prompt here too — the
+                // BackToMainMenu path can raise it independently.
+                app.BasicDialogs.AskYesNo_No();
                 sleep(200);
             }
             res["editor_closed"] =
